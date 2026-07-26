@@ -62,3 +62,29 @@ function requestMotionUpdate() {
 window.addEventListener("scroll", requestMotionUpdate, { passive: true });
 window.addEventListener("resize", requestMotionUpdate);
 updateMotion();
+
+const stepCards = [...document.querySelectorAll("[data-step]")];
+const stepObserver = new IntersectionObserver(
+  (entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      const index = stepCards.indexOf(entry.target);
+      window.setTimeout(() => entry.target.style.setProperty("--step-progress", "1"), index * 140);
+      stepObserver.unobserve(entry.target);
+    });
+  },
+  { threshold: 0.28 }
+);
+
+stepCards.forEach((card) => {
+  stepObserver.observe(card);
+  card.addEventListener("pointermove", (event) => {
+    const rect = card.getBoundingClientRect();
+    card.style.setProperty("--mx", ((event.clientX - rect.left) / rect.width - 0.5).toFixed(2));
+    card.style.setProperty("--my", ((event.clientY - rect.top) / rect.height - 0.5).toFixed(2));
+  });
+  card.addEventListener("pointerleave", () => {
+    card.style.setProperty("--mx", "0");
+    card.style.setProperty("--my", "0");
+  });
+});
