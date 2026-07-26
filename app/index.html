@@ -83,11 +83,12 @@
           <label>Decimals<input data-token-decimals type="number" value="6" min="0" max="9" /></label>
           <label>Initial supply <span>(optional)</span><input data-token-supply type="number" min="0" step="1" placeholder="1,000,000" /></label>
         </div>
-        <label>Seed liquidity in THRU <span>(optional · 1 THRU = 500 tokens)</span><input data-token-liquidity type="number" min="0" step="0.00000001" placeholder="100" /></label>
+        <label>Seed liquidity in THRU <span>(optional · no 100 THRU minimum)</span><input data-token-liquidity type="number" min="0" step="0.000000001" placeholder="0.0001" /></label>
+        <small>Launch price: 1 THRU = 500 tokens. Leave liquidity blank to deploy the mint without a trading pool.</small>
         <small>Trading fee: 0.21% accrues to the creator-held LP position; 0.09% routes to Genesis.</small>
         <label>Description<textarea data-token-description placeholder="Describe the token and its purpose"></textarea></label>
-        <button class="ink-button" type="submit" data-create>Connect wallet to continue</button>
         <small data-create-status>Your Thru key is generated or imported locally. Genesis never sends it to a server or stores it after this tab closes.</small>
+        <button class="ink-button" type="submit" data-create>Connect wallet to continue</button>
       </form>
     </section>
 
@@ -163,8 +164,19 @@
             <div><button type="button" data-copy-address>Copy address</button><a data-explorer target="_blank" rel="noreferrer noopener">View explorer ↗</a></div>
           </div>
           <div class="balance-row"><span>Test balance</span><strong data-balance>—</strong></div>
-          <button class="ink-button wallet-primary" type="button" data-faucet>Claim 10,000 test tokens</button>
+          <button class="ink-button wallet-primary" type="button" data-faucet>Claim faucet THRU</button>
           <p class="faucet-status" data-faucet-status aria-live="polite">Free Alphanet tokens have no monetary value. Claims are signed locally and submitted directly to Thru.</p>
+          <section class="wallet-transfer">
+            <p class="eyebrow">Send THRU</p>
+            <label>Recipient address<input data-send-address type="text" autocomplete="off" spellcheck="false" placeholder="ta…" /></label>
+            <label>Amount in THRU<input data-send-amount type="number" min="0" step="0.000000001" placeholder="0.00001" /></label>
+            <button class="plain-button" type="button" data-send>Send</button>
+            <p data-send-status aria-live="polite">Transfers are signed locally. One raw unit is reserved for the network fee.</p>
+          </section>
+          <section class="wallet-receive">
+            <p class="eyebrow">Receive THRU</p>
+            <p>Share the account address shown above. Use “Copy address” to copy it without exposing your private key.</p>
+          </section>
           <button class="wallet-disconnect" type="button" data-disconnect>Disconnect this tab</button>
         </div>
       </section>

@@ -48,6 +48,7 @@ const WTHRU_PROGRAM = "taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcH";
 const WTHRU_MINT = "tacdgTUGud8OgzN5HnVVv4u3x82UBe8ciZAtjOLJZE_SNg";
 const WTHRU_VAULT = "tavBundQnIZaeuFuzQyydWytISqLWedn49iLRXsBj085lN";
 const GENESIS_TREASURY = "taiaYuGAgf-2J9upK3T_SqH4f6Q7eqtABqw3MjsS7ZR6rK";
+const NATIVE_THRU_DECIMALS = 9;
 const WTHRU_DECIMALS = 8;
 const CREATOR_FEE_BPS = 21;
 const PROTOCOL_FEE_BPS = 9;
@@ -159,7 +160,7 @@ async function refreshBalance() {
   const balance = document.querySelector("[data-balance]");
   try {
     const snapshot = await getAccountSnapshot();
-    balance.textContent = snapshot.balance.toLocaleString();
+    balance.textContent = `${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
   } catch {
     balance.textContent = "Unavailable";
   }
@@ -364,7 +365,7 @@ function derivePool(mintAddress) {
 async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount, setStatus }) {
   const pool = derivePool(mint.address);
   const creatorWthru = await ensureTokenAccount(connectedAccount.address, WTHRU_MINT);
-  setStatus(`Wrapping ${formatUnits(thruAmount, WTHRU_DECIMALS)} THRU…`);
+  setStatus(`Wrapping ${formatUnits(thruAmount, NATIVE_THRU_DECIMALS, 9)} THRU…`);
   await wrapThru(thruAmount, creatorWthru);
 
   if (!(await getAccountSnapshot(pool.poolAddress)).exists) {
@@ -438,7 +439,7 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
     mintTwo: pool.mintTwoAddress,
     creatorLpAccount: creatorLp.address,
     creatorWthruAccount: creatorWthru.address,
-    seededThru: formatUnits(thruAmount, WTHRU_DECIMALS),
+    seededThru: formatUnits(thruAmount, NATIVE_THRU_DECIMALS, 9),
     seededTokens: formatUnits(tokenAmount, decimals),
   };
 }
@@ -473,13 +474,13 @@ async function createToken() {
   const supply = supplyText ? BigInt(supplyText) : 0n;
   let liquidityThru;
   try {
-    liquidityThru = liquidityText ? parseUnits(liquidityText, WTHRU_DECIMALS) : 0n;
+    liquidityThru = liquidityText ? parseUnits(liquidityText, NATIVE_THRU_DECIMALS) : 0n;
   } catch (reason) {
     createStatus.textContent = reason.message;
     return;
   }
   const liquidityTokens = liquidityThru * PRICE_TOKENS_PER_THRU *
-    (10n ** BigInt(decimals)) / (10n ** BigInt(WTHRU_DECIMALS));
+    (10n ** BigInt(decimals)) / (10n ** BigInt(NATIVE_THRU_DECIMALS));
   if (liquidityThru > 0n && liquidityTokens < 1000n) {
     createStatus.textContent = "Seed a larger amount; the pool requires at least 1,000 raw token units.";
     return;
@@ -493,6 +494,13 @@ async function createToken() {
   try {
     createStatus.textContent = "Preparing your Thru account…";
     await ensureAccountExists((message) => { createStatus.textContent = message; });
+    const nativeBalance = await getAccountSnapshot();
+    if (liquidityThru > 0n && nativeBalance.balance < liquidityThru + 1n) {
+      throw new Error(
+        `Insufficient balance: you have ${formatUnits(nativeBalance.balance, NATIVE_THRU_DECIMALS, 9)} THRU. ` +
+        "Lower the optional liquidity amount or leave it blank.",
+      );
+    }
 
     const authority = connectedAccount.publicKey;
     const seed = randomHex(32);
@@ -650,7 +658,8 @@ async function claimFaucet() {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 3000));
       const updated = await getAccountSnapshot();
-      document.querySelector("[data-balance]").textContent = updated.balance.toLocaleString();
+      document.querySelector("[data-balance]").textContent =
+        `${formatUnits(updated.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
       if (updated.balance > snapshot.balance) {
         setStatus("Test tokens received on Thru.");
         return;
@@ -659,6 +668,45 @@ async function claimFaucet() {
     setStatus("Claim confirmed. The balance may take another moment to update.");
   } catch (reason) {
     setStatus(`${reason instanceof Error ? reason.message : "Faucet claim failed."} You can also use faucet.thruscan.net.`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function sendThru() {
+  if (!connectedAccount) return openWallet();
+  const button = document.querySelector("[data-send]");
+  const status = document.querySelector("[data-send-status]");
+  const recipientText = document.querySelector("[data-send-address]").value.trim();
+  const amountText = document.querySelector("[data-send-amount]").value.trim();
+  let recipient;
+  let amount;
+  try {
+    recipient = Pubkey.from(recipientText);
+    amount = parseUnits(amountText, NATIVE_THRU_DECIMALS);
+    if (amount <= 0n) throw new Error("Enter an amount greater than zero.");
+    if (recipient.toThruFmt() === connectedAccount.address) throw new Error("Enter a different recipient address.");
+  } catch (reason) {
+    status.textContent = reason instanceof Error ? reason.message : "Enter a valid Thru address and amount.";
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    const snapshot = await getAccountSnapshot();
+    if (snapshot.balance < amount + 1n) {
+      throw new Error(`Insufficient balance. Available: ${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU.`);
+    }
+    status.textContent = `Sending ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU…`;
+    await submitProgramInstruction(EOA_PROGRAM, {
+      accounts: { readWrite: [recipient] },
+      instructionData: nativeTransferInstruction(amount),
+      fee: 1n,
+    });
+    status.textContent = `Sent ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU to ${compactAddress(recipient.toThruFmt())}.`;
+    await refreshBalance();
+  } catch (reason) {
+    status.textContent = reason instanceof Error ? reason.message : "Transfer failed on Thru.";
   } finally {
     button.disabled = false;
   }
@@ -707,6 +755,7 @@ document.querySelectorAll("[data-reveal]").forEach((button) => button.addEventLi
   button.textContent = input.type === "password" ? "Show" : "Hide";
 }));
 document.querySelector("[data-faucet]")?.addEventListener("click", claimFaucet);
+document.querySelector("[data-send]")?.addEventListener("click", sendThru);
 document.querySelector("[data-disconnect]")?.addEventListener("click", () => {
   if (connectedAccount) connectedAccount.privateKey.fill(0);
   connectedAccount = null;
@@ -807,7 +856,7 @@ async function executeTrade() {
   const value = document.querySelector("[data-trade-amount]").value;
   let amount;
   try {
-    amount = parseUnits(value, activeSide === "buy" ? WTHRU_DECIMALS : activeTrade.decimals);
+    amount = parseUnits(value, activeSide === "buy" ? NATIVE_THRU_DECIMALS : activeTrade.decimals);
     if (amount <= 0n) throw new Error("Enter an amount greater than zero.");
   } catch (reason) {
     status.textContent = reason.message;
@@ -830,7 +879,7 @@ async function executeTrade() {
     const treasuryAccount = await ensureTokenAccount(GENESIS_TREASURY, feeMint);
 
     if (activeSide === "buy") {
-      status.textContent = `Wrapping ${formatUnits(amount, WTHRU_DECIMALS)} faucet THRU…`;
+      status.textContent = `Wrapping ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} faucet THRU…`;
       await wrapThru(amount, userWthru);
     }
 
@@ -868,11 +917,11 @@ document.querySelector("[data-trade-amount]")?.addEventListener("input", (event)
     return;
   }
   try {
-    const raw = parseUnits(event.target.value, activeSide === "buy" ? WTHRU_DECIMALS : activeTrade.decimals);
+    const raw = parseUnits(event.target.value, activeSide === "buy" ? NATIVE_THRU_DECIMALS : activeTrade.decimals);
     const afterFees = raw * 9970n / 10000n;
     quote.textContent = activeSide === "buy"
-      ? `≈ ${formatUnits(afterFees * PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals)) / (10n ** BigInt(WTHRU_DECIMALS)), activeTrade.decimals)} ${activeTrade.ticker}`
-      : `≈ ${formatUnits(afterFees * (10n ** BigInt(WTHRU_DECIMALS)) / (PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals))), WTHRU_DECIMALS)} WTHRU`;
+      ? `≈ ${formatUnits(afterFees * PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals)) / (10n ** BigInt(NATIVE_THRU_DECIMALS)), activeTrade.decimals)} ${activeTrade.ticker}`
+      : `≈ ${formatUnits(afterFees * (10n ** BigInt(NATIVE_THRU_DECIMALS)) / (PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals))), NATIVE_THRU_DECIMALS, 9)} WTHRU`;
   } catch {
     quote.textContent = "—";
   }

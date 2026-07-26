@@ -276,6 +276,47 @@
   font-size: 11px !important;
 }
 
+.wallet-transfer,
+.wallet-receive {
+  margin-top: 24px;
+  padding: 20px;
+  border: 1px solid var(--line);
+}
+
+.wallet-transfer label {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.wallet-transfer input {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  outline: 0;
+  background: var(--light);
+  color: var(--ink);
+  font: 13px monospace;
+}
+
+.wallet-transfer .plain-button {
+  width: 100%;
+  margin-top: 14px;
+  cursor: pointer;
+}
+
+.wallet-transfer > p:last-child,
+.wallet-receive > p:last-child {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .wallet-disconnect {
   display: block;
   margin: 16px auto 0;
