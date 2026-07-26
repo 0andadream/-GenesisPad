@@ -377,10 +377,10 @@ static void handle_init(uchar const *data, ulong size) {
     ERR_POOL_ACCOUNT_SYSCALL
   );
   TSDK_ASSERT_OR_REVERT(
-    tsys_account_resize(pool_idx, POOL_DATA_SIZE) == 0, ERR_ACCOUNT_RESIZE
+    tsys_set_account_data_writable(pool_idx) == 0, ERR_ACCOUNT_WRITABLE
   );
   TSDK_ASSERT_OR_REVERT(
-    tsys_set_account_data_writable(pool_idx) == 0, ERR_ACCOUNT_WRITABLE
+    tsys_account_resize(pool_idx, POOL_DATA_SIZE) == 0, ERR_ACCOUNT_RESIZE
   );
 
   uchar lp_seed_input[39];
