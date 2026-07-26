@@ -339,7 +339,7 @@ static void handle_init(uchar const *data, ulong size) {
   ushort mint_two = load_u16(data + 12);
   ushort token_program = load_u16(data + 14);
   ushort fee_bps = load_u16(data + 16);
-  uchar const *lp_seed = data + 18;
+  uchar const *pool_seed = data + 18;
   ulong pool_proof_size = load_u64(data + 50);
   ulong lp_proof_size = load_u64(data + 58);
   ulong one_proof_size = load_u64(data + 66);
@@ -368,13 +368,6 @@ static void handle_init(uchar const *data, ulong size) {
     fee_bps > 0 && fee_bps <= GENESIS_AMM_MAX_FEE_BPS, ERR_LIQUIDITY_BOUNDS
   );
 
-  uchar pool_seed_input[66];
-  uchar pool_seed[32];
-  memcpy(pool_seed_input, key_at(mint_one), 32);
-  memcpy(pool_seed_input + 32, key_at(mint_two), 32);
-  TSDK_STORE(ushort, pool_seed_input + 64, fee_bps);
-  tsdk_sha256_hash(pool_seed_input, sizeof(pool_seed_input), pool_seed);
-
   tn_pubkey_t expected;
   tsdk_create_program_defined_account_address(
     tsdk_get_current_program_acc_addr(), 0U, pool_seed, &expected
@@ -399,6 +392,11 @@ static void handle_init(uchar const *data, ulong size) {
     tsys_set_account_data_writable(pool_idx) == 0, ERR_ACCOUNT_WRITABLE
   );
 
+  uchar lp_seed_input[39];
+  uchar lp_seed[32];
+  memcpy(lp_seed_input, key_at(pool_idx), 32);
+  memcpy(lp_seed_input + 32, "lp_mint", 7);
+  tsdk_sha256_hash(lp_seed_input, sizeof(lp_seed_input), lp_seed);
   token_initialize_mint(
     token_program, lp_mint, pool_idx, lp_seed, lp_proof, lp_proof_size
   );
