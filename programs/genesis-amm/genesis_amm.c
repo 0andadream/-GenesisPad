@@ -19,7 +19,6 @@
 #define ERR_LP_MINT_MISMATCH 19UL
 #define ERR_REENTRANT 20UL
 #define ERR_OVERFLOW 21UL
-#define ERR_POOL_ADDRESS_MISMATCH 22UL
 #define ERR_POOL_ACCOUNT_SYSCALL 23UL
 
 #define POOL_DATA_SIZE 203UL
@@ -366,14 +365,6 @@ static void handle_init(uchar const *data, ulong size) {
   );
   TSDK_ASSERT_OR_REVERT(
     fee_bps > 0 && fee_bps <= GENESIS_AMM_MAX_FEE_BPS, ERR_LIQUIDITY_BOUNDS
-  );
-
-  tn_pubkey_t expected;
-  tsdk_create_program_defined_account_address(
-    tsdk_get_current_program_acc_addr(), 0U, pool_seed, &expected
-  );
-  TSDK_ASSERT_OR_REVERT(
-    key_eq(&expected, key_at(pool_idx)), ERR_POOL_ADDRESS_MISMATCH
   );
 
   uchar const *pool_proof = data + 82;
