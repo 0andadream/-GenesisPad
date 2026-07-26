@@ -9,6 +9,15 @@ await mkdir(output, { recursive: true });
 await cp(new URL("index.html", root), new URL("index.html", output));
 await cp(new URL("styles.css", root), new URL("styles.css", output));
 await cp(new URL("app.js", root), new URL("app.js", output));
+await build({
+  entryPoints: [new URL("scene.js", root).pathname],
+  outfile: new URL("scene.js", output).pathname,
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "es2020",
+  minify: true,
+});
 await cp(new URL("app/", root), new URL("app/", output), { recursive: true });
 await build({
   entryPoints: [new URL("app/app.js", root).pathname],

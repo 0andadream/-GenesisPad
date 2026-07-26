@@ -3,152 +3,83 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#d8c6a2" />
-    <title>Genesis — The foundational DEX on Thru</title>
-    <meta name="description" content="GenesisDex is a lightning-fast, capital-efficient orderbook + AMM hybrid exchange built on Thru." />
-    <meta property="og:title" content="Genesis — Markets, reborn on-chain" />
-    <meta property="og:description" content="Centralized exchange speed. True on-chain settlement. Complete self custody." />
-    <meta property="og:type" content="website" />
-    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="description" content="GenesisDex — the foundational orderbook and AMM hybrid exchange built on Thru." />
+    <meta name="theme-color" content="#f4f4f2" />
+    <title>Genesis — Built on Thru</title>
     <link rel="icon" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
-    <script src="/app.js" defer></script>
   </head>
   <body>
+    <div class="webgl-shell" aria-hidden="true"><canvas data-sculpture></canvas><div class="canvas-fallback"></div></div>
     <header class="site-header">
-      <a class="brand" href="#home" aria-label="Genesis home">
-        <span class="brand-mark">G</span>
-        <span class="brand-name">Genesis</span>
-        <i></i>
-      </a>
-      <nav class="nav-pill" aria-label="Main navigation">
-        <a href="#home">Home</a>
-        <a href="#how">How it works</a>
-        <a href="#why">Why Genesis</a>
-        <a href="#liquidity">Liquidity</a>
-        <a href="#launch">Launch</a>
-      </nav>
-      <div class="header-actions">
-        <a class="text-button" href="/app/">Sign in</a>
-        <a class="gold-button" href="/app/">Launch app</a>
-      </div>
-      <button class="menu-button" type="button" aria-label="Open navigation" aria-expanded="false">Menu</button>
+      <a class="brand" href="#home"><span>G</span><strong>GENESIS</strong></a>
+      <nav><a href="#protocol">Protocol</a><a href="#engine">Engine</a><a href="#principles">Principles</a></nav>
+      <a class="launch-link" href="/app/">Launch app <i>↗</i></a>
     </header>
 
     <main>
-      <section class="hero" id="home">
-        <div class="hero-art" aria-hidden="true"></div>
-        <div class="hero-shade"></div>
-        <div class="hero-content shell">
-          <p class="overline">Built on Thru · Powered by ThruVM</p>
-          <h1>Markets, <span class="hand">reborn</span><br />on-chain.</h1>
-          <p class="hero-copy">GenesisDex is the foundational DEX built on Thru—a lightning-fast, capital-efficient orderbook + AMM hybrid exchange.</p>
-          <div class="hero-actions">
-            <a class="gold-button large" href="/app/">Enter Genesis</a>
-            <a class="quiet-link" href="#how">Discover the protocol <span>↓</span></a>
-          </div>
-          <div class="market-tape" aria-label="Protocol status">
-            <span>GEN / USDC</span>
-            <strong>••••••</strong>
-            <span>On-chain settlement</span>
-            <strong>Self custody</strong>
-          </div>
+      <section class="hero panel" id="home" data-scene="0">
+        <div class="hero-index">I</div>
+        <div class="hero-copy">
+          <p class="kicker">The foundational DEX on Thru</p>
+          <h1>Order,<br />made <em>liquid.</em></h1>
+          <p class="lede">A capital-efficient orderbook and AMM hybrid. Centralized exchange velocity with true on-chain settlement and self custody.</p>
+          <div class="hero-actions"><a class="solid-button" href="/app/">Enter Genesis</a><a class="line-link" href="#protocol">Read the protocol</a></div>
         </div>
+        <div class="scroll-note"><span></span>Scroll to fracture</div>
+        <p class="scene-caption">Marble study № 01<br />Liquidity in equilibrium</p>
       </section>
 
-      <section class="stats" aria-label="Genesis protocol statistics">
-        <div><strong data-stat="volume">$0</strong><span>Total volume</span></div>
-        <div><strong data-stat="tvl">$0</strong><span>Total value locked</span></div>
-        <div><strong data-stat="trades">0</strong><span>Trades settled</span></div>
-        <div><strong data-stat="markets">0</strong><span>Live markets</span></div>
-        <div><strong data-stat="users">0</strong><span>Active traders</span></div>
+      <section class="manifest panel" id="protocol" data-scene="1">
+        <div class="section-index">II — THE PROTOCOL</div>
+        <div class="manifest-copy">
+          <p class="kicker">One venue. Two engines.</p>
+          <h2>Every market finds<br />its <em>true form.</em></h2>
+          <p>Genesis routes intent through orderbook depth and constant AMM liquidity, then settles the result through ThruVM. No intermediary. No surrender of custody.</p>
+        </div>
+        <div class="protocol-stats">
+          <div><strong data-stat="volume">$0</strong><span>Total volume</span></div>
+          <div><strong data-stat="tvl">$0</strong><span>Value locked</span></div>
+          <div><strong data-stat="trades">0</strong><span>Trades settled</span></div>
+        </div>
+        <p class="scene-caption dark">Fragment study № 02<br />Form becomes execution</p>
       </section>
 
-      <section class="section shell" id="how">
-        <p class="section-label">How it works</p>
-        <div class="motion-stage" data-motion-stage>
-          <h2 class="motion-copy" aria-label="One venue. Two engines. Zero compromise.">
-            <span class="motion-word" data-motion-word>One venue.</span>
-            <span class="motion-word" data-motion-word>Two engines.</span>
-            <span class="motion-word hand" data-motion-word>Zero compromise.</span>
-          </h2>
-          <div class="flow-field" aria-hidden="true">
-            <div class="flow-axis axis-one"></div>
-            <div class="flow-axis axis-two"></div>
-            <div class="flow-axis axis-three"></div>
-            <span class="flow-node node-a"></span>
-            <span class="flow-node node-b"></span>
-            <span class="flow-node node-c"></span>
-            <span class="flow-node node-d"></span>
-            <div class="matching-core"><span>OB</span><i>+</i><span>AMM</span></div>
-            <div class="route-label route-left">Orders</div>
-            <div class="route-label route-right">Liquidity</div>
-            <div class="settlement-label">ThruVM settlement <i></i></div>
+      <section class="engine panel" id="engine" data-scene="2">
+        <div class="section-index">III — THE ENGINE</div>
+        <div class="engine-layout">
+          <div>
+            <p class="kicker">Execution without compromise</p>
+            <h2>Speed is<br />a <em>principle.</em></h2>
           </div>
-        </div>
-        <div class="step-grid" data-steps>
-          <article data-step>
-            <div class="step-visual order-visual" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
-            <span>01</span><h3>Place your order</h3><p>Trade with familiar limit and market orders through a high-performance on-chain orderbook.</p>
-          </article>
-          <article data-step>
-            <div class="step-visual route-visual" aria-hidden="true"><i></i><i></i><i></i><b></b><b></b></div>
-            <span>02</span><h3>Find the best route</h3><p>Genesis combines orderbook depth with AMM liquidity to execute against the most efficient path.</p>
-          </article>
-          <article data-step>
-            <div class="step-visual settle-visual" aria-hidden="true"><i></i><i></i><i></i><b></b></div>
-            <span>03</span><h3>Settle on Thru</h3><p>Every trade settles on-chain through ThruVM. Your assets remain in your custody from start to finish.</p>
-          </article>
-        </div>
-      </section>
-
-      <section class="engine-section" id="liquidity">
-        <div class="shell">
-          <div class="engine-heading">
-            <div><p class="section-label">The hybrid engine</p><h2>Liquidity that moves<br /><span class="hand">at market speed.</span></h2></div>
-            <p>Professional orderbook execution meets always-on AMM liquidity. Genesis routes every trade through the deepest available source without surrendering transparency or custody.</p>
-          </div>
-          <div class="orderbook market-visual" aria-label="Animated illustrative Genesis market chart">
-            <div class="book-title"><span>GEN / USDC</span><span><i></i> Market stream · Live</span></div>
-            <canvas data-market-chart></canvas>
-            <div class="chart-scale" aria-hidden="true"><span>1.014</span><span>1.006</span><span>0.998</span><span>0.990</span></div>
-            <div class="chart-hud">
-              <div><small>Index price</small><strong data-live-price>1.0024</strong></div>
-              <div><small>24h volume</small><strong>$0.00</strong></div>
-              <div><small>Spread</small><strong data-live-spread>0.02%</strong></div>
-            </div>
-            <div class="chart-legend"><span><i class="price-key"></i>Price</span><span><i class="depth-key"></i>Liquidity depth</span><em>ThruVM · Block 000000</em></div>
+          <div class="steps">
+            <article><span>01</span><h3>Place intent</h3><p>Market and limit orders enter a high-performance on-chain orderbook.</p></article>
+            <article><span>02</span><h3>Find depth</h3><p>The hybrid engine resolves the most capital-efficient route.</p></article>
+            <article><span>03</span><h3>Settle truth</h3><p>ThruVM records final settlement while assets remain in your custody.</p></article>
           </div>
         </div>
       </section>
 
-      <section class="section shell" id="why">
-        <p class="section-label">Why Genesis</p>
-        <h2>Centralized speed.<br />Decentralized truth.</h2>
-        <div class="benefit-grid">
-          <article><span class="glyph">Ⅰ</span><h3>Lightning fast</h3><p>ThruVM gives Genesis the responsiveness traders expect from a centralized venue, without the centralized intermediary.</p></article>
-          <article><span class="glyph">Ⅱ</span><h3>Capital efficient</h3><p>A hybrid liquidity model makes every unit of capital work harder across the orderbook and automated market maker.</p></article>
-          <article><span class="glyph">Ⅲ</span><h3>True settlement</h3><p>Trades are not database entries or promises. They settle on-chain with a verifiable, permanent record.</p></article>
-          <article><span class="glyph">Ⅳ</span><h3>Always self custody</h3><p>Your keys, your assets, your control. Genesis never asks you to trade ownership for performance.</p></article>
+      <section class="principles panel" id="principles" data-scene="3">
+        <div class="section-index">IV — FIRST PRINCIPLES</div>
+        <h2>Built like an institution.<br /><em>Owned by no institution.</em></h2>
+        <div class="principle-grid">
+          <article><b>Α</b><h3>Lightning fast</h3><p>Responsiveness measured in intent, not waiting.</p></article>
+          <article><b>Β</b><h3>Capital efficient</h3><p>Every unit of liquidity works across two engines.</p></article>
+          <article><b>Γ</b><h3>Self-custodial</h3><p>Your keys remain the final authority over your assets.</p></article>
+          <article><b>Δ</b><h3>On-chain truth</h3><p>Every execution resolves into a permanent public record.</p></article>
         </div>
       </section>
 
-      <section class="final-cta" id="launch">
-        <div class="cta-art" aria-hidden="true"></div>
-        <div class="shell">
-          <p class="section-label">The first market opens here</p>
-          <h2>Trade at the <span class="hand">beginning.</span></h2>
-          <p>Enter the foundational exchange of the Thru economy.</p>
-          <a class="gold-button large" href="/app/">Launch Genesis</a>
-        </div>
+      <section class="final panel" data-scene="4">
+        <p class="kicker">The market awaits</p>
+        <h2>Enter the<br /><em>new agora.</em></h2>
+        <a class="solid-button inverted" href="/app/">Launch Genesis</a>
       </section>
     </main>
 
-    <footer class="footer shell">
-      <div><a class="brand" href="#home"><span class="brand-mark">G</span><span class="brand-name">Genesis</span></a><p>The foundational orderbook + AMM hybrid DEX built on Thru.</p></div>
-      <div><h4>Protocol</h4><a href="#how">How it works</a><a href="#why">Why Genesis</a><a href="#liquidity">Liquidity</a></div>
-      <div><h4>Network</h4><span>ThruVM</span><span>On-chain settlement</span><span>Self custody</span></div>
-      <div class="footer-status"><span><i></i> Thru · Genesis phase</span><small>© 2026 GenesisDex</small></div>
-    </footer>
+    <footer><a class="brand" href="#home"><span>G</span><strong>GENESIS</strong></a><p>Orderbook + AMM. Built on ThruVM.</p><p>© 2026 Genesis</p></footer>
+    <script src="/app.js"></script>
+    <script src="/scene.js"></script>
   </body>
 </html>

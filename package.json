@@ -11,6 +11,8 @@
   "dependencies": {
     "@thru/sdk": "^0.3.0",
     "@thru/wallet": "^0.3.0",
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "gsap": "^3.15.0",
+    "three": "^0.185.1"
   }
 }

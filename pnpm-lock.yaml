@@ -17,6 +17,12 @@ importers:
       esbuild:
         specifier: ^0.28.1
         version: 0.28.1
+      gsap:
+        specifier: ^3.15.0
+        version: 3.15.0
+      three:
+        specifier: ^0.185.1
+        version: 0.185.1
 
 packages:
 
@@ -262,6 +268,9 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
+  gsap@3.15.0:
+    resolution: {integrity: sha512-dMW4CWBTUK1AEEDeZc1g4xpPGIrSf9fJF960qbTZmN/QwZIWY5wgliS6JWl9/25fpTGJrMRtSjGtOmPnfjZB+A==}
+
   micro-key-producer@0.9.0:
     resolution: {integrity: sha512-987j9gtkxCxH0KyNzkj9nq7K6JK/f8J1EJV8qBkEJI50CA/zEM7jBl7im36819mAww7oiFgmHsYzIe0m9v9b3Q==}
     hasBin: true
@@ -281,6 +290,9 @@ packages:
 
   scheduler@0.27.0:
     resolution: {integrity: sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q==}
+
+  three@0.185.1:
+    resolution: {integrity: sha512-5aojFCXKwnjBRZvUnt3WFfEcvUJgkN5LlijRFN95hMy8WVkG4I0QNcJE+OuWvuJ0bOdStrbfXn0pkd6/QyiAlg==}
 
   yaml@2.9.0:
     resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
@@ -446,6 +458,8 @@ snapshots:
       '@esbuild/win32-ia32': 0.28.1
       '@esbuild/win32-x64': 0.28.1
 
+  gsap@3.15.0: {}
+
   micro-key-producer@0.9.0:
     dependencies:
       '@noble/ciphers': 2.2.0
@@ -466,5 +480,7 @@ snapshots:
   react@19.2.8: {}
 
   scheduler@0.27.0: {}
+
+  three@0.185.1: {}
 
   yaml@2.9.0: {}
