@@ -1,0 +1,45 @@
+name: Genesis AMM
+
+on:
+  push:
+    paths:
+      - "programs/genesis-amm/**"
+      - ".github/workflows/genesis-amm.yml"
+  workflow_dispatch:
+
+jobs:
+  math-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run constant-product math tests
+        run: |
+          mkdir -p programs/genesis-amm/build
+          make -C programs/genesis-amm test
+
+  thruvm-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.1
+      - name: Install Thru toolchain and C SDK
+        run: |
+          pnpm add --global thru
+          thru dev toolchain install
+          thru dev sdk install c
+      - name: Compile Genesis AMM for ThruVM
+        run: |
+          make -C programs/genesis-amm -j2
+          curl --fail --location \
+            https://raw.githubusercontent.com/thru-network/thru/main/rpc/abi/type-library/tn_amm_program.abi.yaml \
+            --output programs/genesis-amm/build/genesis_amm.abi.yaml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: genesis-amm-thruvm
+          path: programs/genesis-amm/build/**
+          if-no-files-found: error
