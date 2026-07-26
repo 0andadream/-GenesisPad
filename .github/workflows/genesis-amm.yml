@@ -38,7 +38,7 @@ jobs:
         run: |
           make -C programs/genesis-amm -j2
           curl --fail --location \
-            https://raw.githubusercontent.com/thru-network/thru/main/rpc/abi/type-library/tn_amm_program.abi.yaml \
+            https://raw.githubusercontent.com/Unto-Labs/thru/main/rpc/abi/type-library/tn_amm_program.abi.yaml \
             --output programs/genesis-amm/build/genesis_amm.abi.yaml
       - uses: actions/upload-artifact@v4
         with:
