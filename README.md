@@ -1,98 +1,114 @@
-# vinext-starter
+# Genesis
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+![Genesis Ionic column mark](public/genesis-logo.png)
 
-## Prerequisites
+Genesis is a self-custodial token launchpad and hybrid exchange interface built
+for the Thru Alphanet. It combines token issuance, wrapped-THRU liquidity pools,
+and AMM trading in a restrained classical interface.
 
-- Node.js `>=22.13.0`
+**Live app:** [genesispad.vercel.app](https://genesispad.vercel.app/)
 
-## Quick Start
+## What Genesis does
+
+- Creates or imports a local Thru wallet from a 32-byte Ed25519 private key
+- Claims test THRU from the Alphanet faucet
+- Sends and receives native THRU
+- Deploys fungible token mints through the Thru token program
+- Optionally mints an initial token supply
+- Optionally seeds a wrapped-THRU AMM pool at launch
+- Provides Buy and Sell controls for markets with live liquidity
+- Links accounts to the Thru explorer
+
+Private keys remain in browser memory for the current tab. Genesis does not
+upload or persist them.
+
+## Launch economics
+
+The current launch configuration uses:
+
+| Setting | Value |
+| --- | ---: |
+| Opening price | 1 THRU = 500 launched tokens |
+| Creator/LP swap fee | 0.21% |
+| Genesis protocol fee | 0.09% |
+| Total trading fee | 0.30% |
+
+The 0.21% AMM fee accrues to liquidity providers. At launch, the creator holds
+the initial LP position. The 0.09% protocol share routes to the configured
+Genesis treasury.
+
+Liquidity is optional. A creator can deploy a mint without creating a trading
+pool and add liquidity later.
+
+## Network
+
+Genesis currently targets **Thru Alphanet**:
+
+- RPC: `https://rpc.alphanet.thru.org`
+- Token program: `taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKqq`
+- Wrapped-THRU program: `taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcH`
+- AMM program: provided by `@thru/programs`
+
+Alphanet THRU and launched tokens are test assets without monetary value.
+
+## Technology
+
+- Static HTML and CSS
+- Browser JavaScript bundled with esbuild
+- `@thru/sdk`
+- `@thru/programs`
+- GSAP and Three.js for landing-page motion
+- pnpm lockfile for reproducible installs
+
+The project intentionally does not use Next.js.
+
+## Local development
+
+Requirements:
+
+- Node.js 22
+- pnpm 10 or newer
+
+Install and build:
 
 ```bash
-npm install
-npm run dev
-npm run build
+pnpm install --frozen-lockfile
+pnpm build
 ```
 
-This starter does not use `wrangler.jsonc`.
+The deployable output is generated in `dist/`. Serve that directory with any
+static server:
 
-## Included Shape
-
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```bash
+pnpm dlx serve dist
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+## Project structure
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+```text
+.
+├── index.html          # Genesis landing page
+├── app.js              # Landing-page motion and statistics
+├── app/
+│   ├── index.html      # Launchpad application
+│   ├── app.js          # Wallet, faucet, mint, pool, and trade flows
+│   └── *.css           # Application and wallet styling
+├── public/             # Logo, sculpture, favicon, and public data
+├── scripts/build.mjs   # Static production build
+└── vercel.json         # Vercel build configuration
+```
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+## Current data model
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+Wallet keys are session-only. The local market registry is stored in browser
+`localStorage`, while token mints, balances, transfers, liquidity pools, and
+trades are submitted to Thru Alphanet.
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+For a production mainnet release, the registry should be backed by a shared
+indexer so markets and statistics remain consistent across browsers.
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+## Security
 
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+This is Alphanet software. Review and audit all transaction-building,
+fee-routing, wallet, and AMM code before using it with assets that have value.
+Never share a private key or wallet backup.
