@@ -57,6 +57,7 @@ const EOA_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ?
 const FAUCET_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 250 : 0);
 let connectedAccount = null;
 let generatedAccount = null;
+const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
 
 function compactAddress(address) {
   return address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "Connected";
@@ -129,6 +130,14 @@ async function importWallet() {
 function activateAccount(account) {
   connectedAccount = account;
   generatedAccount = null;
+  try {
+    sessionStorage.setItem(WALLET_SESSION_KEY, JSON.stringify({
+      privateKey: bytesToHex(account.privateKey),
+      createdAt: account.createdAt,
+    }));
+  } catch {
+    // The wallet still works when browser storage is unavailable.
+  }
   setWalletState(compactAddress(account.address));
   document.querySelector("[data-account-address]").textContent = account.address;
   document.querySelector("[data-explorer]").href = `https://scan.thru.org/account/${account.address}`;
@@ -136,6 +145,29 @@ function activateAccount(account) {
   if (createStatus) createStatus.textContent = "Thru wallet connected locally. The private key remains only in this browser tab.";
   showWalletView("account");
   refreshBalance();
+}
+
+async function restoreWalletSession() {
+  let stored;
+  try {
+    stored = sessionStorage.getItem(WALLET_SESSION_KEY);
+  } catch {
+    return;
+  }
+  if (!stored) return;
+  try {
+    const session = JSON.parse(stored);
+    const privateKey = hexToBytes(session.privateKey);
+    const publicKey = await client.keys.fromPrivateKey(privateKey);
+    activateAccount({
+      address: Pubkey.from(publicKey).toThruFmt(),
+      publicKey,
+      privateKey,
+      createdAt: Number(session.createdAt) || Date.now(),
+    });
+  } catch {
+    try { sessionStorage.removeItem(WALLET_SESSION_KEY); } catch { /* Storage is unavailable. */ }
+  }
 }
 
 async function getAccountSnapshot(address = connectedAccount.address) {
@@ -776,6 +808,7 @@ document.querySelector("[data-disconnect]")?.addEventListener("click", () => {
   if (connectedAccount) connectedAccount.privateKey.fill(0);
   connectedAccount = null;
   generatedAccount = null;
+  try { sessionStorage.removeItem(WALLET_SESSION_KEY); } catch { /* Storage is unavailable. */ }
   setWalletState("Connect wallet");
   document.querySelector("[data-import-key]").value = "";
   showWalletView(null);
@@ -804,6 +837,8 @@ function openTrade(index, side) {
   document.querySelector("[data-trade-input-label]").textContent = side === "buy" ? "Pay with faucet THRU" : `Sell ${activeTrade.ticker}`;
   document.querySelector("[data-trade-status]").textContent = activeTrade.liquidity
     ? "Quote updates from the Thru AMM pool."
+    : activeTrade.liquidityPendingReason
+      ? `${activeTrade.liquidityPendingReason} Buy and Sell will activate only after an on-chain AMM program is available.`
     : "This mint is live, but trading needs a wrapped-THRU liquidity pool. No funds will be moved until that pool exists.";
   document.querySelectorAll("[data-side]").forEach((button) => button.classList.toggle("selected", button.dataset.side === side));
 }
@@ -945,3 +980,4 @@ document.querySelector("[data-trade-amount]")?.addEventListener("input", (event)
 document.querySelector("[data-trade-submit]")?.addEventListener("click", executeTrade);
 
 renderMarkets();
+restoreWalletSession();
