@@ -14,14 +14,11 @@ search?.addEventListener("input", () => {
     : "The registry is quiet.";
 });
 
-const wallet = new BrowserSDK({
-  iframeUrl: "https://wallet.thru.org/embedded",
-  rpcUrl: "https://rpc.alphanet.thru.org",
-});
 const connectButtons = [...document.querySelectorAll("[data-connect]")];
 const createButton = document.querySelector("[data-create]");
 const createStatus = document.querySelector("[data-create-status]");
 let connectedAccount = null;
+let wallet = null;
 let walletReady;
 
 function compactAddress(address) {
@@ -37,7 +34,18 @@ function setWalletState(label, disabled = false) {
 
 async function initializeWallet() {
   if (!walletReady) {
-    walletReady = wallet.initialize();
+    walletReady = (async () => {
+      wallet = new BrowserSDK({
+        iframeUrl: "https://app.tid.sh/embedded",
+        rpcUrl: "https://rpc.alphanet.thru.org",
+        signingSessionStorage: false,
+      });
+      wallet.on("connect", ({ accounts }) => {
+        connectedAccount = accounts?.[0] || null;
+        setWalletState(compactAddress(connectedAccount?.address));
+      });
+      await wallet.initialize();
+    })();
     await walletReady;
   }
 }
@@ -60,16 +68,13 @@ async function connectWallet() {
     return connectedAccount;
   } catch (error) {
     console.error("Thru wallet connection failed", error);
+    walletReady = undefined;
+    wallet = null;
     setWalletState("Try connecting again");
     if (createStatus) createStatus.textContent = "The wallet connection was cancelled or could not be completed.";
     return null;
   }
 }
-
-wallet.on("connect", ({ accounts }) => {
-  connectedAccount = accounts?.[0] || null;
-  setWalletState(compactAddress(connectedAccount?.address));
-});
 
 connectButtons.forEach((button) => button.addEventListener("click", connectWallet));
 createButton?.addEventListener("click", async () => {

@@ -1,2 +1,6 @@
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - '@thru/programs@0.3.0'
+  - '@thru/sdk@0.3.0'
+  - '@thru/wallet@0.3.0'
