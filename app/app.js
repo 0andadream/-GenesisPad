@@ -9,7 +9,6 @@ import {
   parseTokenAccountData,
 } from "@thru/programs/token";
 import {
-  AMM_PROGRAM_ADDRESS,
   createAddLiquidityInstruction,
   createInitPoolInstruction,
   createSwapInstruction,
@@ -48,6 +47,8 @@ const WTHRU_PROGRAM = "taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcH";
 const WTHRU_MINT = "tacdgTUGud8OgzN5HnVVv4u3x82UBe8ciZAtjOLJZE_SNg";
 const WTHRU_VAULT = "tavBundQnIZaeuFuzQyydWytISqLWedn49iLRXsBj085lN";
 const GENESIS_TREASURY = "taiaYuGAgf-2J9upK3T_SqH4f6Q7eqtABqw3MjsS7ZR6rK";
+const GENESIS_AMM_PROGRAM =
+  "tahM1VfE9ZRxbFaNTk179HY6lR1j8zyutW2CkD2YQxoCLt";
 const NATIVE_THRU_DECIMALS = 9;
 const WTHRU_DECIMALS = 8;
 const CREATOR_FEE_BPS = 21;
@@ -380,7 +381,7 @@ async function wrapThru(amount, destination) {
 
 function derivePool(mintAddress) {
   const pool = deriveAmmPoolAddresses(client, {
-    ammProgramAddress: AMM_PROGRAM_ADDRESS,
+    ammProgramAddress: GENESIS_AMM_PROGRAM,
     mintAAddress: mintAddress,
     mintBAddress: WTHRU_MINT,
     swapFeeBps: CREATOR_FEE_BPS,
@@ -413,7 +414,7 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
       client.proofs.generate({ address: pool.vaultOne.address, proofType: 1 }),
       client.proofs.generate({ address: pool.vaultTwo.address, proofType: 1 }),
     ]);
-    await submitProgramInstruction(AMM_PROGRAM_ADDRESS, {
+    await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
       accounts: {
         readWrite: [
           pool.poolAddress, pool.lpMint.address, pool.vaultOne.address, pool.vaultTwo.address,
@@ -445,7 +446,7 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
   const tokenIsOne = pool.mintOneAddress === mint.address;
   const depositorOne = tokenIsOne ? tokenAccount : creatorWthru;
   const depositorTwo = tokenIsOne ? creatorWthru : tokenAccount;
-  await submitProgramInstruction(AMM_PROGRAM_ADDRESS, {
+  await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
     accounts: {
       readWrite: [
         pool.poolAddress, depositorOne.address, depositorTwo.address, creatorLp.address,
@@ -532,7 +533,7 @@ async function createToken() {
     createStatus.textContent = "Preparing your Thru account…";
     await ensureAccountExists((message) => { createStatus.textContent = message; });
     const ammProgramAvailable = liquidityThru > 0n &&
-      (await getAccountSnapshot(AMM_PROGRAM_ADDRESS)).exists;
+      (await getAccountSnapshot(GENESIS_AMM_PROGRAM)).exists;
     const nativeBalance = await getAccountSnapshot();
     if (ammProgramAvailable && nativeBalance.balance < liquidityThru + 1n) {
       throw new Error(
@@ -869,7 +870,7 @@ async function submitSwap(market, side, amountIn, tokenAccount, wthruAccount) {
   const inputIsOne = pool.mintOneAddress === inputMint;
   const vaultInput = inputIsOne ? pool.vaultOne : pool.vaultTwo;
   const vaultOutput = inputIsOne ? pool.vaultTwo : pool.vaultOne;
-  await submitProgramInstruction(AMM_PROGRAM_ADDRESS, {
+  await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
     accounts: {
       readWrite: [
         pool.poolAddress, userInput.address, userOutput.address,
