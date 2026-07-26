@@ -11,7 +11,6 @@
 #define ERR_BAD_INDEX 5UL
 #define ERR_BAD_MINT_ORDER 6UL
 #define ERR_UNAUTHORIZED 7UL
-#define ERR_POOL_CREATE 8UL
 #define ERR_ACCOUNT_RESIZE 12UL
 #define ERR_ACCOUNT_WRITABLE 13UL
 #define ERR_TOKEN_CPI 14UL
@@ -20,6 +19,8 @@
 #define ERR_LP_MINT_MISMATCH 19UL
 #define ERR_REENTRANT 20UL
 #define ERR_OVERFLOW 21UL
+#define ERR_POOL_ADDRESS_MISMATCH 22UL
+#define ERR_POOL_ACCOUNT_SYSCALL 23UL
 
 #define POOL_DATA_SIZE 203UL
 #define TOKEN_ACCOUNT_SIZE 73UL
@@ -378,7 +379,9 @@ static void handle_init(uchar const *data, ulong size) {
   tsdk_create_program_defined_account_address(
     tsdk_get_current_program_acc_addr(), 0U, pool_seed, &expected
   );
-  TSDK_ASSERT_OR_REVERT(key_eq(&expected, key_at(pool_idx)), ERR_POOL_CREATE);
+  TSDK_ASSERT_OR_REVERT(
+    key_eq(&expected, key_at(pool_idx)), ERR_POOL_ADDRESS_MISMATCH
+  );
 
   uchar const *pool_proof = data + 82;
   uchar const *lp_proof = pool_proof + pool_proof_size;
@@ -387,7 +390,7 @@ static void handle_init(uchar const *data, ulong size) {
 
   TSDK_ASSERT_OR_REVERT(
     tsys_account_create(pool_idx, pool_seed, pool_proof, pool_proof_size) == 0,
-    ERR_POOL_CREATE
+    ERR_POOL_ACCOUNT_SYSCALL
   );
   TSDK_ASSERT_OR_REVERT(
     tsys_account_resize(pool_idx, POOL_DATA_SIZE) == 0, ERR_ACCOUNT_RESIZE
