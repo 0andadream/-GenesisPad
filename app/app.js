@@ -188,7 +188,12 @@ async function buildAndSign(options) {
 async function submitTransaction(rawTransaction) {
   for await (const update of client.transactions.sendAndTrack(rawTransaction, { timeoutMs: 60000 })) {
     const result = update.executionResult;
-    if (result?.vmError) throw new Error(`Thru rejected the transaction (VM ${result.vmError}).`);
+    if (result?.vmError) {
+      const explanation = result.vmError === -766
+        ? "The requested program account is not deployed on this Thru network."
+        : `Thru rejected the transaction (VM ${result.vmError}).`;
+      throw new Error(explanation);
+    }
     if (
       result ||
       update.consensusStatus === ConsensusStatus.FINALIZED ||
@@ -494,8 +499,10 @@ async function createToken() {
   try {
     createStatus.textContent = "Preparing your Thru account…";
     await ensureAccountExists((message) => { createStatus.textContent = message; });
+    const ammProgramAvailable = liquidityThru > 0n &&
+      (await getAccountSnapshot(AMM_PROGRAM_ADDRESS)).exists;
     const nativeBalance = await getAccountSnapshot();
-    if (liquidityThru > 0n && nativeBalance.balance < liquidityThru + 1n) {
+    if (ammProgramAvailable && nativeBalance.balance < liquidityThru + 1n) {
       throw new Error(
         `Insufficient balance: you have ${formatUnits(nativeBalance.balance, NATIVE_THRU_DECIMALS, 9)} THRU. ` +
         "Lower the optional liquidity amount or leave it blank.",
@@ -557,15 +564,20 @@ async function createToken() {
     }
 
     let poolMetadata = {};
+    let liquidityPendingReason = "";
     if (liquidityThru > 0n) {
-      poolMetadata = await seedPool({
-        mint,
-        tokenAccount,
-        decimals,
-        thruAmount: liquidityThru,
-        tokenAmount: liquidityTokens,
-        setStatus: (message) => { createStatus.textContent = message; },
-      });
+      if (!ammProgramAvailable) {
+        liquidityPendingReason = "The Thru Alphanet AMM program is not deployed yet. No liquidity funds were moved.";
+      } else {
+        poolMetadata = await seedPool({
+          mint,
+          tokenAccount,
+          decimals,
+          thruAmount: liquidityThru,
+          tokenAmount: liquidityTokens,
+          setStatus: (message) => { createStatus.textContent = message; },
+        });
+      }
     }
 
     const market = {
@@ -578,7 +590,9 @@ async function createToken() {
       tokenAccount: tokenAccount.address,
       creator: connectedAccount.address,
       createdAt: Date.now(),
-      liquidity: liquidityThru > 0n,
+      liquidity: liquidityThru > 0n && !liquidityPendingReason,
+      liquidityRequested: liquidityThru > 0n,
+      liquidityPendingReason,
       priceTokensPerThru: PRICE_TOKENS_PER_THRU.toString(),
       creatorFeeBps: CREATOR_FEE_BPS,
       protocolFeeBps: PROTOCOL_FEE_BPS,
@@ -589,7 +603,9 @@ async function createToken() {
     markets.unshift(market);
     localStorage.setItem("genesis-markets", JSON.stringify(markets.slice(0, 50)));
     renderMarkets();
-    createStatus.textContent = liquidityThru > 0n
+    createStatus.textContent = liquidityPendingReason
+      ? `${ticker} mint is live. ${liquidityPendingReason} Mint: ${mint.address}`
+      : liquidityThru > 0n
       ? `${ticker} is live and tradeable at launch. Creator LP: ${poolMetadata.creatorLpAccount}`
       : `${ticker} is live on Thru. Mint: ${mint.address}`;
     createButton.textContent = "Token created on Thru";
@@ -619,7 +635,7 @@ function renderMarkets() {
       <article class="market-row">
         <div class="market-identity"><span>${market.ticker.slice(0, 1)}</span><div><strong>${market.name}</strong><small>${market.ticker} · ${market.mintAddress.slice(0, 7)}…${market.mintAddress.slice(-5)}</small></div></div>
         <strong>${BigInt(market.supply || "0").toLocaleString()}</strong>
-        <span class="liquidity-state">${market.liquidity ? "Live" : "Awaiting pool"}</span>
+        <span class="liquidity-state">${market.liquidity ? "Live" : market.liquidityPendingReason ? "AMM pending" : "Awaiting pool"}</span>
         <div class="trade-actions"><button type="button" data-trade="${index}" data-trade-side="buy">Buy</button><button type="button" data-trade="${index}" data-trade-side="sell">Sell</button></div>
       </article>`).join("")}
     </div>`;
