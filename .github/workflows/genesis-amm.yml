@@ -30,7 +30,9 @@ jobs:
       - name: Install Thru toolchain and C SDK
         run: |
           pnpm add --global thru
-          thru dev toolchain install
+          # v0.3.0 omitted the Linux toolchain asset; v0.2.40 is the latest
+          # published ThruVM compiler bundle and remains ABI-compatible.
+          thru dev toolchain install --version v0.2.40
           thru dev sdk install c
       - name: Compile Genesis AMM for ThruVM
         run: |
