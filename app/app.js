@@ -222,9 +222,17 @@ async function submitTransaction(rawTransaction) {
   for await (const update of client.transactions.sendAndTrack(rawTransaction, { timeoutMs: 60000 })) {
     const result = update.executionResult;
     if (result?.vmError) {
+      const ammErrors = {
+        8: "The AMM pool account could not be created. Refresh and try again.",
+        12: "The AMM pool account could not be resized.",
+        13: "The AMM pool account could not be made writable.",
+        14: "The AMM token operation failed.",
+        17: "The supplied liquidity amounts are outside the pool bounds.",
+      };
       const explanation = result.vmError === -766
         ? "The requested program account is not deployed on this Thru network."
-        : `Thru rejected the transaction (VM ${result.vmError}).`;
+        : ammErrors[result.userErrorCode] ||
+          `Thru rejected the transaction (VM ${result.vmError}, program code ${result.userErrorCode ?? "unknown"}).`;
       throw new Error(explanation);
     }
     if (
@@ -297,9 +305,12 @@ async function submitTokenInstruction({ accounts, instructionData }) {
   }));
 }
 
-async function submitProgramInstruction(program, { accounts, instructionData, fee = 0n }) {
+async function submitProgramInstruction(
+  program,
+  { accounts, instructionData, fee = 0n, startSlot: anchoredStartSlot },
+) {
   const snapshot = await getAccountSnapshot();
-  const slot = await currentSlot();
+  const slot = anchoredStartSlot ?? await currentSlot();
   await submitWithNonce(snapshot.nonce, (nonce) => buildAndSign({
     program,
     accounts,
@@ -408,12 +419,25 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
 
   if (!(await getAccountSnapshot(pool.poolAddress)).exists) {
     setStatus("Creating the 0.21% creator-fee AMM pool…");
+    const proofSlot = await currentSlot();
     const [poolProof, lpProof, vaultOneProof, vaultTwoProof] = await Promise.all([
-      client.proofs.generate({ address: pool.poolAddress, proofType: 1 }),
-      client.proofs.generate({ address: pool.lpMint.address, proofType: 1 }),
-      client.proofs.generate({ address: pool.vaultOne.address, proofType: 1 }),
-      client.proofs.generate({ address: pool.vaultTwo.address, proofType: 1 }),
+      client.proofs.generate({
+        address: pool.poolAddress, proofType: 1, targetSlot: proofSlot,
+      }),
+      client.proofs.generate({
+        address: pool.lpMint.address, proofType: 1, targetSlot: proofSlot,
+      }),
+      client.proofs.generate({
+        address: pool.vaultOne.address, proofType: 1, targetSlot: proofSlot,
+      }),
+      client.proofs.generate({
+        address: pool.vaultTwo.address, proofType: 1, targetSlot: proofSlot,
+      }),
     ]);
+    const proofSlots = [poolProof.slot, lpProof.slot, vaultOneProof.slot, vaultTwoProof.slot];
+    if (proofSlots.some((slot) => slot !== proofSlots[0])) {
+      throw new Error("Thru returned creation proofs from different slots. Please try again.");
+    }
     await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
       accounts: {
         readWrite: [
@@ -437,6 +461,7 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
         vaultOneStateProof: vaultOneProof.proof,
         vaultTwoStateProof: vaultTwoProof.proof,
       }),
+      startSlot: poolProof.slot,
     });
     await waitForAccount(pool.poolAddress, "AMM pool");
   }
