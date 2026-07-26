@@ -51,14 +51,12 @@
   margin-bottom: 42px;
 }
 
-.wallet-mark span {
-  display: grid;
-  place-items: center;
+.wallet-mark img {
   width: 34px;
   height: 34px;
   border: 1px solid var(--ink);
   border-radius: 50%;
-  font: 18px var(--serif);
+  object-fit: cover;
 }
 
 .wallet-mark b {

@@ -8,6 +8,7 @@ await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 await cp(new URL("index.html", root), new URL("index.html", output));
 await cp(new URL("styles.css", root), new URL("styles.css", output));
+await cp(new URL("logo.css", root), new URL("logo.css", output));
 await cp(new URL("sculpture.css", root), new URL("sculpture.css", output));
 await cp(new URL("app.js", root), new URL("app.js", output));
 await cp(new URL("app/", root), new URL("app/", output), { recursive: true });

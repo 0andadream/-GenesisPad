@@ -9,8 +9,11 @@ body {
   background: rgba(238, 238, 236, 0.82);
 }
 
-.app-brand > span {
-  border-color: #171717;
+.app-brand > img {
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
+  border: 1px solid #171717;
 }
 
 .app-brand i,

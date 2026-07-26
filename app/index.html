@@ -12,7 +12,7 @@
   </head>
   <body>
     <header class="app-header">
-      <a class="app-brand" href="/"><span>G</span><strong>Genesis</strong><i>app</i></a>
+      <a class="app-brand" href="/"><img src="/genesis-logo.png" alt="" /><strong>Genesis</strong><i>app</i></a>
       <nav aria-label="Product"><a class="active" href="/app/">Explore</a><a href="#activity">Activity</a></nav>
       <div class="header-tools">
         <button class="ink-button" type="button" data-wallet-open>Connect wallet</button>
@@ -81,7 +81,7 @@
         <label>Ticker<input data-token-ticker type="text" placeholder="GEN" maxlength="8" /></label>
         <div class="form-pair">
           <label>Decimals<input data-token-decimals type="number" value="6" min="0" max="9" /></label>
-          <label>Initial supply <span>(optional)</span><input data-token-supply type="number" min="0" step="1" placeholder="1,000,000" /></label>
+          <label>Initial supply<input data-token-supply type="number" min="0" step="1" value="1000000" /></label>
         </div>
         <label>Seed liquidity in THRU <span>(optional · no 100 THRU minimum)</span><input data-token-liquidity type="number" min="0" step="0.000000001" placeholder="0.0001" /></label>
         <small>Launch price: 1 THRU = 500 tokens. Leave liquidity blank to deploy the mint without a trading pool.</small>
@@ -110,7 +110,7 @@
       <button class="wallet-backdrop" type="button" data-wallet-close aria-label="Close wallet"></button>
       <section class="wallet-panel" role="dialog" aria-modal="true" aria-labelledby="wallet-title">
         <button class="wallet-close" type="button" data-wallet-close aria-label="Close">×</button>
-        <div class="wallet-mark"><span>G</span><b>thru</b></div>
+        <div class="wallet-mark"><img src="/genesis-logo.png" alt="" /><b>thru</b></div>
 
         <div class="wallet-entry" data-wallet-entry>
           <p class="eyebrow">Self-custody · Alphanet</p>
