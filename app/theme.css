@@ -1,0 +1,60 @@
+body {
+  background-color: #eeeeec;
+  background-image: none;
+}
+
+.app-header {
+  height: 78px;
+  border-color: rgba(23, 23, 23, 0.2);
+  background: rgba(238, 238, 236, 0.82);
+}
+
+.app-brand > span {
+  border-color: #171717;
+}
+
+.app-brand i,
+.eyebrow {
+  color: #171717;
+}
+
+nav a.active,
+.command-bar label,
+.empty-ledger,
+.token-table {
+  background: rgba(250, 250, 250, 0.42);
+}
+
+.app-intro {
+  min-height: 58vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.app-intro h1 em {
+  color: #171717;
+}
+
+.header-tools {
+  gap: 6px;
+}
+
+.header-tools .plain-button {
+  white-space: nowrap;
+}
+
+.create-drawer form {
+  background: #fafafa;
+}
+
+.create-drawer input,
+.create-drawer textarea {
+  background: #eeeeec;
+}
+
+@media (max-width: 980px) {
+  .header-tools .plain-button {
+    display: none;
+  }
+}
