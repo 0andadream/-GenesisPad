@@ -420,7 +420,7 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
   await wrapThru(thruAmount, creatorWthru);
 
   if (!(await getAccountSnapshot(pool.poolAddress)).exists) {
-    setStatus("Creating the 0.21% creator-fee AMM pool…");
+    setStatus("Creating the AMM pool account…");
     const poolProof = await client.proofs.generate({
       address: pool.poolAddress, proofType: 1,
     });
@@ -466,6 +466,48 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
       startSlot: poolProof.slot,
     });
     await waitForAccount(pool.poolAddress, "AMM pool");
+  }
+
+  const poolAccount = await client.accounts.get(pool.poolAddress, { view: AccountView.META_ONLY });
+  if (Number(poolAccount.meta?.dataSize ?? 0) === 0) {
+    setStatus("Initializing the 0.21% creator-fee AMM pool…");
+    const lpProof = await client.proofs.generate({
+      address: pool.lpMint.address, proofType: 1,
+    });
+    const proofSlot = lpProof.slot;
+    const [vaultOneProof, vaultTwoProof] = await Promise.all([
+      client.proofs.generate({
+        address: pool.vaultOne.address, proofType: 1, targetSlot: proofSlot,
+      }),
+      client.proofs.generate({
+        address: pool.vaultTwo.address, proofType: 1, targetSlot: proofSlot,
+      }),
+    ]);
+    await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
+      accounts: {
+        readWrite: [
+          pool.poolAddress, pool.lpMint.address, pool.vaultOne.address, pool.vaultTwo.address,
+        ],
+        readOnly: [pool.mintOneAddress, pool.mintTwoAddress, TOKEN_PROGRAM],
+      },
+      instructionData: createInitPoolInstruction({
+        payerAccountBytes: connectedAccount.publicKey,
+        poolAccountBytes: pool.poolBytes,
+        lpMintAccountBytes: pool.lpMint.bytes,
+        vaultOneAccountBytes: pool.vaultOne.bytes,
+        vaultTwoAccountBytes: pool.vaultTwo.bytes,
+        mintOneAccountBytes: pool.mintOneBytes,
+        mintTwoAccountBytes: pool.mintTwoBytes,
+        tokenProgramAccountBytes: Pubkey.from(TOKEN_PROGRAM).toBytes(),
+        swapFeeBps: CREATOR_FEE_BPS,
+        lpMintSeed: pool.poolSeed,
+        poolStateProof: new Uint8Array(),
+        lpMintStateProof: lpProof.proof,
+        vaultOneStateProof: vaultOneProof.proof,
+        vaultTwoStateProof: vaultTwoProof.proof,
+      }),
+      startSlot: proofSlot,
+    });
   }
 
   setStatus("Depositing the opening liquidity…");

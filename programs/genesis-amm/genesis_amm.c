@@ -359,7 +359,6 @@ static void handle_init(uchar const *data, ulong size) {
   require_idx(mint_two);
   require_idx(token_program);
   TSDK_ASSERT_OR_REVERT(tsdk_is_account_authorized_by_idx(payer), ERR_UNAUTHORIZED);
-  TSDK_ASSERT_OR_REVERT(!tsdk_account_exists(pool_idx), ERR_ALREADY_INITIALIZED);
   TSDK_ASSERT_OR_REVERT(
     memcmp(key_at(mint_one), key_at(mint_two), 32) < 0, ERR_BAD_MINT_ORDER
   );
@@ -372,9 +371,19 @@ static void handle_init(uchar const *data, ulong size) {
   uchar const *one_proof = lp_proof + lp_proof_size;
   uchar const *two_proof = one_proof + one_proof_size;
 
+  if (!tsdk_account_exists(pool_idx)) {
+    TSDK_ASSERT_OR_REVERT(
+      tsys_account_create(pool_idx, pool_seed, pool_proof, pool_proof_size) == 0,
+      ERR_POOL_ACCOUNT_SYSCALL
+    );
+    return;
+  }
   TSDK_ASSERT_OR_REVERT(
-    tsys_account_create(pool_idx, pool_seed, pool_proof, pool_proof_size) == 0,
-    ERR_POOL_ACCOUNT_SYSCALL
+    tsdk_is_account_owned_by_current_program(pool_idx), ERR_ALREADY_INITIALIZED
+  );
+  tsdk_account_meta_t const *pool_meta = tsdk_get_account_meta(pool_idx);
+  TSDK_ASSERT_OR_REVERT(
+    pool_meta && pool_meta->data_sz == 0, ERR_ALREADY_INITIALIZED
   );
   TSDK_ASSERT_OR_REVERT(
     tsys_set_account_data_writable(pool_idx) == 0, ERR_ACCOUNT_WRITABLE
