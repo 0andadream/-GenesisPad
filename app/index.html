@@ -12,7 +12,7 @@
     <header class="app-header">
       <a class="app-brand" href="/"><span>G</span><strong>Genesis</strong><i>app</i></a>
       <nav aria-label="Product"><a class="active" href="/app/">Explore</a><a href="#activity">Activity</a></nav>
-      <div class="header-tools"><button class="plain-button" type="button">Docs</button><button class="ink-button" type="button" data-connect>Connect wallet</button></div>
+      <div class="header-tools"><a class="plain-button docs-link" href="https://thru.org/docs/" target="_blank" rel="noreferrer">Docs</a><button class="ink-button" type="button" data-connect>Connect wallet</button></div>
     </header>
 
     <main>
@@ -77,7 +77,7 @@
         <label>Ticker<input type="text" placeholder="GEN" maxlength="8" /></label>
         <label>Description<textarea placeholder="Describe the token and its purpose"></textarea></label>
         <button class="ink-button" type="button" data-create>Connect wallet to continue</button>
-        <small>Issuance will settle through ThruVM. Creation is disabled until the Genesis protocol is live.</small>
+        <small data-create-status>Wallet connection and approval are handled securely by the official Thru embedded wallet.</small>
       </form>
     </section>
 

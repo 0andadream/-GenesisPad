@@ -1,4 +1,5 @@
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { build } from "esbuild";
 
 const output = new URL("../dist/", import.meta.url);
 const root = new URL("../", import.meta.url);
@@ -9,6 +10,15 @@ await cp(new URL("index.html", root), new URL("index.html", output));
 await cp(new URL("styles.css", root), new URL("styles.css", output));
 await cp(new URL("app.js", root), new URL("app.js", output));
 await cp(new URL("app/", root), new URL("app/", output), { recursive: true });
+await build({
+  entryPoints: [new URL("app/app.js", root).pathname],
+  outfile: new URL("app/app.js", output).pathname,
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "es2020",
+  minify: true,
+});
 await cp(new URL("public/", root), output, { recursive: true });
 await mkdir(new URL("server/", output), { recursive: true });
 await writeFile(

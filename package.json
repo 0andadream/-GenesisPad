@@ -7,5 +7,10 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@thru/sdk": "^0.2.39",
+    "@thru/wallet": "^0.2.39",
+    "esbuild": "^0.28.1"
   }
 }
