@@ -63,6 +63,31 @@ window.addEventListener("scroll", requestMotionUpdate, { passive: true });
 window.addEventListener("resize", requestMotionUpdate);
 updateMotion();
 
+const sculptureShell = document.querySelector(".sculpture-shell");
+if (sculptureShell && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  let sculptureFrame;
+  let pointerX = 0;
+  let pointerY = 0;
+  function updateSculpture() {
+    sculptureFrame = undefined;
+    const maxScroll = Math.max(document.documentElement.scrollHeight - window.innerHeight, 1);
+    sculptureShell.style.setProperty("--rx", `${pointerY * -7}deg`);
+    sculptureShell.style.setProperty("--ry", `${pointerX * 11}deg`);
+    sculptureShell.style.setProperty("--scroll-turn", `${(window.scrollY / maxScroll) * 52}deg`);
+  }
+  function requestSculptureUpdate() {
+    if (!sculptureFrame) sculptureFrame = requestAnimationFrame(updateSculpture);
+  }
+  window.addEventListener("pointermove", (event) => {
+    pointerX = event.clientX / window.innerWidth - 0.5;
+    pointerY = event.clientY / window.innerHeight - 0.5;
+    requestSculptureUpdate();
+  }, { passive: true });
+  window.addEventListener("scroll", requestSculptureUpdate, { passive: true });
+  window.addEventListener("resize", requestSculptureUpdate);
+  updateSculpture();
+}
+
 const stepCards = [...document.querySelectorAll("[data-step]")];
 const stepObserver = new IntersectionObserver(
   (entries) => {

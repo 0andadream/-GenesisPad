@@ -8,9 +8,13 @@
     <title>Genesis — Built on Thru</title>
     <link rel="icon" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/sculpture.css" />
   </head>
   <body>
-    <div class="webgl-shell" aria-hidden="true"><canvas data-sculpture></canvas><div class="canvas-fallback"></div></div>
+    <div class="sculpture-shell" aria-hidden="true">
+      <div class="sculpture-orbit"></div>
+      <img class="sculpture-image" src="/genesis-bust.png" alt="" />
+    </div>
     <header class="site-header">
       <a class="brand" href="#home"><span>G</span><strong>GENESIS</strong></a>
       <nav><a href="#protocol">Protocol</a><a href="#engine">Engine</a><a href="#principles">Principles</a></nav>
@@ -80,6 +84,5 @@
 
     <footer><a class="brand" href="#home"><span>G</span><strong>GENESIS</strong></a><p>Orderbook + AMM. Built on ThruVM.</p><p>© 2026 Genesis</p></footer>
     <script src="/app.js"></script>
-    <script src="/scene.js"></script>
   </body>
 </html>

@@ -1,0 +1,67 @@
+.sculpture-shell {
+  --rx: 0deg;
+  --ry: 0deg;
+  --scroll-turn: 0deg;
+  position: fixed;
+  z-index: 0;
+  inset: 78px 0 0 45%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  pointer-events: none;
+  perspective: 1500px;
+}
+
+.sculpture-image {
+  position: absolute;
+  width: min(50vw, 620px);
+  height: calc(100vh - 90px);
+  object-fit: contain;
+  object-position: center;
+  filter: grayscale(1) contrast(1.08);
+  transform: rotateX(var(--rx)) rotateY(calc(var(--ry) + var(--scroll-turn))) translateZ(0);
+  transform-style: preserve-3d;
+  transition: transform 0.18s ease-out;
+  will-change: transform;
+}
+
+.sculpture-orbit {
+  position: absolute;
+  width: min(43vw, 570px);
+  aspect-ratio: 1;
+  border: 1px solid rgba(23, 23, 23, 0.12);
+  border-radius: 50%;
+  transform: rotateX(72deg);
+  opacity: 0.55;
+}
+
+.sculpture-orbit::before,
+.sculpture-orbit::after {
+  content: "";
+  position: absolute;
+  inset: 12%;
+  border: 1px solid rgba(23, 23, 23, 0.08);
+  border-radius: 50%;
+}
+
+.sculpture-orbit::after {
+  inset: 28%;
+}
+
+@media (max-width: 850px) {
+  .sculpture-shell {
+    inset: 78px -18% 0 35%;
+    opacity: 0.42;
+  }
+
+  .sculpture-image {
+    width: 80vw;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sculpture-image {
+    transform: none;
+    transition: none;
+  }
+}
