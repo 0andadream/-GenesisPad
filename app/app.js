@@ -207,6 +207,14 @@ async function currentSlot() {
   return values.reduce((largest, value) => value > largest ? value : largest, 0n);
 }
 
+async function currentFinalizedSlot() {
+  const height = await client.blocks.getBlockHeight();
+  if (height.finalized == null) {
+    throw new Error("Thru has not published a finalized state root yet. Please try again.");
+  }
+  return BigInt(height.finalized);
+}
+
 async function buildAndSign(options) {
   const { rawTransaction } = await client.transactions.buildAndSign({
     feePayer: {
@@ -419,7 +427,7 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
 
   if (!(await getAccountSnapshot(pool.poolAddress)).exists) {
     setStatus("Creating the 0.21% creator-fee AMM pool…");
-    const proofSlot = await currentSlot();
+    const proofSlot = await currentFinalizedSlot();
     const [poolProof, lpProof, vaultOneProof, vaultTwoProof] = await Promise.all([
       client.proofs.generate({
         address: pool.poolAddress, proofType: 1, targetSlot: proofSlot,
