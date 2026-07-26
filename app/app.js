@@ -1,4 +1,11 @@
 import { AccountView, ConsensusStatus, Pubkey, createThruClient } from "@thru/sdk";
+import {
+  createInitializeAccountInstruction,
+  createInitializeMintInstruction,
+  createMintToInstruction,
+  deriveMintAddress,
+  deriveTokenAccountAddress,
+} from "@thru/programs/token";
 
 document.querySelectorAll("[role='tablist'] button").forEach((button) => {
   button.addEventListener("click", () => {
@@ -27,6 +34,7 @@ const client = createThruClient({
 const FAUCET_VAULT = "taxoImN8fTEOxXYnvgC6JZ0lN0n0qvZERwz_vlOjX3MkIn";
 const CHAIN_ID = 1;
 const FAUCET_AMOUNT = 10000n;
+const TOKEN_PROGRAM = "taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKqq";
 const EOA_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 3 : 0);
 const FAUCET_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 250 : 0);
 let connectedAccount = null;
@@ -112,9 +120,9 @@ function activateAccount(account) {
   refreshBalance();
 }
 
-async function getAccountSnapshot() {
+async function getAccountSnapshot(address = connectedAccount.address) {
   try {
-    const account = await client.accounts.get(connectedAccount.address, { view: AccountView.META_ONLY });
+    const account = await client.accounts.get(address, { view: AccountView.META_ONLY });
     return {
       exists: true,
       balance: BigInt(account.meta?.balance ?? 0),
@@ -204,6 +212,164 @@ async function ensureAccountExists(setStatus) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
   throw new Error("The account was submitted but is not live yet. Please try the faucet again.");
+}
+
+async function waitForAccount(address, label, timeout = 30000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if ((await getAccountSnapshot(address)).exists) return;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  throw new Error(`${label} was submitted but is not visible on-chain yet. Please try again.`);
+}
+
+function randomHex(byteLength = 32) {
+  return bytesToHex(crypto.getRandomValues(new Uint8Array(byteLength)));
+}
+
+async function submitTokenInstruction({ accounts, instructionData }) {
+  const snapshot = await getAccountSnapshot();
+  const slot = await currentSlot();
+  await submitWithNonce(snapshot.nonce, (nonce) => buildAndSign({
+    program: TOKEN_PROGRAM,
+    accounts,
+    instructionData,
+    header: {
+      fee: 0n, nonce, startSlot: slot, expiryAfter: 100,
+      computeUnits: 300000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
+    },
+  }));
+}
+
+async function createToken() {
+  if (!connectedAccount) {
+    openWallet();
+    return;
+  }
+
+  const name = document.querySelector("[data-token-name]").value.trim();
+  const ticker = document.querySelector("[data-token-ticker]").value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const description = document.querySelector("[data-token-description]").value.trim();
+  const decimals = Number(document.querySelector("[data-token-decimals]").value);
+  const supplyText = document.querySelector("[data-token-supply]").value.trim();
+  const supply = supplyText ? BigInt(supplyText) : 0n;
+
+  if (!name || !ticker) {
+    createStatus.textContent = "Enter a token name and ticker.";
+    return;
+  }
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 9) {
+    createStatus.textContent = "Decimals must be a whole number from 0 to 9.";
+    return;
+  }
+
+  createButton.disabled = true;
+  try {
+    createStatus.textContent = "Preparing your Thru account…";
+    await ensureAccountExists((message) => { createStatus.textContent = message; });
+
+    const authority = connectedAccount.publicKey;
+    const seed = randomHex(32);
+    const mint = deriveMintAddress(client, connectedAccount.address, seed, TOKEN_PROGRAM);
+    createStatus.textContent = "Creating the token mint on Thru…";
+    const mintProof = await client.proofs.generate({ address: mint.address, proofType: 1 });
+    await submitTokenInstruction({
+      accounts: { readWrite: [mint.address] },
+      instructionData: createInitializeMintInstruction({
+        mintAccountBytes: mint.bytes,
+        decimals,
+        mintAuthorityBytes: authority,
+        creatorBytes: authority,
+        ticker,
+        seedHex: seed,
+        stateProof: mintProof.proof,
+      }),
+    });
+    await waitForAccount(mint.address, "Token mint");
+
+    const tokenSeed = new Uint8Array(32);
+    const tokenAccount = deriveTokenAccountAddress(
+      client,
+      connectedAccount.address,
+      mint.address,
+      TOKEN_PROGRAM,
+      tokenSeed,
+    );
+    createStatus.textContent = "Creating your token account…";
+    const tokenProof = await client.proofs.generate({ address: tokenAccount.address, proofType: 1 });
+    await submitTokenInstruction({
+      accounts: { readWrite: [tokenAccount.address], readOnly: [mint.address] },
+      instructionData: createInitializeAccountInstruction({
+        tokenAccountBytes: tokenAccount.bytes,
+        mintAccountBytes: mint.bytes,
+        ownerAccountBytes: authority,
+        seedBytes: tokenSeed,
+        stateProof: tokenProof.proof,
+      }),
+    });
+    await waitForAccount(tokenAccount.address, "Token account");
+
+    if (supply > 0n) {
+      createStatus.textContent = `Minting ${supply.toLocaleString()} ${ticker}…`;
+      await submitTokenInstruction({
+        accounts: { readWrite: [mint.address, tokenAccount.address] },
+        instructionData: createMintToInstruction({
+          mintAccountBytes: mint.bytes,
+          destinationAccountBytes: tokenAccount.bytes,
+          authorityAccountBytes: authority,
+          amount: supply * (10n ** BigInt(decimals)),
+        }),
+      });
+    }
+
+    const market = {
+      name,
+      ticker,
+      description,
+      decimals,
+      supply: supply.toString(),
+      mintAddress: mint.address,
+      tokenAccount: tokenAccount.address,
+      creator: connectedAccount.address,
+      createdAt: Date.now(),
+      liquidity: false,
+    };
+    const markets = readMarkets();
+    markets.unshift(market);
+    localStorage.setItem("genesis-markets", JSON.stringify(markets.slice(0, 50)));
+    renderMarkets();
+    createStatus.textContent = `${ticker} is live on Thru. Mint: ${mint.address}`;
+    createButton.textContent = "Token created on Thru";
+  } catch (reason) {
+    createStatus.textContent = reason instanceof Error ? reason.message : "Token creation failed.";
+  } finally {
+    createButton.disabled = false;
+  }
+}
+
+function readMarkets() {
+  try {
+    return JSON.parse(localStorage.getItem("genesis-markets") || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function renderMarkets() {
+  const markets = readMarkets();
+  const table = document.querySelector(".token-table");
+  document.querySelector("[data-count]").textContent = String(markets.length);
+  if (!markets.length) return;
+  table.innerHTML = `
+    <div class="table-head"><span>Market</span><span>Supply</span><span>Liquidity</span><span>Trade</span></div>
+    <div class="market-list">${markets.map((market, index) => `
+      <article class="market-row">
+        <div class="market-identity"><span>${market.ticker.slice(0, 1)}</span><div><strong>${market.name}</strong><small>${market.ticker} · ${market.mintAddress.slice(0, 7)}…${market.mintAddress.slice(-5)}</small></div></div>
+        <strong>${BigInt(market.supply || "0").toLocaleString()}</strong>
+        <span class="liquidity-state">${market.liquidity ? "Live" : "Awaiting pool"}</span>
+        <div class="trade-actions"><button type="button" data-trade="${index}" data-trade-side="buy">Buy</button><button type="button" data-trade="${index}" data-trade-side="sell">Sell</button></div>
+      </article>`).join("")}
+    </div>`;
 }
 
 async function claimFaucet() {
@@ -308,10 +474,55 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !walletModal.hidden) closeWallet();
 });
 
-createButton?.addEventListener("click", () => {
+createButton?.addEventListener("click", createToken);
+
+const tradeModal = document.querySelector("[data-trade-modal]");
+let activeTrade = null;
+let activeSide = "buy";
+
+function openTrade(index, side) {
+  activeTrade = readMarkets()[index];
+  activeSide = side;
+  if (!activeTrade) return;
+  tradeModal.hidden = false;
+  document.body.classList.add("modal-open");
+  document.querySelector("[data-trade-title]").textContent = `${side === "buy" ? "Buy" : "Sell"} ${activeTrade.ticker}`;
+  document.querySelector("[data-trade-submit]").textContent = side === "buy" ? "Buy with faucet THRU" : `Sell ${activeTrade.ticker}`;
+  document.querySelector("[data-trade-input-label]").textContent = side === "buy" ? "Pay with faucet THRU" : `Sell ${activeTrade.ticker}`;
+  document.querySelector("[data-trade-status]").textContent = activeTrade.liquidity
+    ? "Quote updates from the Thru AMM pool."
+    : "This mint is live, but trading needs a wrapped-THRU liquidity pool. No funds will be moved until that pool exists.";
+  document.querySelectorAll("[data-side]").forEach((button) => button.classList.toggle("selected", button.dataset.side === side));
+}
+
+function closeTrade() {
+  tradeModal.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+document.querySelector(".token-table")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-trade]");
+  if (button) openTrade(Number(button.dataset.trade), button.dataset.tradeSide);
+});
+document.querySelectorAll("[data-trade-close]").forEach((button) => button.addEventListener("click", closeTrade));
+document.querySelectorAll("[data-side]").forEach((button) => button.addEventListener("click", () => {
+  if (activeTrade) openTrade(readMarkets().findIndex((market) => market.mintAddress === activeTrade.mintAddress), button.dataset.side);
+}));
+document.querySelector("[data-trade-amount]")?.addEventListener("input", (event) => {
+  document.querySelector("[data-trade-quote]").textContent = event.target.value && activeTrade?.liquidity ? "Fetching quote…" : "—";
+});
+document.querySelector("[data-trade-submit]")?.addEventListener("click", () => {
+  const status = document.querySelector("[data-trade-status]");
   if (!connectedAccount) {
+    closeTrade();
     openWallet();
     return;
   }
-  createStatus.textContent = "Wallet connected. Token issuance will activate after the Genesis program address and launch parameters are deployed on Thru.";
+  if (!activeTrade?.liquidity) {
+    status.textContent = "Trade not submitted: a wrapped-THRU pool has not been seeded for this mint yet.";
+    return;
+  }
+  status.textContent = `${activeSide === "buy" ? "Buy" : "Sell"} routing will use the live Thru AMM quote.`;
 });
+
+renderMarkets();

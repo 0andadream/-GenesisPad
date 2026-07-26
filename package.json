@@ -9,6 +9,7 @@
     "build": "node scripts/build.mjs"
   },
   "dependencies": {
+    "@thru/programs": "^0.3.0",
     "@thru/sdk": "^0.3.0",
     "@thru/wallet": "^0.3.0",
     "esbuild": "^0.28.1",

@@ -77,13 +77,31 @@
         <a href="#" class="drawer-close" aria-label="Close">×</a>
         <p class="eyebrow">New issuance</p>
         <h2 id="create-title">Create a market</h2>
-        <label>Token name<input type="text" placeholder="e.g. Genesis One" /></label>
-        <label>Ticker<input type="text" placeholder="GEN" maxlength="8" /></label>
-        <label>Description<textarea placeholder="Describe the token and its purpose"></textarea></label>
+        <label>Token name<input data-token-name type="text" placeholder="e.g. Genesis One" maxlength="32" /></label>
+        <label>Ticker<input data-token-ticker type="text" placeholder="GEN" maxlength="8" /></label>
+        <div class="form-pair">
+          <label>Decimals<input data-token-decimals type="number" value="6" min="0" max="9" /></label>
+          <label>Initial supply <span>(optional)</span><input data-token-supply type="number" min="0" step="1" placeholder="1,000,000" /></label>
+        </div>
+        <label>Description<textarea data-token-description placeholder="Describe the token and its purpose"></textarea></label>
         <button class="ink-button" type="button" data-create>Connect wallet to continue</button>
         <small data-create-status>Your Thru key is generated or imported locally. Genesis never sends it to a server or stores it after this tab closes.</small>
       </form>
     </section>
+
+    <div class="trade-modal" data-trade-modal hidden>
+      <button class="wallet-backdrop" type="button" data-trade-close aria-label="Close trade"></button>
+      <section class="trade-panel" role="dialog" aria-modal="true" aria-labelledby="trade-title">
+        <button class="wallet-close" type="button" data-trade-close aria-label="Close">×</button>
+        <p class="eyebrow">Genesis market</p>
+        <h2 id="trade-title" data-trade-title>Trade token</h2>
+        <div class="trade-switch"><button class="selected" type="button" data-side="buy">Buy</button><button type="button" data-side="sell">Sell</button></div>
+        <label>Amount<input data-trade-amount type="number" min="0" step="any" placeholder="0.00" /></label>
+        <div class="trade-quote"><span data-trade-input-label>Pay with faucet THRU</span><strong data-trade-quote>—</strong></div>
+        <button class="ink-button wallet-primary" type="button" data-trade-submit>Buy with THRU</button>
+        <p data-trade-status>Trading activates after a wrapped-THRU liquidity pool is seeded for this mint.</p>
+      </section>
+    </div>
 
     <div class="wallet-modal" data-wallet-modal hidden>
       <button class="wallet-backdrop" type="button" data-wallet-close aria-label="Close wallet"></button>

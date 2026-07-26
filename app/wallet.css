@@ -282,6 +282,171 @@
   color: var(--muted);
 }
 
+.form-pair {
+  display: grid;
+  grid-template-columns: .7fr 1.3fr;
+  gap: 12px;
+}
+
+.form-pair label span {
+  color: var(--muted);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.market-list {
+  display: grid;
+}
+
+.market-row {
+  display: grid;
+  grid-template-columns: 1.4fr repeat(3, 1fr);
+  align-items: center;
+  gap: 16px;
+  min-height: 92px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.market-row:last-child {
+  border-bottom: 0;
+}
+
+.market-row > strong,
+.market-row > span,
+.trade-actions {
+  justify-self: end;
+}
+
+.market-identity {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.market-identity > span {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--ink);
+  border-radius: 50%;
+  font: 20px var(--serif);
+}
+
+.market-identity strong,
+.market-identity small {
+  display: block;
+}
+
+.market-identity strong {
+  font: 19px var(--serif);
+}
+
+.market-identity small,
+.liquidity-state {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.trade-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.trade-actions button,
+.trade-switch button {
+  min-width: 62px;
+  padding: 8px 12px;
+  border: 1px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.trade-actions button:first-child,
+.trade-switch button.selected {
+  background: var(--ink);
+  color: var(--light);
+}
+
+.trade-modal[hidden] {
+  display: none;
+}
+
+.trade-modal {
+  position: fixed;
+  z-index: 110;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.trade-panel {
+  position: relative;
+  width: min(100%, 480px);
+  padding: 42px;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+}
+
+.trade-panel h2 {
+  margin: 12px 0 24px;
+  font: 400 43px var(--serif);
+}
+
+.trade-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 22px;
+}
+
+.trade-switch button {
+  min-height: 42px;
+}
+
+.trade-switch button + button {
+  border-left: 0;
+}
+
+.trade-panel > label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.trade-panel > label input {
+  padding: 16px;
+  border: 1px solid var(--ink);
+  background: var(--light);
+  color: var(--ink);
+  font: 24px var(--serif);
+}
+
+.trade-quote {
+  display: flex;
+  justify-content: space-between;
+  padding: 18px 2px 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.trade-panel > p:last-child {
+  color: var(--muted);
+  text-align: center;
+  font-size: 11px;
+}
+
 @media (max-width: 760px) {
   .wallet-panel {
     padding: 38px 24px;
@@ -306,5 +471,23 @@
 
   .wallet-actions {
     flex-direction: column;
+  }
+
+  .form-pair {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .market-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .market-row > strong,
+  .market-row > .liquidity-state {
+    display: none;
+  }
+
+  .trade-panel {
+    padding: 34px 24px;
   }
 }
