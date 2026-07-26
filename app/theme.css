@@ -46,6 +46,12 @@ nav a.active,
 
 .create-drawer form {
   background: #fafafa;
+  overflow-y: auto;
+}
+
+.create-drawer .ink-button {
+  min-height: 50px;
+  cursor: pointer;
 }
 
 .create-drawer input,

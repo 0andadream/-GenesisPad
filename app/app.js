@@ -131,7 +131,7 @@ function activateAccount(account) {
   setWalletState(compactAddress(account.address));
   document.querySelector("[data-account-address]").textContent = account.address;
   document.querySelector("[data-explorer]").href = `https://scan.thru.org/account/${account.address}`;
-  if (createButton) createButton.textContent = "Continue with connected wallet";
+  if (createButton) createButton.textContent = "Deploy token on Thru";
   if (createStatus) createStatus.textContent = "Thru wallet connected locally. The private key remains only in this browser tab.";
   showWalletView("account");
   refreshBalance();
@@ -454,8 +454,9 @@ async function createToken() {
   const description = document.querySelector("[data-token-description]").value.trim();
   const decimals = Number(document.querySelector("[data-token-decimals]").value);
   const supplyText = document.querySelector("[data-token-supply]").value.trim();
-  const supply = supplyText ? BigInt(supplyText) : 0n;
   const liquidityText = document.querySelector("[data-token-liquidity]")?.value.trim() || "";
+
+  createStatus.textContent = "Validating market details…";
 
   if (!name || !ticker) {
     createStatus.textContent = "Enter a token name and ticker.";
@@ -465,6 +466,11 @@ async function createToken() {
     createStatus.textContent = "Decimals must be a whole number from 0 to 9.";
     return;
   }
+  if (supplyText && !/^\d+$/.test(supplyText)) {
+    createStatus.textContent = "Initial supply must be a whole number without commas.";
+    return;
+  }
+  const supply = supplyText ? BigInt(supplyText) : 0n;
   let liquidityThru;
   try {
     liquidityThru = liquidityText ? parseUnits(liquidityText, WTHRU_DECIMALS) : 0n;
@@ -713,7 +719,10 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !walletModal.hidden) closeWallet();
 });
 
-createButton?.addEventListener("click", createToken);
+document.querySelector("[data-create-form]")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  createToken();
+});
 
 const tradeModal = document.querySelector("[data-trade-modal]");
 let activeTrade = null;

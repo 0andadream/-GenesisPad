@@ -73,7 +73,7 @@
 
     <section class="create-drawer" id="create" aria-labelledby="create-title">
       <a href="#" class="drawer-shade" aria-label="Close creation panel"></a>
-      <form>
+      <form data-create-form>
         <a href="#" class="drawer-close" aria-label="Close">×</a>
         <p class="eyebrow">New issuance</p>
         <h2 id="create-title">Create a market</h2>
@@ -86,7 +86,7 @@
         <label>Seed liquidity in THRU <span>(optional · 1 THRU = 500 tokens)</span><input data-token-liquidity type="number" min="0" step="0.00000001" placeholder="100" /></label>
         <small>Trading fee: 0.21% accrues to the creator-held LP position; 0.09% routes to Genesis.</small>
         <label>Description<textarea data-token-description placeholder="Describe the token and its purpose"></textarea></label>
-        <button class="ink-button" type="button" data-create>Connect wallet to continue</button>
+        <button class="ink-button" type="submit" data-create>Connect wallet to continue</button>
         <small data-create-status>Your Thru key is generated or imported locally. Genesis never sends it to a server or stores it after this tab closes.</small>
       </form>
     </section>
