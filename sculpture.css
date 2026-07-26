@@ -48,6 +48,35 @@
   inset: 28%;
 }
 
+.engine .steps article {
+  position: relative;
+  isolation: isolate;
+}
+
+.engine .steps article::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 10px -14px;
+  background: rgba(238, 238, 236, 0.68);
+  backdrop-filter: blur(3px);
+}
+
+.engine .steps span,
+.engine .steps h3,
+.engine .steps p {
+  color: #111;
+  font-weight: 600;
+  text-shadow:
+    0 0 5px #eeeeec,
+    0 0 12px #eeeeec,
+    0 0 22px #eeeeec;
+}
+
+.engine .steps h3 {
+  font-weight: 700;
+}
+
 @media (max-width: 850px) {
   .sculpture-shell {
     inset: 78px -18% 0 35%;
