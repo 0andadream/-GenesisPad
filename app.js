@@ -36,3 +36,29 @@ document.querySelectorAll(".nav-pill a").forEach((link) => {
 
 refreshStats();
 setInterval(refreshStats, 30000);
+
+const motionStage = document.querySelector("[data-motion-stage]");
+const motionWords = [...document.querySelectorAll("[data-motion-word]")];
+let motionFrame;
+
+function updateMotion() {
+  motionFrame = undefined;
+  if (!motionStage || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const rect = motionStage.getBoundingClientRect();
+  const viewport = window.innerHeight;
+  const progress = Math.max(0, Math.min(1, (viewport - rect.top) / (viewport + rect.height * 0.35)));
+  motionStage.style.setProperty("--motion-progress", progress.toFixed(3));
+  motionWords.forEach((word, index) => {
+    const start = 0.1 + index * 0.18;
+    const wordProgress = Math.max(0, Math.min(1, (progress - start) / 0.18));
+    word.style.setProperty("--word-progress", wordProgress.toFixed(3));
+  });
+}
+
+function requestMotionUpdate() {
+  if (!motionFrame) motionFrame = requestAnimationFrame(updateMotion);
+}
+
+window.addEventListener("scroll", requestMotionUpdate, { passive: true });
+window.addEventListener("resize", requestMotionUpdate);
+updateMotion();
