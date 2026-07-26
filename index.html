@@ -108,14 +108,16 @@
             <div><p class="section-label">The hybrid engine</p><h2>Liquidity that moves<br /><span class="hand">at market speed.</span></h2></div>
             <p>Professional orderbook execution meets always-on AMM liquidity. Genesis routes every trade through the deepest available source without surrendering transparency or custody.</p>
           </div>
-          <div class="orderbook" aria-label="Illustrative Genesis orderbook">
-            <div class="book-title"><span>GEN / USDC</span><span>Order book · Live</span></div>
-            <div class="book-head"><span>Price</span><span>Amount</span><span>Total</span></div>
-            <div class="ask"><span>1.0084</span><span>0.0000</span><span>0.0000</span></div>
-            <div class="ask"><span>1.0062</span><span>0.0000</span><span>0.0000</span></div>
-            <div class="mid"><span>—</span><strong>Genesis price</strong><span>—</span></div>
-            <div class="bid"><span>0.9987</span><span>0.0000</span><span>0.0000</span></div>
-            <div class="bid"><span>0.9951</span><span>0.0000</span><span>0.0000</span></div>
+          <div class="orderbook market-visual" aria-label="Animated illustrative Genesis market chart">
+            <div class="book-title"><span>GEN / USDC</span><span><i></i> Market stream · Live</span></div>
+            <canvas data-market-chart></canvas>
+            <div class="chart-scale" aria-hidden="true"><span>1.014</span><span>1.006</span><span>0.998</span><span>0.990</span></div>
+            <div class="chart-hud">
+              <div><small>Index price</small><strong data-live-price>1.0024</strong></div>
+              <div><small>24h volume</small><strong>$0.00</strong></div>
+              <div><small>Spread</small><strong data-live-spread>0.02%</strong></div>
+            </div>
+            <div class="chart-legend"><span><i class="price-key"></i>Price</span><span><i class="depth-key"></i>Liquidity depth</span><em>ThruVM · Block 000000</em></div>
           </div>
         </div>
       </section>

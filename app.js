@@ -88,3 +88,89 @@ stepCards.forEach((card) => {
     card.style.setProperty("--my", "0");
   });
 });
+
+const chart = document.querySelector("[data-market-chart]");
+const livePrice = document.querySelector("[data-live-price]");
+const liveSpread = document.querySelector("[data-live-spread]");
+
+if (chart) {
+  const context = chart.getContext("2d");
+  let width = 0;
+  let height = 0;
+  let chartFrame;
+  const chartMotionAllowed = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function sizeChart() {
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = chart.getBoundingClientRect();
+    width = rect.width;
+    height = rect.height;
+    chart.width = Math.round(width * ratio);
+    chart.height = Math.round(height * ratio);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  }
+
+  function drawChart(time = 0) {
+    context.clearRect(0, 0, width, height);
+    const ink = "rgba(32,27,20,.72)";
+    const muted = "rgba(32,27,20,.13)";
+    const accent = "rgba(143,63,47,.82)";
+
+    context.lineWidth = 1;
+    context.strokeStyle = muted;
+    for (let x = 0; x <= width; x += width / 12) {
+      context.beginPath(); context.moveTo(x, 0); context.lineTo(x, height); context.stroke();
+    }
+    for (let y = 0; y <= height; y += height / 6) {
+      context.beginPath(); context.moveTo(0, y); context.lineTo(width, y); context.stroke();
+    }
+
+    const points = 120;
+    const price = [];
+    for (let index = 0; index < points; index += 1) {
+      const x = (index / (points - 1)) * width;
+      const wave = Math.sin(index * 0.17 + time * 0.00055) * 18;
+      const micro = Math.sin(index * 0.49 - time * 0.0011) * 7;
+      const drift = Math.sin(time * 0.0002) * 10;
+      price.push([x, height * 0.47 + wave + micro + drift]);
+    }
+
+    const depth = context.createLinearGradient(0, height * 0.4, 0, height);
+    depth.addColorStop(0, "rgba(143,63,47,.24)");
+    depth.addColorStop(1, "rgba(143,63,47,0)");
+    context.beginPath();
+    price.forEach(([x, y], index) => index ? context.lineTo(x, y) : context.moveTo(x, y));
+    context.lineTo(width, height); context.lineTo(0, height); context.closePath();
+    context.fillStyle = depth; context.fill();
+
+    context.beginPath();
+    price.forEach(([x, y], index) => index ? context.lineTo(x, y) : context.moveTo(x, y));
+    context.strokeStyle = accent; context.lineWidth = 1.6; context.stroke();
+
+    const packet = ((time * 0.045) % width);
+    const packetIndex = Math.min(points - 1, Math.round((packet / width) * (points - 1)));
+    const packetY = price[packetIndex]?.[1] || height / 2;
+    context.beginPath(); context.arc(packet, packetY, 4, 0, Math.PI * 2);
+    context.fillStyle = accent; context.fill();
+    context.beginPath(); context.arc(packet, packetY, 11, 0, Math.PI * 2);
+    context.strokeStyle = "rgba(143,63,47,.28)"; context.stroke();
+
+    context.beginPath();
+    for (let index = 0; index < 42; index += 1) {
+      const x = (index / 41) * width;
+      const y = height * 0.78 - Math.abs(index - 21) * 2.2 + Math.sin(index + time * 0.001) * 5;
+      index ? context.lineTo(x, y) : context.moveTo(x, y);
+    }
+    context.strokeStyle = ink; context.lineWidth = 1; context.setLineDash([4, 5]); context.stroke(); context.setLineDash([]);
+
+    const numericPrice = 1.0024 + Math.sin(time * 0.0007) * 0.0031;
+    if (livePrice) livePrice.textContent = numericPrice.toFixed(4);
+    if (liveSpread) liveSpread.textContent = `${(0.018 + Math.abs(Math.sin(time * 0.0004)) * 0.014).toFixed(2)}%`;
+    if (chartMotionAllowed) chartFrame = requestAnimationFrame(drawChart);
+  }
+
+  sizeChart();
+  window.addEventListener("resize", sizeChart);
+  if (chartMotionAllowed) chartFrame = requestAnimationFrame(drawChart);
+  else drawChart(0);
+}
