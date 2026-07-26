@@ -3,9 +3,18 @@ import {
   createInitializeAccountInstruction,
   createInitializeMintInstruction,
   createMintToInstruction,
+  createTransferInstruction,
   deriveMintAddress,
   deriveTokenAccountAddress,
+  parseTokenAccountData,
 } from "@thru/programs/token";
+import {
+  AMM_PROGRAM_ADDRESS,
+  createAddLiquidityInstruction,
+  createInitPoolInstruction,
+  createSwapInstruction,
+  deriveAmmPoolAddresses,
+} from "@thru/programs/amm";
 
 document.querySelectorAll("[role='tablist'] button").forEach((button) => {
   button.addEventListener("click", () => {
@@ -35,6 +44,14 @@ const FAUCET_VAULT = "taxoImN8fTEOxXYnvgC6JZ0lN0n0qvZERwz_vlOjX3MkIn";
 const CHAIN_ID = 1;
 const FAUCET_AMOUNT = 10000n;
 const TOKEN_PROGRAM = "taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKqq";
+const WTHRU_PROGRAM = "taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcH";
+const WTHRU_MINT = "tacdgTUGud8OgzN5HnVVv4u3x82UBe8ciZAtjOLJZE_SNg";
+const WTHRU_VAULT = "tavBundQnIZaeuFuzQyydWytISqLWedn49iLRXsBj085lN";
+const GENESIS_TREASURY = "taiaYuGAgf-2J9upK3T_SqH4f6Q7eqtABqw3MjsS7ZR6rK";
+const WTHRU_DECIMALS = 8;
+const CREATOR_FEE_BPS = 21;
+const PROTOCOL_FEE_BPS = 9;
+const PRICE_TOKENS_PER_THRU = 500n;
 const EOA_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 3 : 0);
 const FAUCET_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 250 : 0);
 let connectedAccount = null;
@@ -241,6 +258,191 @@ async function submitTokenInstruction({ accounts, instructionData }) {
   }));
 }
 
+async function submitProgramInstruction(program, { accounts, instructionData, fee = 0n }) {
+  const snapshot = await getAccountSnapshot();
+  const slot = await currentSlot();
+  await submitWithNonce(snapshot.nonce, (nonce) => buildAndSign({
+    program,
+    accounts,
+    instructionData,
+    header: {
+      fee, nonce, startSlot: slot, expiryAfter: 100,
+      computeUnits: 500000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
+    },
+  }));
+}
+
+function parseUnits(value, decimals) {
+  const normalized = String(value).trim();
+  if (!/^\d+(\.\d+)?$/.test(normalized)) throw new Error("Enter a valid positive amount.");
+  const [whole, fraction = ""] = normalized.split(".");
+  if (fraction.length > decimals) throw new Error(`Use no more than ${decimals} decimal places.`);
+  return (BigInt(whole) * (10n ** BigInt(decimals))) +
+    BigInt((fraction + "0".repeat(decimals)).slice(0, decimals) || "0");
+}
+
+function formatUnits(raw, decimals, precision = 6) {
+  const scale = 10n ** BigInt(decimals);
+  const whole = raw / scale;
+  const fraction = (raw % scale).toString().padStart(decimals, "0").slice(0, precision).replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
+async function ensureTokenAccount(ownerAddress, mintAddress, seed = new Uint8Array(32)) {
+  const account = deriveTokenAccountAddress(client, ownerAddress, mintAddress, TOKEN_PROGRAM, seed);
+  if ((await getAccountSnapshot(account.address)).exists) return account;
+  const proof = await client.proofs.generate({ address: account.address, proofType: 1 });
+  await submitTokenInstruction({
+    accounts: { readWrite: [account.address], readOnly: [mintAddress] },
+    instructionData: createInitializeAccountInstruction({
+      tokenAccountBytes: account.bytes,
+      mintAccountBytes: Pubkey.from(mintAddress).toBytes(),
+      ownerAccountBytes: Pubkey.from(ownerAddress).toBytes(),
+      seedBytes: seed,
+      stateProof: proof.proof,
+    }),
+  });
+  await waitForAccount(account.address, "Token account");
+  return account;
+}
+
+function nativeTransferInstruction(amount) {
+  const data = new Uint8Array(16);
+  const view = new DataView(data.buffer);
+  view.setUint32(0, 1, true);
+  view.setBigUint64(4, amount, true);
+  view.setUint16(12, 0, true);
+  view.setUint16(14, 2, true);
+  return data;
+}
+
+async function wrapThru(amount, destination) {
+  await submitProgramInstruction(EOA_PROGRAM, {
+    accounts: { readWrite: [WTHRU_VAULT] },
+    instructionData: nativeTransferInstruction(amount),
+    fee: 1n,
+  });
+  await submitProgramInstruction(WTHRU_PROGRAM, {
+    accounts: {
+      readWrite: [WTHRU_MINT, WTHRU_VAULT, destination.address],
+      readOnly: [TOKEN_PROGRAM],
+    },
+    instructionData: async (context) => {
+      const data = new Uint8Array(12);
+      const view = new DataView(data.buffer);
+      view.setUint32(0, 1, true);
+      view.setUint16(4, context.getAccountIndex(Pubkey.from(TOKEN_PROGRAM).toBytes()), true);
+      view.setUint16(6, context.getAccountIndex(Pubkey.from(WTHRU_VAULT).toBytes()), true);
+      view.setUint16(8, context.getAccountIndex(Pubkey.from(WTHRU_MINT).toBytes()), true);
+      view.setUint16(10, context.getAccountIndex(destination.bytes), true);
+      return data;
+    },
+  });
+}
+
+function derivePool(mintAddress) {
+  const pool = deriveAmmPoolAddresses(client, {
+    ammProgramAddress: AMM_PROGRAM_ADDRESS,
+    mintAAddress: mintAddress,
+    mintBAddress: WTHRU_MINT,
+    swapFeeBps: CREATOR_FEE_BPS,
+  });
+  const lpMint = client.helpers.deriveProgramAddress({
+    programAddress: TOKEN_PROGRAM,
+    seed: pool.lpMintSeed,
+    ephemeral: false,
+  });
+  const vaultOne = deriveTokenAccountAddress(
+    client, pool.poolAddress, pool.mintOneAddress, TOKEN_PROGRAM, pool.vaultOneSeed,
+  );
+  const vaultTwo = deriveTokenAccountAddress(
+    client, pool.poolAddress, pool.mintTwoAddress, TOKEN_PROGRAM, pool.vaultTwoSeed,
+  );
+  return { ...pool, lpMint, vaultOne, vaultTwo };
+}
+
+async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount, setStatus }) {
+  const pool = derivePool(mint.address);
+  const creatorWthru = await ensureTokenAccount(connectedAccount.address, WTHRU_MINT);
+  setStatus(`Wrapping ${formatUnits(thruAmount, WTHRU_DECIMALS)} THRU…`);
+  await wrapThru(thruAmount, creatorWthru);
+
+  if (!(await getAccountSnapshot(pool.poolAddress)).exists) {
+    setStatus("Creating the 0.21% creator-fee AMM pool…");
+    const [poolProof, lpProof, vaultOneProof, vaultTwoProof] = await Promise.all([
+      client.proofs.generate({ address: pool.poolAddress, proofType: 1 }),
+      client.proofs.generate({ address: pool.lpMint.address, proofType: 1 }),
+      client.proofs.generate({ address: pool.vaultOne.address, proofType: 1 }),
+      client.proofs.generate({ address: pool.vaultTwo.address, proofType: 1 }),
+    ]);
+    await submitProgramInstruction(AMM_PROGRAM_ADDRESS, {
+      accounts: {
+        readWrite: [
+          pool.poolAddress, pool.lpMint.address, pool.vaultOne.address, pool.vaultTwo.address,
+        ],
+        readOnly: [pool.mintOneAddress, pool.mintTwoAddress, TOKEN_PROGRAM],
+      },
+      instructionData: createInitPoolInstruction({
+        payerAccountBytes: connectedAccount.publicKey,
+        poolAccountBytes: pool.poolBytes,
+        lpMintAccountBytes: pool.lpMint.bytes,
+        vaultOneAccountBytes: pool.vaultOne.bytes,
+        vaultTwoAccountBytes: pool.vaultTwo.bytes,
+        mintOneAccountBytes: pool.mintOneBytes,
+        mintTwoAccountBytes: pool.mintTwoBytes,
+        tokenProgramAccountBytes: Pubkey.from(TOKEN_PROGRAM).toBytes(),
+        swapFeeBps: CREATOR_FEE_BPS,
+        lpMintSeed: pool.lpMintSeed,
+        poolStateProof: poolProof.proof,
+        lpMintStateProof: lpProof.proof,
+        vaultOneStateProof: vaultOneProof.proof,
+        vaultTwoStateProof: vaultTwoProof.proof,
+      }),
+    });
+    await waitForAccount(pool.poolAddress, "AMM pool");
+  }
+
+  setStatus("Depositing the opening liquidity…");
+  const creatorLp = await ensureTokenAccount(connectedAccount.address, pool.lpMint.address);
+  const tokenIsOne = pool.mintOneAddress === mint.address;
+  const depositorOne = tokenIsOne ? tokenAccount : creatorWthru;
+  const depositorTwo = tokenIsOne ? creatorWthru : tokenAccount;
+  await submitProgramInstruction(AMM_PROGRAM_ADDRESS, {
+    accounts: {
+      readWrite: [
+        pool.poolAddress, depositorOne.address, depositorTwo.address, creatorLp.address,
+        pool.vaultOne.address, pool.vaultTwo.address, pool.lpMint.address,
+      ],
+      readOnly: [TOKEN_PROGRAM],
+    },
+    instructionData: createAddLiquidityInstruction({
+      poolAccountBytes: pool.poolBytes,
+      depositorAccountBytes: connectedAccount.publicKey,
+      depositorTokenOneAccountBytes: depositorOne.bytes,
+      depositorTokenTwoAccountBytes: depositorTwo.bytes,
+      depositorLpAccountBytes: creatorLp.bytes,
+      vaultOneAccountBytes: pool.vaultOne.bytes,
+      vaultTwoAccountBytes: pool.vaultTwo.bytes,
+      lpMintAccountBytes: pool.lpMint.bytes,
+      tokenProgramAccountBytes: Pubkey.from(TOKEN_PROGRAM).toBytes(),
+      maxAmountMintOne: tokenIsOne ? tokenAmount : thruAmount,
+      maxAmountMintTwo: tokenIsOne ? thruAmount : tokenAmount,
+    }),
+  });
+  return {
+    poolAddress: pool.poolAddress,
+    lpMint: pool.lpMint.address,
+    vaultOne: pool.vaultOne.address,
+    vaultTwo: pool.vaultTwo.address,
+    mintOne: pool.mintOneAddress,
+    mintTwo: pool.mintTwoAddress,
+    creatorLpAccount: creatorLp.address,
+    creatorWthruAccount: creatorWthru.address,
+    seededThru: formatUnits(thruAmount, WTHRU_DECIMALS),
+    seededTokens: formatUnits(tokenAmount, decimals),
+  };
+}
+
 async function createToken() {
   if (!connectedAccount) {
     openWallet();
@@ -253,6 +455,7 @@ async function createToken() {
   const decimals = Number(document.querySelector("[data-token-decimals]").value);
   const supplyText = document.querySelector("[data-token-supply]").value.trim();
   const supply = supplyText ? BigInt(supplyText) : 0n;
+  const liquidityText = document.querySelector("[data-token-liquidity]")?.value.trim() || "";
 
   if (!name || !ticker) {
     createStatus.textContent = "Enter a token name and ticker.";
@@ -260,6 +463,23 @@ async function createToken() {
   }
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > 9) {
     createStatus.textContent = "Decimals must be a whole number from 0 to 9.";
+    return;
+  }
+  let liquidityThru;
+  try {
+    liquidityThru = liquidityText ? parseUnits(liquidityText, WTHRU_DECIMALS) : 0n;
+  } catch (reason) {
+    createStatus.textContent = reason.message;
+    return;
+  }
+  const liquidityTokens = liquidityThru * PRICE_TOKENS_PER_THRU *
+    (10n ** BigInt(decimals)) / (10n ** BigInt(WTHRU_DECIMALS));
+  if (liquidityThru > 0n && liquidityTokens < 1000n) {
+    createStatus.textContent = "Seed a larger amount; the pool requires at least 1,000 raw token units.";
+    return;
+  }
+  if (liquidityTokens > supply * (10n ** BigInt(decimals))) {
+    createStatus.textContent = `Initial supply must cover ${formatUnits(liquidityTokens, decimals)} ${ticker} for liquidity.`;
     return;
   }
 
@@ -322,6 +542,18 @@ async function createToken() {
       });
     }
 
+    let poolMetadata = {};
+    if (liquidityThru > 0n) {
+      poolMetadata = await seedPool({
+        mint,
+        tokenAccount,
+        decimals,
+        thruAmount: liquidityThru,
+        tokenAmount: liquidityTokens,
+        setStatus: (message) => { createStatus.textContent = message; },
+      });
+    }
+
     const market = {
       name,
       ticker,
@@ -332,13 +564,20 @@ async function createToken() {
       tokenAccount: tokenAccount.address,
       creator: connectedAccount.address,
       createdAt: Date.now(),
-      liquidity: false,
+      liquidity: liquidityThru > 0n,
+      priceTokensPerThru: PRICE_TOKENS_PER_THRU.toString(),
+      creatorFeeBps: CREATOR_FEE_BPS,
+      protocolFeeBps: PROTOCOL_FEE_BPS,
+      protocolTreasury: GENESIS_TREASURY,
+      ...poolMetadata,
     };
     const markets = readMarkets();
     markets.unshift(market);
     localStorage.setItem("genesis-markets", JSON.stringify(markets.slice(0, 50)));
     renderMarkets();
-    createStatus.textContent = `${ticker} is live on Thru. Mint: ${mint.address}`;
+    createStatus.textContent = liquidityThru > 0n
+      ? `${ticker} is live and tradeable at launch. Creator LP: ${poolMetadata.creatorLpAccount}`
+      : `${ticker} is live on Thru. Mint: ${mint.address}`;
     createButton.textContent = "Token created on Thru";
   } catch (reason) {
     createStatus.textContent = reason instanceof Error ? reason.message : "Token creation failed.";
@@ -500,18 +739,51 @@ function closeTrade() {
   document.body.classList.remove("modal-open");
 }
 
-document.querySelector(".token-table")?.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-trade]");
-  if (button) openTrade(Number(button.dataset.trade), button.dataset.tradeSide);
-});
-document.querySelectorAll("[data-trade-close]").forEach((button) => button.addEventListener("click", closeTrade));
-document.querySelectorAll("[data-side]").forEach((button) => button.addEventListener("click", () => {
-  if (activeTrade) openTrade(readMarkets().findIndex((market) => market.mintAddress === activeTrade.mintAddress), button.dataset.side);
-}));
-document.querySelector("[data-trade-amount]")?.addEventListener("input", (event) => {
-  document.querySelector("[data-trade-quote]").textContent = event.target.value && activeTrade?.liquidity ? "Fetching quote…" : "—";
-});
-document.querySelector("[data-trade-submit]")?.addEventListener("click", () => {
+async function submitTokenTransfer(source, destination, amount) {
+  if (amount <= 0n) return;
+  await submitTokenInstruction({
+    accounts: { readWrite: [source.address, destination.address] },
+    instructionData: createTransferInstruction({
+      sourceAccountBytes: source.bytes,
+      destinationAccountBytes: destination.bytes,
+      amount,
+    }),
+  });
+}
+
+async function submitSwap(market, side, amountIn, tokenAccount, wthruAccount) {
+  const pool = derivePool(market.mintAddress);
+  const buying = side === "buy";
+  const userInput = buying ? wthruAccount : tokenAccount;
+  const userOutput = buying ? tokenAccount : wthruAccount;
+  const inputMint = buying ? WTHRU_MINT : market.mintAddress;
+  const inputIsOne = pool.mintOneAddress === inputMint;
+  const vaultInput = inputIsOne ? pool.vaultOne : pool.vaultTwo;
+  const vaultOutput = inputIsOne ? pool.vaultTwo : pool.vaultOne;
+  await submitProgramInstruction(AMM_PROGRAM_ADDRESS, {
+    accounts: {
+      readWrite: [
+        pool.poolAddress, userInput.address, userOutput.address,
+        vaultInput.address, vaultOutput.address, pool.lpMint.address,
+      ],
+      readOnly: [TOKEN_PROGRAM],
+    },
+    instructionData: createSwapInstruction({
+      poolAccountBytes: pool.poolBytes,
+      userTransferAuthorityBytes: connectedAccount.publicKey,
+      userInputAccountBytes: userInput.bytes,
+      userOutputAccountBytes: userOutput.bytes,
+      vaultInputAccountBytes: vaultInput.bytes,
+      vaultOutputAccountBytes: vaultOutput.bytes,
+      lpMintAccountBytes: pool.lpMint.bytes,
+      tokenProgramAccountBytes: Pubkey.from(TOKEN_PROGRAM).toBytes(),
+      amountIn,
+    }),
+  });
+}
+
+async function executeTrade() {
+  const button = document.querySelector("[data-trade-submit]");
   const status = document.querySelector("[data-trade-status]");
   if (!connectedAccount) {
     closeTrade();
@@ -522,7 +794,80 @@ document.querySelector("[data-trade-submit]")?.addEventListener("click", () => {
     status.textContent = "Trade not submitted: a wrapped-THRU pool has not been seeded for this mint yet.";
     return;
   }
-  status.textContent = `${activeSide === "buy" ? "Buy" : "Sell"} routing will use the live Thru AMM quote.`;
+
+  const value = document.querySelector("[data-trade-amount]").value;
+  let amount;
+  try {
+    amount = parseUnits(value, activeSide === "buy" ? WTHRU_DECIMALS : activeTrade.decimals);
+    if (amount <= 0n) throw new Error("Enter an amount greater than zero.");
+  } catch (reason) {
+    status.textContent = reason.message;
+    return;
+  }
+  const protocolFee = amount * BigInt(PROTOCOL_FEE_BPS) / 10000n;
+  const swapAmount = amount - protocolFee;
+  if (swapAmount <= 0n) {
+    status.textContent = "Amount is too small to route.";
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    status.textContent = "Preparing your Thru token accounts…";
+    await ensureAccountExists((message) => { status.textContent = message; });
+    const userToken = await ensureTokenAccount(connectedAccount.address, activeTrade.mintAddress);
+    const userWthru = await ensureTokenAccount(connectedAccount.address, WTHRU_MINT);
+    const feeMint = activeSide === "buy" ? WTHRU_MINT : activeTrade.mintAddress;
+    const treasuryAccount = await ensureTokenAccount(GENESIS_TREASURY, feeMint);
+
+    if (activeSide === "buy") {
+      status.textContent = `Wrapping ${formatUnits(amount, WTHRU_DECIMALS)} faucet THRU…`;
+      await wrapThru(amount, userWthru);
+    }
+
+    status.textContent = `Swapping through the ${CREATOR_FEE_BPS / 100}% creator-fee pool…`;
+    await submitSwap(activeTrade, activeSide, swapAmount, userToken, userWthru);
+
+    if (protocolFee > 0n) {
+      status.textContent = `Routing the ${PROTOCOL_FEE_BPS / 100}% Genesis fee…`;
+      await submitTokenTransfer(
+        activeSide === "buy" ? userWthru : userToken,
+        treasuryAccount,
+        protocolFee,
+      );
+    }
+    status.textContent = `${activeSide === "buy" ? "Buy" : "Sell"} confirmed on Thru. Creator fee: 0.21%; Genesis fee: 0.09%.`;
+  } catch (reason) {
+    status.textContent = reason instanceof Error ? reason.message : "Trade failed on Thru.";
+  } finally {
+    button.disabled = false;
+  }
+}
+
+document.querySelector(".token-table")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-trade]");
+  if (button) openTrade(Number(button.dataset.trade), button.dataset.tradeSide);
 });
+document.querySelectorAll("[data-trade-close]").forEach((button) => button.addEventListener("click", closeTrade));
+document.querySelectorAll("[data-side]").forEach((button) => button.addEventListener("click", () => {
+  if (activeTrade) openTrade(readMarkets().findIndex((market) => market.mintAddress === activeTrade.mintAddress), button.dataset.side);
+}));
+document.querySelector("[data-trade-amount]")?.addEventListener("input", (event) => {
+  const quote = document.querySelector("[data-trade-quote]");
+  if (!event.target.value || !activeTrade?.liquidity) {
+    quote.textContent = "—";
+    return;
+  }
+  try {
+    const raw = parseUnits(event.target.value, activeSide === "buy" ? WTHRU_DECIMALS : activeTrade.decimals);
+    const afterFees = raw * 9970n / 10000n;
+    quote.textContent = activeSide === "buy"
+      ? `≈ ${formatUnits(afterFees * PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals)) / (10n ** BigInt(WTHRU_DECIMALS)), activeTrade.decimals)} ${activeTrade.ticker}`
+      : `≈ ${formatUnits(afterFees * (10n ** BigInt(WTHRU_DECIMALS)) / (PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals))), WTHRU_DECIMALS)} WTHRU`;
+  } catch {
+    quote.textContent = "—";
+  }
+});
+document.querySelector("[data-trade-submit]")?.addEventListener("click", executeTrade);
 
 renderMarkets();
