@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Discover and launch tokens on Genesis, powered by ThruVM." />
+    <title>Genesis App — Launchpad</title>
+    <link rel="icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/app/app.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <a class="app-brand" href="/"><span>G</span><strong>Genesis</strong><i>app</i></a>
+      <nav aria-label="Product"><a class="active" href="/app/">Explore</a><a href="#activity">Activity</a></nav>
+      <div class="header-tools"><button class="plain-button" type="button">Docs</button><button class="ink-button" type="button" data-connect>Connect wallet</button></div>
+    </header>
+
+    <main>
+      <section class="app-intro">
+        <p class="eyebrow">The Genesis launchpad</p>
+        <h1>Markets begin<br /><em>with an idea.</em></h1>
+        <p>Launch tokens, discover emerging markets, and follow every graduation on ThruVM.</p>
+      </section>
+
+      <section class="command-bar" aria-label="Launchpad controls">
+        <label><span>⌕</span><input data-search type="search" placeholder="Search token, ticker, or address" /></label>
+        <a class="create-button" href="#create">Create a token <b>＋</b></a>
+      </section>
+
+      <section class="graduated" aria-labelledby="graduated-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Archive 000</p><h2 id="graduated-title">Graduated</h2></div>
+          <p>Markets that have cleared the Genesis liquidity threshold.</p>
+        </div>
+        <div class="empty-ledger">
+          <div class="seal">G</div>
+          <div><strong>No graduated markets yet.</strong><span>The first completed Genesis launch will appear here.</span></div>
+          <em>Awaiting record</em>
+        </div>
+      </section>
+
+      <section class="explore" id="activity" aria-labelledby="explore-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Live registry</p><h2 id="explore-title">Explore</h2></div>
+          <p><strong data-count>0</strong> tokens launched on Genesis.</p>
+        </div>
+        <div class="filters">
+          <div role="tablist" aria-label="Sort launches">
+            <button class="selected" type="button" data-filter="recent">Recent activity</button>
+            <button type="button" data-filter="newest">Newest</button>
+            <button type="button" data-filter="market">Market cap</button>
+            <button type="button" data-filter="volume">Volume</button>
+          </div>
+          <div role="tablist" aria-label="Filter by age">
+            <button class="selected" type="button">All</button><button type="button">24h</button><button type="button">7d</button>
+          </div>
+        </div>
+        <div class="token-table">
+          <div class="table-head"><span>Market</span><span>Market cap</span><span>Progress</span><span>Last activity</span></div>
+          <div class="token-empty">
+            <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+            <h3>The registry is quiet.</h3>
+            <p>Genesis markets will populate here as soon as the protocol goes live.</p>
+            <a href="#create">Create the first market</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <section class="create-drawer" id="create" aria-labelledby="create-title">
+      <a href="#" class="drawer-shade" aria-label="Close creation panel"></a>
+      <form>
+        <a href="#" class="drawer-close" aria-label="Close">×</a>
+        <p class="eyebrow">New issuance</p>
+        <h2 id="create-title">Create a market</h2>
+        <label>Token name<input type="text" placeholder="e.g. Genesis One" /></label>
+        <label>Ticker<input type="text" placeholder="GEN" maxlength="8" /></label>
+        <label>Description<textarea placeholder="Describe the token and its purpose"></textarea></label>
+        <button class="ink-button" type="button" data-create>Connect wallet to continue</button>
+        <small>Issuance will settle through ThruVM. Creation is disabled until the Genesis protocol is live.</small>
+      </form>
+    </section>
+
+    <script src="/app/app.js"></script>
+  </body>
+</html>
