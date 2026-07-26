@@ -236,6 +236,8 @@ async function submitTransaction(rawTransaction) {
         13: "The AMM pool account could not be made writable.",
         14: "The AMM token operation failed.",
         17: "The supplied liquidity amounts are outside the pool bounds.",
+        22: "The AMM derived a different pool address than the website.",
+        23: "Thru rejected the AMM pool account creation proof.",
       };
       const explanation = result.vmError === -766
         ? "The requested program account is not deployed on this Thru network."
@@ -702,7 +704,7 @@ function renderMarkets() {
         <div class="market-identity"><span>${market.ticker.slice(0, 1)}</span><div><strong>${market.name}</strong><small>${market.ticker} · ${market.mintAddress.slice(0, 7)}…${market.mintAddress.slice(-5)}</small></div></div>
         <strong>${BigInt(market.supply || "0").toLocaleString()}</strong>
         <span class="liquidity-state">${market.liquidity ? "Live" : market.liquidityPendingReason ? "AMM pending" : "Awaiting pool"}</span>
-        <div class="trade-actions"><button type="button" data-trade="${index}" data-trade-side="buy">Buy</button><button type="button" data-trade="${index}" data-trade-side="sell">Sell</button></div>
+        <div class="trade-actions"><button type="button" data-trade="${index}" data-trade-side="buy">Buy</button><button type="button" data-trade="${index}" data-trade-side="sell">Sell</button><button type="button" data-liquidity="${index}">Pool</button></div>
       </article>`).join("")}
     </div>`;
 }
@@ -857,7 +859,9 @@ document.querySelector("[data-create-form]")?.addEventListener("submit", (event)
 });
 
 const tradeModal = document.querySelector("[data-trade-modal]");
+const liquidityModal = document.querySelector("[data-liquidity-modal]");
 let activeTrade = null;
+let activeLiquidityMarket = null;
 let activeSide = "buy";
 
 function openTrade(index, side) {
@@ -880,6 +884,106 @@ function openTrade(index, side) {
 function closeTrade() {
   tradeModal.hidden = true;
   document.body.classList.remove("modal-open");
+}
+
+function openLiquidity(index) {
+  activeLiquidityMarket = readMarkets()[index];
+  if (!activeLiquidityMarket) return;
+  liquidityModal.hidden = false;
+  document.body.classList.add("modal-open");
+  document.querySelector("[data-liquidity-title]").textContent =
+    `Provide ${activeLiquidityMarket.ticker} liquidity`;
+  document.querySelector("[data-liquidity-status]").textContent = activeLiquidityMarket.liquidity
+    ? "Your deposit will join the live on-chain pool and mint LP tokens to your wallet."
+    : "The creator must successfully initialize this pool before public deposits can begin.";
+}
+
+function closeLiquidity() {
+  liquidityModal.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+async function provideLiquidity() {
+  const button = document.querySelector("[data-liquidity-submit]");
+  const status = document.querySelector("[data-liquidity-status]");
+  if (!connectedAccount) {
+    closeLiquidity();
+    openWallet();
+    return;
+  }
+  if (!activeLiquidityMarket?.liquidity) {
+    status.textContent = "This pool is not initialized yet. No funds were moved.";
+    return;
+  }
+
+  let thruAmount;
+  let tokenAmount;
+  try {
+    thruAmount = parseUnits(
+      document.querySelector("[data-liquidity-thru]").value,
+      NATIVE_THRU_DECIMALS,
+    );
+    tokenAmount = parseUnits(
+      document.querySelector("[data-liquidity-token]").value,
+      activeLiquidityMarket.decimals,
+    );
+    if (thruAmount <= 0n || tokenAmount <= 0n) {
+      throw new Error("Enter both THRU and token amounts.");
+    }
+  } catch (reason) {
+    status.textContent = reason instanceof Error ? reason.message : "Enter valid liquidity amounts.";
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await ensureAccountExists((message) => { status.textContent = message; });
+    const pool = derivePool(activeLiquidityMarket.mintAddress);
+    if (!(await getAccountSnapshot(pool.poolAddress)).exists) {
+      throw new Error("This pool is not initialized yet. No funds were moved.");
+    }
+    status.textContent = "Preparing your pool accounts…";
+    const userToken = await ensureTokenAccount(
+      connectedAccount.address,
+      activeLiquidityMarket.mintAddress,
+    );
+    const userWthru = await ensureTokenAccount(connectedAccount.address, WTHRU_MINT);
+    const userLp = await ensureTokenAccount(connectedAccount.address, pool.lpMint.address);
+    status.textContent = `Wrapping ${formatUnits(thruAmount, NATIVE_THRU_DECIMALS, 9)} THRU…`;
+    await wrapThru(thruAmount, userWthru);
+
+    const tokenIsOne = pool.mintOneAddress === activeLiquidityMarket.mintAddress;
+    const depositorOne = tokenIsOne ? userToken : userWthru;
+    const depositorTwo = tokenIsOne ? userWthru : userToken;
+    status.textContent = "Adding liquidity and minting your LP position…";
+    await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
+      accounts: {
+        readWrite: [
+          pool.poolAddress, depositorOne.address, depositorTwo.address, userLp.address,
+          pool.vaultOne.address, pool.vaultTwo.address, pool.lpMint.address,
+        ],
+        readOnly: [TOKEN_PROGRAM],
+      },
+      instructionData: createAddLiquidityInstruction({
+        poolAccountBytes: pool.poolBytes,
+        depositorAccountBytes: connectedAccount.publicKey,
+        depositorTokenOneAccountBytes: depositorOne.bytes,
+        depositorTokenTwoAccountBytes: depositorTwo.bytes,
+        depositorLpAccountBytes: userLp.bytes,
+        vaultOneAccountBytes: pool.vaultOne.bytes,
+        vaultTwoAccountBytes: pool.vaultTwo.bytes,
+        lpMintAccountBytes: pool.lpMint.bytes,
+        tokenProgramAccountBytes: Pubkey.from(TOKEN_PROGRAM).toBytes(),
+        maxAmountMintOne: tokenIsOne ? tokenAmount : thruAmount,
+        maxAmountMintTwo: tokenIsOne ? thruAmount : tokenAmount,
+      }),
+    });
+    status.textContent = `Liquidity added. LP tokens were issued to ${compactAddress(connectedAccount.address)}.`;
+  } catch (reason) {
+    status.textContent = reason instanceof Error ? reason.message : "Liquidity deposit failed on Thru.";
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function submitTokenTransfer(source, destination, amount) {
@@ -990,6 +1094,8 @@ async function executeTrade() {
 document.querySelector(".token-table")?.addEventListener("click", (event) => {
   const button = event.target.closest("[data-trade]");
   if (button) openTrade(Number(button.dataset.trade), button.dataset.tradeSide);
+  const liquidityButton = event.target.closest("[data-liquidity]");
+  if (liquidityButton) openLiquidity(Number(liquidityButton.dataset.liquidity));
 });
 document.querySelectorAll("[data-trade-close]").forEach((button) => button.addEventListener("click", closeTrade));
 document.querySelectorAll("[data-side]").forEach((button) => button.addEventListener("click", () => {
@@ -1012,6 +1118,10 @@ document.querySelector("[data-trade-amount]")?.addEventListener("input", (event)
   }
 });
 document.querySelector("[data-trade-submit]")?.addEventListener("click", executeTrade);
+document.querySelectorAll("[data-liquidity-close]").forEach((button) => {
+  button.addEventListener("click", closeLiquidity);
+});
+document.querySelector("[data-liquidity-submit]")?.addEventListener("click", provideLiquidity);
 
 renderMarkets();
 restoreWalletSession();
