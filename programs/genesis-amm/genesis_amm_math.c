@@ -4,9 +4,9 @@ static uint64_t min_u64(uint64_t a, uint64_t b) {
   return a < b ? a : b;
 }
 
-uint64_t genesis_isqrt_u128(unsigned __int128 value) {
-  unsigned __int128 bit = (unsigned __int128)1 << 126;
-  unsigned __int128 result = 0;
+uint64_t genesis_isqrt_u128(genesis_u128_t value) {
+  genesis_u128_t bit = (genesis_u128_t)1 << 126;
+  genesis_u128_t result = 0;
 
   while (bit > value) bit >>= 2;
   while (bit != 0) {
@@ -29,7 +29,7 @@ int genesis_quote_initial_liquidity(
 ) {
   if (!amount_one || !amount_two || !lp_to_creator || !lp_locked) return 0;
   uint64_t root = genesis_isqrt_u128(
-    (unsigned __int128)amount_one * (unsigned __int128)amount_two
+    (genesis_u128_t)amount_one * (genesis_u128_t)amount_two
   );
   if (root <= GENESIS_AMM_MINIMUM_LIQUIDITY) return 0;
   *lp_locked = GENESIS_AMM_MINIMUM_LIQUIDITY;
@@ -51,19 +51,19 @@ int genesis_quote_add_liquidity(
       !amount_one || !amount_two || !lp_minted) return 0;
 
   uint64_t by_one = (uint64_t)(
-    (unsigned __int128)max_one * lp_supply / reserve_one
+    (genesis_u128_t)max_one * lp_supply / reserve_one
   );
   uint64_t by_two = (uint64_t)(
-    (unsigned __int128)max_two * lp_supply / reserve_two
+    (genesis_u128_t)max_two * lp_supply / reserve_two
   );
   uint64_t minted = min_u64(by_one, by_two);
   if (!minted) return 0;
 
   uint64_t one = (uint64_t)(
-    ((unsigned __int128)minted * reserve_one + lp_supply - 1) / lp_supply
+    ((genesis_u128_t)minted * reserve_one + lp_supply - 1) / lp_supply
   );
   uint64_t two = (uint64_t)(
-    ((unsigned __int128)minted * reserve_two + lp_supply - 1) / lp_supply
+    ((genesis_u128_t)minted * reserve_two + lp_supply - 1) / lp_supply
   );
   if (one > max_one || two > max_two) return 0;
   *amount_one = one;
@@ -83,10 +83,10 @@ int genesis_quote_withdraw(
   if (!lp_amount || !reserve_one || !reserve_two || !lp_supply ||
       lp_amount >= lp_supply || !amount_one || !amount_two) return 0;
   *amount_one = (uint64_t)(
-    (unsigned __int128)lp_amount * reserve_one / lp_supply
+    (genesis_u128_t)lp_amount * reserve_one / lp_supply
   );
   *amount_two = (uint64_t)(
-    (unsigned __int128)lp_amount * reserve_two / lp_supply
+    (genesis_u128_t)lp_amount * reserve_two / lp_supply
   );
   return *amount_one != 0 && *amount_two != 0;
 }
@@ -102,14 +102,14 @@ int genesis_quote_swap_exact_in(
       fee_bps == 0 || fee_bps > GENESIS_AMM_MAX_FEE_BPS) return 0;
 
   uint64_t after_fee = (uint64_t)(
-    (unsigned __int128)amount_in *
+    (genesis_u128_t)amount_in *
     (GENESIS_AMM_BPS_DENOMINATOR - fee_bps) /
     GENESIS_AMM_BPS_DENOMINATOR
   );
   if (!after_fee) return 0;
   uint64_t out = (uint64_t)(
-    (unsigned __int128)reserve_out * after_fee /
-    ((unsigned __int128)reserve_in + after_fee)
+    (genesis_u128_t)reserve_out * after_fee /
+    ((genesis_u128_t)reserve_in + after_fee)
   );
   if (!out || out >= reserve_out) return 0;
 

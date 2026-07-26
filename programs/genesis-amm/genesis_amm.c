@@ -185,7 +185,7 @@ static void validate_common(pool_t const *pool, ushort pool_idx,
   (void)pool_idx;
 }
 
-static void pool_auth(ushort pool_idx, uchar storage[14],
+static void pool_auth(ushort pool_idx, uchar storage[24],
                       tsdk_invoke_auth_t const **out) {
   tsdk_invoke_auth_t *auth = (tsdk_invoke_auth_t *)storage;
   auth->magic = TSDK_INVOKE_AUTH_MAGIC;
@@ -231,7 +231,7 @@ static void handle_add(uchar const *data, ulong size) {
 
   token_transfer(ix->token_program, ix->user_one, ix->vault_one, amount_one, NULL);
   token_transfer(ix->token_program, ix->user_two, ix->vault_two, amount_two, NULL);
-  uchar auth_storage[14];
+  uchar auth_storage[24];
   tsdk_invoke_auth_t const *auth;
   pool_auth(ix->pool, auth_storage, &auth);
   token_mint(ix->token_program, ix->lp_mint, ix->user_lp, ix->pool, minted, auth);
@@ -252,7 +252,7 @@ static void handle_withdraw(uchar const *data, ulong size) {
     supply + pool->locked_lp_supply, &one, &two
   ), ERR_LIQUIDITY_BOUNDS);
   token_burn(ix->token_program, ix->user_lp, ix->lp_mint, ix->user, ix->lp_amount);
-  uchar auth_storage[14];
+  uchar auth_storage[24];
   tsdk_invoke_auth_t const *auth;
   pool_auth(ix->pool, auth_storage, &auth);
   token_transfer(ix->token_program, ix->vault_one, ix->user_one, one, auth);
@@ -284,7 +284,7 @@ static void handle_swap(uchar const *data, ulong size) {
 
   token_transfer(ix->token_program, ix->user_input, ix->vault_input,
                  ix->amount_in, NULL);
-  uchar auth_storage[14];
+  uchar auth_storage[24];
   tsdk_invoke_auth_t const *auth;
   pool_auth(ix->pool, auth_storage, &auth);
   token_transfer(ix->token_program, ix->vault_output, ix->user_output,
@@ -343,7 +343,7 @@ static void handle_init(uchar const *data, ulong size) {
   ulong lp_proof_size = load_u64(data + 58);
   ulong one_proof_size = load_u64(data + 66);
   ulong two_proof_size = load_u64(data + 74);
-  unsigned __int128 total = 82U;
+  genesis_u128_t total = 82U;
   total += pool_proof_size;
   total += lp_proof_size;
   total += one_proof_size;
