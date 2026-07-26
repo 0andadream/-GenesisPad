@@ -15,7 +15,6 @@ search?.addEventListener("input", () => {
 });
 
 const connectButtons = [...document.querySelectorAll("[data-connect]")];
-const walletEntryButtons = [...document.querySelectorAll("[data-wallet-entry]")];
 const createButton = document.querySelector("[data-create]");
 const createStatus = document.querySelector("[data-create-status]");
 let connectedAccount = null;
@@ -72,13 +71,6 @@ async function connectWallet() {
 }
 
 connectButtons.forEach((button) => button.addEventListener("click", connectWallet));
-walletEntryButtons.forEach((button) => {
-  button.addEventListener("click", async () => {
-    const action = button.dataset.walletEntry;
-    if (createStatus) createStatus.textContent = `Opening Thru Wallet. Choose “${action === "create" ? "Create wallet" : "Import wallet"}” inside the secure wallet window.`;
-    await connectWallet();
-  });
-});
 createButton?.addEventListener("click", async () => {
   const account = connectedAccount || await connectWallet();
   if (!account) return;
