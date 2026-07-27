@@ -76,6 +76,10 @@ let connectedAccount = null;
 let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
 const MARKETS_KEY = "genesis-markets";
+// Public shared registry so anyone on the site can see launches and trade.
+const MARKET_REGISTRY_API = "/api/markets";
+const MARKET_REGISTRY_FALLBACK =
+  "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70";
 
 function compactAddress(address) {
   return address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "Connected";
@@ -496,7 +500,11 @@ function assertInitialLiquidityAmounts(amountOne, amountTwo) {
 /* ─── Bonding curve ────────────────────────────────────────────────────── */
 
 function isBondingMarket(market) {
-  return Boolean(market?.curve) && market.phase !== "amm" && !market.graduated;
+  // Curve stays tradeable until an AMM pool is actually live.
+  // Graduation alone does not lock the curve (AMM seed may still be pending).
+  if (!market?.curve) return false;
+  if (market.liquidity && market.phase === "amm") return false;
+  return Boolean(market.curve.privateKeyHex && market.curve.tokenAccount);
 }
 
 function isGraduatedMarket(market) {
@@ -589,8 +597,91 @@ function quoteCurveSell(market, tokensIn) {
   };
 }
 
+function marketTimestamp(market) {
+  return Number(market?.updatedAt || market?.createdAt || 0);
+}
+
+function mergeMarketLists(...lists) {
+  const map = new Map();
+  for (const list of lists) {
+    for (const market of list || []) {
+      if (!market?.mintAddress) continue;
+      const prev = map.get(market.mintAddress);
+      if (!prev || marketTimestamp(market) >= marketTimestamp(prev)) {
+        map.set(market.mintAddress, market);
+      }
+    }
+  }
+  return [...map.values()]
+    .sort((a, b) => marketTimestamp(b) - marketTimestamp(a))
+    .slice(0, 100);
+}
+
 function saveMarkets(markets) {
-  localStorage.setItem(MARKETS_KEY, JSON.stringify(markets.slice(0, 50)));
+  const stamped = markets.slice(0, 100).map((market) => ({
+    ...market,
+    updatedAt: market.updatedAt || market.createdAt || Date.now(),
+  }));
+  localStorage.setItem(MARKETS_KEY, JSON.stringify(stamped));
+  // Fire-and-forget public publish so other visitors can trade.
+  publishPublicMarkets(stamped).catch(() => { /* offline / registry optional */ });
+  return stamped;
+}
+
+async function fetchPublicMarkets() {
+  const endpoints = [MARKET_REGISTRY_API, MARKET_REGISTRY_FALLBACK];
+  for (const url of endpoints) {
+    try {
+      const response = await fetch(url, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+      if (!response.ok) continue;
+      const data = await response.json();
+      const markets = Array.isArray(data.markets) ? data.markets : Array.isArray(data) ? data : [];
+      if (markets.length || url === MARKET_REGISTRY_API) return markets;
+    } catch {
+      /* try next */
+    }
+  }
+  return [];
+}
+
+async function publishPublicMarkets(markets) {
+  const payload = {
+    markets: markets.slice(0, 100),
+    updatedAt: Date.now(),
+  };
+  const tryPut = async (url) => {
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(`publish ${response.status}`);
+    return response;
+  };
+  try {
+    await tryPut(MARKET_REGISTRY_API);
+    return;
+  } catch {
+    await tryPut(MARKET_REGISTRY_FALLBACK);
+  }
+}
+
+async function syncPublicMarkets() {
+  const local = readMarkets();
+  const remote = await fetchPublicMarkets();
+  const merged = mergeMarketLists(remote, local);
+  localStorage.setItem(MARKETS_KEY, JSON.stringify(merged));
+  // Push merge upstream so local-only launches become public.
+  if (merged.length) {
+    try { await publishPublicMarkets(merged); } catch { /* ignore */ }
+  }
+  return merged;
 }
 
 function updateMarket(mintAddress, patch) {
@@ -598,7 +689,11 @@ function updateMarket(mintAddress, patch) {
   const index = markets.findIndex((m) => m.mintAddress === mintAddress);
   if (index < 0) return null;
   const prev = markets[index];
-  markets[index] = { ...prev, ...patch };
+  markets[index] = {
+    ...prev,
+    ...patch,
+    updatedAt: Date.now(),
+  };
   if (patch.curve) {
     markets[index].curve = { ...(prev.curve || {}), ...patch.curve };
   }
@@ -751,82 +846,74 @@ async function createBondingCurve({ mint, creatorTokenAccount, decimals, supplyW
 }
 
 async function graduateMarket(market, setStatus = () => {}) {
-  if (!market?.curve || market.graduated) return market;
-  setStatus("Graduation threshold reached — preparing AMM seed…");
-  const curveSigner = await loadCurveSigner(market);
-  const c = readCurve(market);
-  // Keep a little gas on the curve; seed the rest.
-  const seedThru = c.realThru > CURVE_GAS_FUND * 2n ? c.realThru - CURVE_GAS_FUND : c.realThru / 2n;
-  // Match launch price ~500 tokens per THRU for AMM seed amounts.
-  const seedTokens = (seedThru * PRICE_TOKENS_PER_THRU * (10n ** BigInt(market.decimals)))
-    / (10n ** BigInt(NATIVE_THRU_DECIMALS));
-  const tokensAvailable = c.realToken;
-  const tokenAmount = seedTokens > 0n && seedTokens <= tokensAvailable
-    ? seedTokens
-    : tokensAvailable / 2n;
+  if (!market?.curve) return market;
+  if (market.graduated && market.liquidity) return market;
 
-  let ammSeeded = false;
-  let liquidityPendingReason = "";
-  let poolMetadata = {};
+  // Mark graduated immediately. The bonding curve stays open for public trading
+  // until an AMM is successfully seeded (on-chain AMM seed is still unreliable).
+  setStatus("Graduation threshold reached — market stays tradeable on the public curve…");
+  let updated = updateMarket(market.mintAddress, {
+    graduated: true,
+    phase: "graduated",
+    liquidity: false,
+    liquidityPendingReason: "",
+    graduatedAt: market.graduatedAt || Date.now(),
+    updatedAt: Date.now(),
+  }) || market;
+
+  // Optional best-effort AMM seed (does not lock or drain the curve on failure).
+  if (!connectedAccount || connectedAccount.address !== market.creator) {
+    updated = updateMarket(market.mintAddress, {
+      liquidityPendingReason:
+        "Graduated. Public curve trading continues. Creator can retry AMM seed later.",
+    }) || updated;
+    return updated;
+  }
 
   try {
+    const c = readCurve(updated);
+    const seedThru = c.realThru > CURVE_GAS_FUND * 2n ? c.realThru - CURVE_GAS_FUND : c.realThru / 2n;
+    const seedTokens = (seedThru * PRICE_TOKENS_PER_THRU * (10n ** BigInt(market.decimals)))
+      / (10n ** BigInt(NATIVE_THRU_DECIMALS));
+    const tokenAmount = seedTokens > 0n && seedTokens <= c.realToken
+      ? seedTokens
+      : c.realToken / 2n;
     if (seedThru <= 0n || tokenAmount <= 0n) {
       throw new Error("Curve reserves are too small to seed an AMM pool yet.");
     }
     assertInitialLiquidityAmounts(tokenAmount, seedThru);
 
-    // Move THRU + tokens to the creator (connected) wallet, then reuse seedPool.
-    // Graduation is triggered by the trader; creator must be connected for AMM LP mint.
-    if (!connectedAccount) throw new Error("Connect a wallet to complete graduation.");
-    if (connectedAccount.address !== market.creator) {
-      // Anyone can trigger accounting graduation; AMM seed needs creator later.
-      liquidityPendingReason =
-        "Graduated on the bonding curve. Creator must open the market and seed the AMM from curve reserves.";
-      const updated = updateMarket(market.mintAddress, {
-        graduated: true,
-        phase: "graduated",
-        liquidity: false,
-        liquidityPendingReason,
-        graduatedAt: Date.now(),
-      });
-      return updated || market;
-    }
-
-    setStatus("Withdrawing curve reserves to seed the AMM…");
+    setStatus("Trying AMM seed from curve reserves (optional)…");
+    const curveSigner = await loadCurveSigner(updated);
     const creatorToken = await ensureTokenAccount(connectedAccount.address, market.mintAddress);
     const curveToken = {
       address: market.curve.tokenAccount,
       bytes: Pubkey.from(market.curve.tokenAccount).toBytes(),
     };
 
-    // Pull tokens from curve → creator (curve signs as fee payer / owner).
-    if (tokenAmount > 0n) {
-      await submitAs(curveSigner, TOKEN_PROGRAM, {
-        accounts: { readWrite: [curveToken.address, creatorToken.address] },
-        instructionData: createTransferInstruction({
-          sourceAccountBytes: curveToken.bytes,
-          destinationAccountBytes: creatorToken.bytes,
-          amount: tokenAmount,
-        }),
-        fee: 0n,
-        programLabel: "Curve token withdraw",
-      });
-    }
-    // Pull native THRU from curve → creator.
-    if (seedThru > 0n) {
-      await submitAs(curveSigner, EOA_PROGRAM, {
-        accounts: { readWrite: [connectedAccount.address] },
-        instructionData: nativeTransferInstruction(seedThru),
-        fee: 0n,
-        programLabel: "Curve THRU withdraw",
-      });
-    }
+    // Snapshot balances first; only mark AMM live if seedPool fully succeeds.
+    await submitAs(curveSigner, TOKEN_PROGRAM, {
+      accounts: { readWrite: [curveToken.address, creatorToken.address] },
+      instructionData: createTransferInstruction({
+        sourceAccountBytes: curveToken.bytes,
+        destinationAccountBytes: creatorToken.bytes,
+        amount: tokenAmount,
+      }),
+      fee: 0n,
+      programLabel: "Curve token withdraw",
+    });
+    await submitAs(curveSigner, EOA_PROGRAM, {
+      accounts: { readWrite: [connectedAccount.address] },
+      instructionData: nativeTransferInstruction(seedThru),
+      fee: 0n,
+      programLabel: "Curve THRU withdraw",
+    });
 
     const mintObj = {
       address: market.mintAddress,
       bytes: Pubkey.from(market.mintAddress).toBytes(),
     };
-    poolMetadata = await seedPool({
+    const poolMetadata = await seedPool({
       mint: mintObj,
       tokenAccount: creatorToken,
       decimals: market.decimals,
@@ -834,27 +921,36 @@ async function graduateMarket(market, setStatus = () => {}) {
       tokenAmount,
       setStatus,
     });
-    ammSeeded = true;
-  } catch (reason) {
-    liquidityPendingReason = reason instanceof Error
-      ? `Graduated, but AMM seed pending: ${reason.message}`
-      : "Graduated, but AMM seed is pending.";
-  }
 
-  const updated = updateMarket(market.mintAddress, {
-    graduated: true,
-    phase: ammSeeded ? "amm" : "graduated",
-    liquidity: ammSeeded,
-    liquidityPendingReason: ammSeeded ? "" : liquidityPendingReason,
-    graduatedAt: Date.now(),
-    ...poolMetadata,
-    curve: {
-      ...market.curve,
-      realThru: (c.realThru - (ammSeeded ? seedThru : 0n)).toString(),
-      realToken: (c.realToken - (ammSeeded ? tokenAmount : 0n)).toString(),
-    },
-  });
-  return updated || market;
+    updated = updateMarket(market.mintAddress, {
+      graduated: true,
+      phase: "amm",
+      liquidity: true,
+      liquidityPendingReason: "",
+      graduatedAt: Date.now(),
+      updatedAt: Date.now(),
+      ...poolMetadata,
+      curve: {
+        ...updated.curve,
+        realThru: (c.realThru - seedThru).toString(),
+        realToken: (c.realToken - tokenAmount).toString(),
+      },
+    }) || updated;
+    setStatus("Graduated and AMM seeded.");
+  } catch (reason) {
+    // Keep curve fully tradeable — do not block the public market on AMM errors.
+    const detail = reason instanceof Error ? reason.message : "AMM seed failed";
+    updated = updateMarket(market.mintAddress, {
+      graduated: true,
+      phase: "graduated",
+      liquidity: false,
+      liquidityPendingReason:
+        `Graduated — public curve trading continues. AMM seed deferred (${detail}).`,
+      updatedAt: Date.now(),
+    }) || updated;
+    setStatus("Graduated. Trading continues on the public bonding curve.");
+  }
+  return updated;
 }
 
 async function wrapThru(amount, destination) {
@@ -1258,8 +1354,8 @@ async function createToken() {
     saveMarkets(markets);
     renderMarkets();
     createStatus.textContent =
-      `${ticker} launched on a bonding curve. Buy/sell until ` +
-      `${formatUnits(GRADUATION_REAL_THRU, NATIVE_THRU_DECIMALS, 9)} THRU is raised, then it graduates. Mint: ${mint.address}`;
+      `${ticker} is live on the public bonding curve. Anyone on Genesis can buy/sell. ` +
+      `Graduation at ${formatUnits(GRADUATION_REAL_THRU, NATIVE_THRU_DECIMALS, 9)} THRU raised. Mint: ${mint.address}`;
     createButton.textContent = "Token created on Thru";
   } catch (reason) {
     createStatus.textContent = reason instanceof Error ? reason.message : "Token creation failed.";
@@ -1278,7 +1374,9 @@ function readMarkets() {
 
 function marketStatusLabel(market) {
   if (market.phase === "amm" || market.liquidity) return "AMM live";
-  if (market.graduated || market.phase === "graduated") return "Graduated";
+  if (market.graduated || market.phase === "graduated") {
+    return isBondingMarket(market) ? "Graduated · curve open" : "Graduated";
+  }
   if (market.curve) return `Curve ${curveProgress(market).toFixed(0)}%`;
   if (market.liquidityPendingReason) return "AMM pending";
   return "Awaiting pool";
@@ -1307,12 +1405,9 @@ function renderMarkets() {
   const table = document.querySelector(".token-table");
   document.querySelector("[data-count]").textContent = String(markets.length);
 
-  const bonding = [];
-  const graduated = [];
-  markets.forEach((market, index) => {
-    if (isGraduatedMarket(market) && !isBondingMarket(market)) graduated.push({ market, index });
-    else bonding.push({ market, index });
-  });
+  // Public board: every visitor sees every market (from shared registry + local cache).
+  const indexed = markets.map((market, index) => ({ market, index }));
+  const graduated = indexed.filter(({ market }) => isGraduatedMarket(market));
 
   const graduatedHost = document.querySelector("[data-graduated-list]");
   if (graduatedHost) {
@@ -1320,7 +1415,7 @@ function renderMarkets() {
       graduatedHost.innerHTML = `
         <div class="empty-ledger">
           <div class="seal">G</div>
-          <div><strong>No graduated markets yet.</strong><span>Markets that fill the bonding curve will land here, then seed the AMM.</span></div>
+          <div><strong>No graduated markets yet.</strong><span>When a curve hits its THRU target it appears here. Trading can stay open on the curve until AMM is live.</span></div>
           <em>Awaiting record</em>
         </div>`;
     } else {
@@ -1334,16 +1429,15 @@ function renderMarkets() {
       <div class="token-empty">
         <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
         <h3>The registry is quiet.</h3>
-        <p>Launch a token to open a bonding curve. Buys and sells run until graduation.</p>
+        <p>Launches are public. Create a market and anyone on Genesis can trade it with their own wallet.</p>
         <a href="#create">Create the first market</a>
       </div>`;
     return;
   }
 
-  const list = bonding.length ? bonding : markets.map((market, index) => ({ market, index }));
   table.innerHTML = `
     <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
-    <div class="market-list">${list.map(({ market, index }) => renderMarketCard(market, index)).join("")}</div>`;
+    <div class="market-list">${indexed.map(({ market, index }) => renderMarketCard(market, index)).join("")}</div>`;
 }
 
 async function claimFaucet() {
@@ -1601,16 +1695,19 @@ function openTrade(index, side) {
   const progress = activeTrade.curve ? curveProgress(activeTrade) : null;
   if (isBondingMarket(activeTrade)) {
     const c = readCurve(activeTrade);
+    const gradNote = activeTrade.graduated
+      ? "Graduated — public curve trading stays open until AMM is live. "
+      : "";
     document.querySelector("[data-trade-status]").textContent =
-      `Bonding curve · ${progress.toFixed(1)}% to graduation ` +
+      `${gradNote}Public bonding curve · ${progress.toFixed(1)}% to graduation ` +
       `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU raised). ` +
-      "Trade the curve until the target, then liquidity seeds the AMM.";
+      "Anyone with a Thru wallet can trade from this site.";
   } else if (activeTrade.liquidity) {
     document.querySelector("[data-trade-status]").textContent = "Quote updates from the Thru AMM pool.";
   } else if (activeTrade.graduated) {
     document.querySelector("[data-trade-status]").textContent =
       activeTrade.liquidityPendingReason ||
-      "This market graduated from the bonding curve. AMM seed is pending.";
+      "This market graduated. Curve inventory may be empty — AMM seed still pending.";
   } else {
     document.querySelector("[data-trade-status]").textContent =
       "This mint is live, but has no bonding curve or AMM pool yet.";
@@ -1810,7 +1907,7 @@ async function executeCurveTrade(amount, status) {
       updated = await graduateMarket(updated || market, (message) => { status.textContent = message; });
       status.textContent += updated?.liquidity
         ? " Market graduated and AMM was seeded."
-        : " Market graduated from the bonding curve.";
+        : " Market graduated — public curve trading continues.";
     }
     activeTrade = updated || readMarkets().find((m) => m.mintAddress === market.mintAddress);
     renderMarkets();
@@ -1965,5 +2062,25 @@ document.querySelectorAll("[data-liquidity-close]").forEach((button) => {
 });
 document.querySelector("[data-liquidity-submit]")?.addEventListener("click", provideLiquidity);
 
-renderMarkets();
+async function bootMarkets() {
+  try {
+    await syncPublicMarkets();
+  } catch {
+    /* local cache still works offline */
+  }
+  renderMarkets();
+  // Keep the public board fresh for visitors trading from other wallets/browsers.
+  setInterval(async () => {
+    try {
+      await syncPublicMarkets();
+      if (document.querySelector("[data-trade-modal]")?.hidden !== false) {
+        renderMarkets();
+      } else {
+        renderMarkets();
+      }
+    } catch { /* ignore */ }
+  }, 12000);
+}
+
+bootMarkets();
 restoreWalletSession();
