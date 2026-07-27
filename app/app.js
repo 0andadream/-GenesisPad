@@ -548,6 +548,7 @@ function quoteCurveBuy(market, thruIn) {
   const net = thruIn - fee;
   if (net <= 0n) throw new Error("Amount is too small after fees.");
   const k = c.virtualThru * c.virtualToken;
+  // Price impact uses net (after fee). Full thruIn still lands in the vault.
   const newVirtualThru = c.virtualThru + net;
   const newVirtualToken = k / newVirtualThru;
   const tokensOut = c.virtualToken - newVirtualToken;
@@ -562,7 +563,8 @@ function quoteCurveBuy(market, thruIn) {
     next: {
       virtualThru: newVirtualThru,
       virtualToken: newVirtualToken,
-      realThru: c.realThru + net,
+      // Count the full deposit as sell liquidity (fee stays in the vault).
+      realThru: c.realThru + thruIn,
       realToken: c.realToken - tokensOut,
       graduationTarget: c.graduationTarget,
     },
@@ -572,6 +574,12 @@ function quoteCurveBuy(market, thruIn) {
 function quoteCurveSell(market, tokensIn) {
   if (tokensIn <= 0n) throw new Error("Enter an amount greater than zero.");
   const c = readCurve(market);
+  if (c.realThru <= 0n) {
+    throw new Error(
+      "The curve vault has no THRU to pay sellers yet. " +
+      "Sells need THRU from prior buys (creator free allocation cannot all be sold into an empty vault).",
+    );
+  }
   const k = c.virtualThru * c.virtualToken;
   const newVirtualToken = c.virtualToken + tokensIn;
   const newVirtualThru = k / newVirtualToken;
@@ -581,7 +589,11 @@ function quoteCurveSell(market, tokensIn) {
   const netThru = thruGross - fee;
   if (netThru <= 0n) throw new Error("Amount is too small after fees.");
   if (netThru > c.realThru) {
-    throw new Error("Not enough THRU left in the curve vault for that sell.");
+    throw new Error(
+      "Sell is larger than THRU in the curve vault. " +
+      "You can only sell into what buyers have paid in — use Max, or sell a smaller amount. " +
+      `(Vault ≈ ${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} THRU.)`,
+    );
   }
   return {
     fee,
@@ -590,11 +602,62 @@ function quoteCurveSell(market, tokensIn) {
     next: {
       virtualThru: newVirtualThru,
       virtualToken: newVirtualToken,
+      // Fee stays in the vault as residual depth.
       realThru: c.realThru - netThru,
       realToken: c.realToken + tokensIn,
       graduationTarget: c.graduationTarget,
     },
   };
+}
+
+/** Largest token amount that can be sold without exceeding vault THRU. */
+function maxSellableTokens(market) {
+  const c = readCurve(market);
+  if (c.realThru <= 0n || c.virtualThru <= 0n) return 0n;
+  // Binary search tokensIn in [0, virtualToken * 2] (sells can exceed virtual inventory).
+  let lo = 0n;
+  let hi = c.virtualToken * 4n + 1n;
+  // Cap search by a generous upper bound from constant-product invert.
+  while (lo < hi) {
+    const mid = (lo + hi + 1n) / 2n;
+    try {
+      const q = quoteCurveSell(market, mid);
+      if (q.netThru <= c.realThru) lo = mid;
+      else hi = mid - 1n;
+    } catch {
+      hi = mid - 1n;
+    }
+  }
+  return lo;
+}
+
+async function syncCurveVaultFromChain(market) {
+  if (!market?.curve?.address) return market;
+  try {
+    const snap = await getAccountSnapshot(market.curve.address);
+    const onChainThru = snap.exists ? snap.balance : 0n;
+    // Leave dust for the curve account to sign later txs when possible.
+    const spendable = onChainThru > CURVE_GAS_FUND ? onChainThru - CURVE_GAS_FUND : onChainThru;
+    let onChainTokens = BigInt(market.curve.realToken || "0");
+    try {
+      if (market.curve.tokenAccount) {
+        onChainTokens = await readTokenAmount(market.curve.tokenAccount);
+      }
+    } catch { /* keep prior */ }
+    const metaThru = BigInt(market.curve.realThru || "0");
+    const metaToken = BigInt(market.curve.realToken || "0");
+    // Always trust on-chain vault depth (fixes drained vaults after failed AMM attempts).
+    if (spendable === metaThru && onChainTokens === metaToken) return market;
+    return updateMarket(market.mintAddress, {
+      curve: {
+        realThru: spendable.toString(),
+        realToken: onChainTokens.toString(),
+      },
+      updatedAt: Date.now(),
+    }) || market;
+  } catch {
+    return market;
+  }
 }
 
 function marketTimestamp(market) {
@@ -849,107 +912,18 @@ async function graduateMarket(market, setStatus = () => {}) {
   if (!market?.curve) return market;
   if (market.graduated && market.liquidity) return market;
 
-  // Mark graduated immediately. The bonding curve stays open for public trading
-  // until an AMM is successfully seeded (on-chain AMM seed is still unreliable).
-  setStatus("Graduation threshold reached — market stays tradeable on the public curve…");
-  let updated = updateMarket(market.mintAddress, {
+  // Do NOT pull THRU/tokens out of the curve here. A failed AMM seed used to drain
+  // the vault and break sells. Graduation is accounting-only until AMM is reliable.
+  setStatus("Graduation threshold reached — public curve trading stays open…");
+  const updated = updateMarket(market.mintAddress, {
     graduated: true,
     phase: "graduated",
     liquidity: false,
-    liquidityPendingReason: "",
+    liquidityPendingReason:
+      "Graduated. Buy/sell continues on the public bonding curve (AMM seed deferred).",
     graduatedAt: market.graduatedAt || Date.now(),
     updatedAt: Date.now(),
   }) || market;
-
-  // Optional best-effort AMM seed (does not lock or drain the curve on failure).
-  if (!connectedAccount || connectedAccount.address !== market.creator) {
-    updated = updateMarket(market.mintAddress, {
-      liquidityPendingReason:
-        "Graduated. Public curve trading continues. Creator can retry AMM seed later.",
-    }) || updated;
-    return updated;
-  }
-
-  try {
-    const c = readCurve(updated);
-    const seedThru = c.realThru > CURVE_GAS_FUND * 2n ? c.realThru - CURVE_GAS_FUND : c.realThru / 2n;
-    const seedTokens = (seedThru * PRICE_TOKENS_PER_THRU * (10n ** BigInt(market.decimals)))
-      / (10n ** BigInt(NATIVE_THRU_DECIMALS));
-    const tokenAmount = seedTokens > 0n && seedTokens <= c.realToken
-      ? seedTokens
-      : c.realToken / 2n;
-    if (seedThru <= 0n || tokenAmount <= 0n) {
-      throw new Error("Curve reserves are too small to seed an AMM pool yet.");
-    }
-    assertInitialLiquidityAmounts(tokenAmount, seedThru);
-
-    setStatus("Trying AMM seed from curve reserves (optional)…");
-    const curveSigner = await loadCurveSigner(updated);
-    const creatorToken = await ensureTokenAccount(connectedAccount.address, market.mintAddress);
-    const curveToken = {
-      address: market.curve.tokenAccount,
-      bytes: Pubkey.from(market.curve.tokenAccount).toBytes(),
-    };
-
-    // Snapshot balances first; only mark AMM live if seedPool fully succeeds.
-    await submitAs(curveSigner, TOKEN_PROGRAM, {
-      accounts: { readWrite: [curveToken.address, creatorToken.address] },
-      instructionData: createTransferInstruction({
-        sourceAccountBytes: curveToken.bytes,
-        destinationAccountBytes: creatorToken.bytes,
-        amount: tokenAmount,
-      }),
-      fee: 0n,
-      programLabel: "Curve token withdraw",
-    });
-    await submitAs(curveSigner, EOA_PROGRAM, {
-      accounts: { readWrite: [connectedAccount.address] },
-      instructionData: nativeTransferInstruction(seedThru),
-      fee: 0n,
-      programLabel: "Curve THRU withdraw",
-    });
-
-    const mintObj = {
-      address: market.mintAddress,
-      bytes: Pubkey.from(market.mintAddress).toBytes(),
-    };
-    const poolMetadata = await seedPool({
-      mint: mintObj,
-      tokenAccount: creatorToken,
-      decimals: market.decimals,
-      thruAmount: seedThru,
-      tokenAmount,
-      setStatus,
-    });
-
-    updated = updateMarket(market.mintAddress, {
-      graduated: true,
-      phase: "amm",
-      liquidity: true,
-      liquidityPendingReason: "",
-      graduatedAt: Date.now(),
-      updatedAt: Date.now(),
-      ...poolMetadata,
-      curve: {
-        ...updated.curve,
-        realThru: (c.realThru - seedThru).toString(),
-        realToken: (c.realToken - tokenAmount).toString(),
-      },
-    }) || updated;
-    setStatus("Graduated and AMM seeded.");
-  } catch (reason) {
-    // Keep curve fully tradeable — do not block the public market on AMM errors.
-    const detail = reason instanceof Error ? reason.message : "AMM seed failed";
-    updated = updateMarket(market.mintAddress, {
-      graduated: true,
-      phase: "graduated",
-      liquidity: false,
-      liquidityPendingReason:
-        `Graduated — public curve trading continues. AMM seed deferred (${detail}).`,
-      updatedAt: Date.now(),
-    }) || updated;
-    setStatus("Graduated. Trading continues on the public bonding curve.");
-  }
   return updated;
 }
 
@@ -1683,14 +1657,14 @@ let activeTrade = null;
 let activeLiquidityMarket = null;
 let activeSide = "buy";
 /** Cached raw balances for the open trade modal (base units). */
-let tradeBalances = { thru: 0n, token: 0n };
+let tradeBalances = { thru: 0n, token: 0n, sellable: 0n };
 
 async function refreshTradeBalances() {
   const balanceEl = document.querySelector("[data-trade-balance]");
   const labelEl = document.querySelector("[data-trade-balance-label]");
   if (!balanceEl) return;
   if (!connectedAccount || !activeTrade) {
-    tradeBalances = { thru: 0n, token: 0n };
+    tradeBalances = { thru: 0n, token: 0n, sellable: 0n };
     if (labelEl) labelEl.textContent = "Your balance";
     balanceEl.textContent = "Connect wallet";
     return;
@@ -1702,6 +1676,10 @@ async function refreshTradeBalances() {
   }
   balanceEl.textContent = "Loading…";
   try {
+    // Keep curve vault metadata aligned with on-chain THRU (fixes post-graduation sells).
+    if (isBondingMarket(activeTrade)) {
+      activeTrade = await syncCurveVaultFromChain(activeTrade);
+    }
     const native = await getAccountSnapshot();
     tradeBalances.thru = native.balance || 0n;
     try {
@@ -1719,18 +1697,29 @@ async function refreshTradeBalances() {
     } catch {
       tradeBalances.token = 0n;
     }
+    if (isBondingMarket(activeTrade)) {
+      const vaultCap = maxSellableTokens(activeTrade);
+      tradeBalances.sellable = tradeBalances.token < vaultCap ? tradeBalances.token : vaultCap;
+    } else {
+      tradeBalances.sellable = tradeBalances.token;
+    }
     if (activeSide === "buy") {
       balanceEl.textContent = `${formatUnits(tradeBalances.thru, NATIVE_THRU_DECIMALS, 9)} THRU`;
     } else {
-      balanceEl.textContent =
-        `${formatUnits(tradeBalances.token, activeTrade.decimals)} ${activeTrade.ticker}`;
+      const walletPart = `${formatUnits(tradeBalances.token, activeTrade.decimals)} ${activeTrade.ticker}`;
+      if (isBondingMarket(activeTrade) && tradeBalances.sellable < tradeBalances.token) {
+        balanceEl.textContent =
+          `${walletPart} · sellable now ${formatUnits(tradeBalances.sellable, activeTrade.decimals)}`;
+      } else {
+        balanceEl.textContent = walletPart;
+      }
     }
   } catch {
     balanceEl.textContent = "Unavailable";
   }
 }
 
-function openTrade(index, side) {
+async function openTrade(index, side) {
   activeTrade = readMarkets()[index];
   activeSide = side;
   if (!activeTrade) return;
@@ -1741,14 +1730,15 @@ function openTrade(index, side) {
   document.querySelector("[data-trade-input-label]").textContent = side === "buy" ? "You receive" : "You receive";
   const progress = activeTrade.curve ? curveProgress(activeTrade) : null;
   if (isBondingMarket(activeTrade)) {
+    activeTrade = await syncCurveVaultFromChain(activeTrade);
     const c = readCurve(activeTrade);
     const gradNote = activeTrade.graduated
-      ? "Graduated — public curve trading stays open until AMM is live. "
+      ? "Graduated — public curve trading stays open. "
       : "";
     document.querySelector("[data-trade-status]").textContent =
       `${gradNote}Public bonding curve · ${progress.toFixed(1)}% to graduation ` +
-      `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU raised). ` +
-      "Anyone with a Thru wallet can trade from this site.";
+      `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU in vault). ` +
+      "Sells are paid from THRU buyers paid in — Max uses vault-safe size.";
   } else if (activeTrade.liquidity) {
     document.querySelector("[data-trade-status]").textContent = "Quote updates from the Thru AMM pool.";
   } else if (activeTrade.graduated) {
@@ -1762,7 +1752,7 @@ function openTrade(index, side) {
   document.querySelectorAll("[data-side]").forEach((button) => button.classList.toggle("selected", button.dataset.side === side));
   document.querySelector("[data-trade-amount]").value = "";
   document.querySelector("[data-trade-quote]").textContent = "—";
-  refreshTradeBalances();
+  await refreshTradeBalances();
 }
 
 function closeTrade() {
@@ -2080,7 +2070,9 @@ document.querySelector("[data-trade-max]")?.addEventListener("click", () => {
     const spendable = tradeBalances.thru > 1n ? tradeBalances.thru - 1n : 0n;
     input.value = formatUnits(spendable, NATIVE_THRU_DECIMALS, 9);
   } else {
-    input.value = formatUnits(tradeBalances.token, activeTrade.decimals);
+    // Cap by vault THRU depth so Max never quotes an unfundable sell.
+    const sellable = tradeBalances.sellable != null ? tradeBalances.sellable : tradeBalances.token;
+    input.value = formatUnits(sellable, activeTrade.decimals);
   }
   input.dispatchEvent(new Event("input", { bubbles: true }));
 });
