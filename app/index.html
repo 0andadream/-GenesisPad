@@ -111,8 +111,16 @@
               <span data-chart-trades>No trades yet</span>
             </div>
           </div>
+          <div class="chart-intervals" data-chart-intervals role="tablist" aria-label="Candle interval">
+            <button type="button" data-interval="60000">1m</button>
+            <button type="button" data-interval="300000">5m</button>
+            <button type="button" class="selected" data-interval="900000">15m</button>
+            <button type="button" data-interval="3600000">1H</button>
+            <button type="button" data-interval="14400000">4H</button>
+            <button type="button" data-interval="86400000">1D</button>
+          </div>
           <div class="token-chart-stage">
-            <svg class="token-chart-svg" data-chart-svg viewBox="0 0 480 260" preserveAspectRatio="none" aria-label="Token candlestick chart"></svg>
+            <svg class="token-chart-svg" data-chart-svg viewBox="0 0 520 300" preserveAspectRatio="none" aria-label="Token candlestick chart"></svg>
             <div class="token-chart-hover" data-chart-hover hidden></div>
           </div>
           <div class="token-stats" data-token-stats>

@@ -566,6 +566,36 @@
   font-size: 10px;
 }
 
+.chart-intervals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 8px;
+}
+
+.chart-intervals button {
+  min-width: 40px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid #2b3139;
+  background: #12161c;
+  color: #848e9c;
+  font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  letter-spacing: .04em;
+  cursor: pointer;
+}
+
+.chart-intervals button:hover {
+  color: #eaecef;
+  border-color: #3a4149;
+}
+
+.chart-intervals button.selected {
+  color: #0b0e11;
+  background: #f0b90b;
+  border-color: #f0b90b;
+}
+
 .token-chart-meta-right [data-chart-ohlc] span,
 .token-chart-meta-right [data-chart-ohlc] .up { color: #26a69a; }
 .token-chart-meta-right [data-chart-ohlc] .down { color: #ef5350; }
@@ -580,7 +610,7 @@
 .token-chart-svg {
   display: block;
   width: 100%;
-  height: 260px;
+  height: 300px;
   cursor: crosshair;
 }
 
@@ -627,7 +657,24 @@
 }
 
 .token-chart-svg .vol-bar {
-  opacity: 0.45;
+  opacity: 0.5;
+}
+
+.token-chart-svg .candle-empty .candle-body,
+.token-chart-svg .candle-empty .candle-wick {
+  opacity: 0.35;
+}
+
+.token-chart-svg .chart-vol-label {
+  fill: #5e6673;
+  font-size: 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.token-chart-hover .hover-empty {
+  margin-top: 4px;
+  color: #5e6673;
+  font-size: 10px;
 }
 
 .token-chart-svg .chart-cross-x,
