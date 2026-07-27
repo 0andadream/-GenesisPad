@@ -1,23 +1,147 @@
+/** Same public registry the launchpad app publishes to. */
+const MARKET_REGISTRY_URL =
+  "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70";
+const NATIVE_THRU_DECIMALS = 9;
+
 const formatters = {
-  volume: (value) => `$${Number(value).toLocaleString()}`,
-  tvl: (value) => `$${Number(value).toLocaleString()}`,
-  trades: (value) => Number(value).toLocaleString(),
   markets: (value) => Number(value).toLocaleString(),
-  users: (value) => Number(value).toLocaleString(),
+  trades: (value) => Number(value).toLocaleString(),
+  graduated: (value) => Number(value).toLocaleString(),
+  volume: (value) => formatThruDisplay(value),
+  tvl: (value) => formatThruDisplay(value),
 };
+
+function formatThruDisplay(baseUnits) {
+  try {
+    const raw = typeof baseUnits === "bigint" ? baseUnits : BigInt(String(baseUnits || 0));
+    if (raw <= 0n) return "0 THRU";
+    const scale = 10n ** BigInt(NATIVE_THRU_DECIMALS);
+    const whole = raw / scale;
+    const frac = (raw % scale).toString().padStart(NATIVE_THRU_DECIMALS, "0");
+    // Prefer readable precision; keep more digits for tiny alphanet amounts.
+    const precision = whole > 0n ? 4 : 9;
+    const trimmed = frac.slice(0, precision).replace(/0+$/, "");
+    const body = trimmed ? `${whole}.${trimmed}` : whole.toString();
+    return `${body} THRU`;
+  } catch {
+    return "0 THRU";
+  }
+}
+
+function toBig(value) {
+  try {
+    return BigInt(String(value ?? "0"));
+  } catch {
+    return 0n;
+  }
+}
+
+function summarizeMarkets(markets) {
+  let volume = 0n;
+  let tvl = 0n;
+  let trades = 0;
+  let graduated = 0;
+
+  for (const market of markets || []) {
+    if (market?.graduated || market?.phase === "graduated" || market?.phase === "amm") {
+      graduated += 1;
+    }
+    if (market?.curve?.realThru != null) {
+      tvl += toBig(market.curve.realThru);
+    }
+
+    const stats = market?.stats;
+    if (stats) {
+      volume += toBig(stats.buyThru) + toBig(stats.sellThru);
+      trades += Number(stats.buys || 0) + Number(stats.sells || 0);
+      continue;
+    }
+
+    // Fallback: sum chart prints when stats are missing.
+    for (const point of Array.isArray(market?.chart) ? market.chart : []) {
+      if (point?.side === "buy" || point?.side === "sell") {
+        trades += 1;
+        volume += toBig(point.thru);
+      }
+    }
+  }
+
+  return {
+    markets: (markets || []).length,
+    volume,
+    tvl,
+    trades,
+    graduated,
+  };
+}
+
+function setProtocolLive(state, text) {
+  const el = document.querySelector("[data-protocol-live]");
+  if (!el) return;
+  el.dataset.state = state;
+  el.textContent = text;
+}
+
+function applyStats(stats) {
+  Object.entries(formatters).forEach(([key, format]) => {
+    const element = document.querySelector(`[data-stat="${key}"]`);
+    if (!element) return;
+    const next = format(stats[key] ?? 0);
+    if (element.textContent !== next) {
+      element.textContent = next;
+      element.classList.add("stat-flash");
+      window.setTimeout(() => element.classList.remove("stat-flash"), 600);
+    }
+  });
+}
+
+async function fetchRegistryMarkets() {
+  const response = await fetch(MARKET_REGISTRY_URL, {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`registry ${response.status}`);
+  const data = await response.json();
+  return Array.isArray(data.markets) ? data.markets : Array.isArray(data) ? data : [];
+}
+
+async function fetchStaticStats() {
+  const endpoint = window.GENESIS_STATS_ENDPOINT || "/stats.json";
+  const response = await fetch(`${endpoint}?t=${Date.now()}`, { cache: "no-store" });
+  if (!response.ok) return null;
+  return response.json();
+}
 
 async function refreshStats() {
   try {
-    const endpoint = window.GENESIS_STATS_ENDPOINT || "/stats.json";
-    const response = await fetch(`${endpoint}?t=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) return;
-    const stats = await response.json();
-    Object.entries(formatters).forEach(([key, format]) => {
-      const element = document.querySelector(`[data-stat="${key}"]`);
-      if (element) element.textContent = format(stats[key] || 0);
-    });
+    setProtocolLive("syncing", "Syncing registry…");
+    const markets = await fetchRegistryMarkets();
+    const live = summarizeMarkets(markets);
+    applyStats(live);
+    const ageLabel = "Live";
+    setProtocolLive("live", ageLabel);
+    window.__genesisProtocolStats = { ...live, at: Date.now(), source: "registry" };
+    return;
   } catch {
-    // Statistics intentionally remain at zero until a data source is available.
+    // Fall back to static file if registry is unreachable.
+  }
+
+  try {
+    const stats = await fetchStaticStats();
+    if (!stats) {
+      setProtocolLive("error", "Registry offline");
+      return;
+    }
+    applyStats({
+      markets: stats.markets ?? 0,
+      volume: stats.volume ?? 0,
+      tvl: stats.tvl ?? 0,
+      trades: stats.trades ?? 0,
+      graduated: stats.graduated ?? 0,
+    });
+    setProtocolLive("live", "Cached stats");
+  } catch {
+    setProtocolLive("error", "Registry offline");
   }
 }
 
@@ -35,7 +159,7 @@ document.querySelectorAll(".nav-pill a").forEach((link) => {
 });
 
 refreshStats();
-setInterval(refreshStats, 30000);
+setInterval(refreshStats, 8000);
 
 const motionStage = document.querySelector("[data-motion-stage]");
 const motionWords = [...document.querySelectorAll("[data-motion-word]")];
