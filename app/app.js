@@ -193,14 +193,50 @@ async function getAccountSnapshot(address = connectedAccount.address) {
   }
 }
 
+async function getWthruTokenAccount(createIfMissing = false) {
+  if (!connectedAccount) throw new Error("Connect a Thru wallet first.");
+  if (createIfMissing) {
+    return ensureTokenAccount(connectedAccount.address, WTHRU_MINT);
+  }
+  return deriveTokenAccountAddress(
+    client,
+    connectedAccount.address,
+    WTHRU_MINT,
+    TOKEN_PROGRAM,
+  );
+}
+
+async function readWthruBalance() {
+  if (!connectedAccount) return 0n;
+  try {
+    const account = await getWthruTokenAccount(false);
+    if (!(await getAccountSnapshot(account.address)).exists) return 0n;
+    return await readTokenAmount(account.address);
+  } catch {
+    return 0n;
+  }
+}
+
 async function refreshBalance() {
   if (!connectedAccount) return;
   const balance = document.querySelector("[data-balance]");
+  const wthruBalance = document.querySelector("[data-wthru-balance]");
   try {
     const snapshot = await getAccountSnapshot();
-    balance.textContent = `${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
+    if (balance) {
+      balance.textContent = `${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
+    }
   } catch {
-    balance.textContent = "Unavailable";
+    if (balance) balance.textContent = "Unavailable";
+  }
+  try {
+    const amount = await readWthruBalance();
+    // Base units are 1:1 with native THRU; show the same 9-decimal scale.
+    if (wthruBalance) {
+      wthruBalance.textContent = `${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU`;
+    }
+  } catch {
+    if (wthruBalance) wthruBalance.textContent = "Unavailable";
   }
 }
 
@@ -458,6 +494,7 @@ async function wrapThru(amount, destination) {
     accounts: { readWrite: [WTHRU_VAULT] },
     instructionData: nativeTransferInstruction(amount),
     fee: 1n,
+    programLabel: "Native transfer",
   });
   await submitProgramInstruction(WTHRU_PROGRAM, {
     accounts: {
@@ -467,19 +504,66 @@ async function wrapThru(amount, destination) {
     instructionData: async (context) => {
       const data = new Uint8Array(12);
       const view = new DataView(data.buffer);
-      view.setUint32(0, 1, true);
+      view.setUint32(0, 1, true); // deposit
       view.setUint16(4, context.getAccountIndex(Pubkey.from(TOKEN_PROGRAM).toBytes()), true);
       view.setUint16(6, context.getAccountIndex(Pubkey.from(WTHRU_VAULT).toBytes()), true);
       view.setUint16(8, context.getAccountIndex(Pubkey.from(WTHRU_MINT).toBytes()), true);
       view.setUint16(10, context.getAccountIndex(destination.bytes), true);
       return data;
     },
+    programLabel: "wTHRU",
   });
   // wTHRU mints 1:1 with native base units on Alphanet.
   const after = await readTokenAmount(destination.address);
   if (after < before + amount) {
     throw new Error(
       "Wrapped THRU was not credited. Refresh, check your balance, and try again.",
+    );
+  }
+}
+
+/** Burn wTHRU and receive native THRU (1:1 base units). */
+async function unwrapThru(amount, source) {
+  if (amount <= 0n) throw new Error("Unwrap amount must be positive.");
+  const nativeBefore = (await getAccountSnapshot()).balance;
+  let tokenBefore = 0n;
+  try {
+    tokenBefore = await readTokenAmount(source.address);
+  } catch {
+    tokenBefore = 0n;
+  }
+  if (tokenBefore < amount) {
+    throw new Error(
+      `Insufficient wTHRU. Available: ${formatUnits(tokenBefore, NATIVE_THRU_DECIMALS, 9)} wTHRU.`,
+    );
+  }
+  await submitProgramInstruction(WTHRU_PROGRAM, {
+    accounts: {
+      readWrite: [WTHRU_MINT, WTHRU_VAULT, source.address],
+      readOnly: [TOKEN_PROGRAM],
+    },
+    instructionData: async (context) => {
+      // tag u32 + 6×u16 + amount u64
+      const data = new Uint8Array(24);
+      const view = new DataView(data.buffer);
+      view.setUint32(0, 2, true); // withdraw
+      view.setUint16(4, context.getAccountIndex(Pubkey.from(TOKEN_PROGRAM).toBytes()), true);
+      view.setUint16(6, context.getAccountIndex(Pubkey.from(WTHRU_VAULT).toBytes()), true);
+      view.setUint16(8, context.getAccountIndex(Pubkey.from(WTHRU_MINT).toBytes()), true);
+      view.setUint16(10, context.getAccountIndex(source.bytes), true);
+      view.setUint16(12, context.getAccountIndex(connectedAccount.publicKey), true); // owner
+      view.setUint16(14, context.getAccountIndex(connectedAccount.publicKey), true); // recipient
+      view.setBigUint64(16, amount, true);
+      return data;
+    },
+    // Fee 0 so dust-only wallets can still recover wTHRU into native.
+    fee: 0n,
+    programLabel: "wTHRU",
+  });
+  const nativeAfter = (await getAccountSnapshot()).balance;
+  if (nativeAfter < nativeBefore + amount) {
+    throw new Error(
+      "Native THRU was not credited after unwrap. Refresh and check both balances.",
     );
   }
 }
@@ -886,6 +970,7 @@ async function claimFaucet() {
     }
     const after = await getAccountSnapshot();
     const gained = after.balance > before.balance ? after.balance - before.balance : received;
+    await refreshBalance();
     setStatus(
       `Received about ${formatUnits(gained, NATIVE_THRU_DECIMALS, 9)} THRU ` +
       `(${FAUCET_CLAIMS_PER_CLICK}×${FAUCET_AMOUNT} base units). Claim again if you need more, ` +
@@ -897,6 +982,76 @@ async function claimFaucet() {
       `${detail} Alphanet faucet max is ${FAUCET_AMOUNT} base units (0.00001 THRU) per pull. ` +
       "You can also use faucet.thruscan.net.",
     );
+  } finally {
+    button.disabled = false;
+  }
+}
+
+let wrapSide = "wrap";
+
+function setWrapSide(side) {
+  wrapSide = side === "unwrap" ? "unwrap" : "wrap";
+  document.querySelectorAll("[data-wrap-side]").forEach((button) => {
+    button.classList.toggle("selected", button.dataset.wrapSide === wrapSide);
+  });
+  const label = document.querySelector("[data-wrap-amount-label]");
+  const submit = document.querySelector("[data-wrap-submit]");
+  if (label) {
+    label.textContent = wrapSide === "wrap" ? "Amount in THRU" : "Amount in wTHRU";
+  }
+  if (submit) {
+    submit.textContent = wrapSide === "wrap"
+      ? "Wrap THRU → wTHRU"
+      : "Unwrap wTHRU → THRU";
+  }
+}
+
+async function swapThruWthru() {
+  if (!connectedAccount) return openWallet();
+  const button = document.querySelector("[data-wrap-submit]");
+  const status = document.querySelector("[data-wrap-status]");
+  const amountText = document.querySelector("[data-wrap-amount]")?.value.trim() || "";
+  let amount;
+  try {
+    amount = parseUnits(amountText, NATIVE_THRU_DECIMALS);
+    if (amount <= 0n) throw new Error("Enter an amount greater than zero.");
+  } catch (reason) {
+    status.textContent = reason instanceof Error ? reason.message : "Enter a valid amount.";
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await ensureAccountExists((message) => { status.textContent = message; });
+    if (wrapSide === "wrap") {
+      const snapshot = await getAccountSnapshot();
+      // Reserve 2 base units for wrap transfer fee + deposit fee headroom.
+      if (snapshot.balance < amount + 2n) {
+        throw new Error(
+          `Insufficient native THRU. Available: ${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+          "(keep a little for fees).",
+        );
+      }
+      status.textContent = `Wrapping ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU…`;
+      const destination = await getWthruTokenAccount(true);
+      await wrapThru(amount, destination);
+      status.textContent =
+        `Wrapped ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU → wTHRU. ` +
+        "Native balance drops; wTHRU balance rises.";
+    } else {
+      const source = await getWthruTokenAccount(false);
+      if (!(await getAccountSnapshot(source.address)).exists) {
+        throw new Error("No wTHRU token account yet. Wrap some THRU first.");
+      }
+      status.textContent = `Unwrapping ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU…`;
+      await unwrapThru(amount, source);
+      status.textContent =
+        `Unwrapped ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU → THRU. ` +
+        "Native balance rises; wTHRU balance drops.";
+    }
+    await refreshBalance();
+  } catch (reason) {
+    status.textContent = reason instanceof Error ? reason.message : "Swap failed on Thru.";
   } finally {
     button.disabled = false;
   }
@@ -984,6 +1139,10 @@ document.querySelectorAll("[data-reveal]").forEach((button) => button.addEventLi
   button.textContent = input.type === "password" ? "Show" : "Hide";
 }));
 document.querySelector("[data-faucet]")?.addEventListener("click", claimFaucet);
+document.querySelectorAll("[data-wrap-side]").forEach((button) => {
+  button.addEventListener("click", () => setWrapSide(button.dataset.wrapSide));
+});
+document.querySelector("[data-wrap-submit]")?.addEventListener("click", swapThruWthru);
 document.querySelector("[data-send]")?.addEventListener("click", sendThru);
 document.querySelector("[data-disconnect]")?.addEventListener("click", () => {
   if (connectedAccount) connectedAccount.privateKey.fill(0);
@@ -992,6 +1151,10 @@ document.querySelector("[data-disconnect]")?.addEventListener("click", () => {
   try { sessionStorage.removeItem(WALLET_SESSION_KEY); } catch { /* Storage is unavailable. */ }
   setWalletState("Connect wallet");
   document.querySelector("[data-import-key]").value = "";
+  const balance = document.querySelector("[data-balance]");
+  const wthruBalance = document.querySelector("[data-wthru-balance]");
+  if (balance) balance.textContent = "—";
+  if (wthruBalance) wthruBalance.textContent = "—";
   showWalletView(null);
 });
 document.addEventListener("keydown", (event) => {
