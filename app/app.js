@@ -646,22 +646,80 @@ function ensureChartSeed(market) {
   }
 }
 
+/** Build OHLC candles from price ticks (time buckets, fallback per-trade). */
+function buildCandles(points, maxCandles = 40) {
+  const ticks = points
+    .map((p) => ({ t: Number(p.t) || 0, price: BigInt(p.price || "0"), side: p.side || "seed" }))
+    .filter((p) => p.price >= 0n)
+    .sort((a, b) => a.t - b.t);
+  if (!ticks.length) return [];
+
+  // Adaptive bucket: aim for ~maxCandles candles across the span.
+  const t0 = ticks[0].t;
+  const t1 = ticks[ticks.length - 1].t;
+  const spanMs = Math.max(t1 - t0, 1);
+  const bucketMs = Math.max(Math.ceil(spanMs / maxCandles), 1);
+
+  const buckets = new Map();
+  for (const tick of ticks) {
+    const key = Math.floor((tick.t - t0) / bucketMs);
+    const existing = buckets.get(key);
+    if (!existing) {
+      buckets.set(key, {
+        t: t0 + key * bucketMs,
+        open: tick.price,
+        high: tick.price,
+        low: tick.price,
+        close: tick.price,
+        buys: tick.side === "buy" ? 1 : 0,
+        sells: tick.side === "sell" ? 1 : 0,
+      });
+    } else {
+      if (tick.price > existing.high) existing.high = tick.price;
+      if (tick.price < existing.low) existing.low = tick.price;
+      existing.close = tick.price;
+      if (tick.side === "buy") existing.buys += 1;
+      if (tick.side === "sell") existing.sells += 1;
+    }
+  }
+
+  let candles = [...buckets.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, c]) => c);
+
+  // Carry open from previous close for continuity when a bucket is a single tick.
+  for (let i = 1; i < candles.length; i += 1) {
+    // Keep natural open from first trade in bucket; only fix if missing.
+    if (candles[i].open === 0n) candles[i].open = candles[i - 1].close;
+  }
+
+  // Ensure at least 2 candles for a readable chart.
+  if (candles.length === 1) {
+    const c = candles[0];
+    candles = [
+      { ...c, t: c.t - bucketMs, open: c.open, high: c.open, low: c.open, close: c.open, buys: 0, sells: 0 },
+      c,
+    ];
+  }
+  return candles.slice(-maxCandles);
+}
+
 function renderTokenChart(market) {
   const root = document.querySelector("[data-token-chart]");
   const svg = document.querySelector("[data-chart-svg]");
   const priceEl = document.querySelector("[data-chart-price]");
   const changeEl = document.querySelector("[data-chart-change]");
   const tradesEl = document.querySelector("[data-chart-trades]");
+  const rangeEl = document.querySelector("[data-chart-range]");
   if (!svg || !market) return;
 
   let m = ensureChartSeed(market);
   const points = readChart(m);
   const stats = readTradeStats(m);
-  const prices = points.map((p) => BigInt(p.price));
-  const last = prices.length ? prices[prices.length - 1] : curveSpotPriceThruPerToken(m);
-  const first = prices.length ? prices[0] : last;
+  const candles = buildCandles(points);
+  const last = candles.length ? candles[candles.length - 1].close : curveSpotPriceThruPerToken(m);
+  const first = candles.length ? candles[0].open : last;
   const up = last >= first;
-  const dir = up ? "up" : "down";
 
   if (root) {
     root.classList.toggle("up", up);
@@ -684,11 +742,11 @@ function renderTokenChart(market) {
   if (tradesEl) {
     const realTrades = stats.buys + stats.sells;
     tradesEl.textContent = realTrades
-      ? `${realTrades} trade${realTrades === 1 ? "" : "s"} · ${stats.buys}B / ${stats.sells}S`
+      ? `${realTrades} trade${realTrades === 1 ? "" : "s"} · ${stats.buys}B / ${stats.sells}S · ${candles.length} candles`
       : "No trades yet";
   }
+  if (rangeEl) rangeEl.textContent = "Candles · THRU per token";
 
-  // Stats grid
   const setStat = (sel, text, cls) => {
     const el = document.querySelector(sel);
     if (!el) return;
@@ -713,50 +771,58 @@ function renderTokenChart(market) {
 
   const W = 400;
   const H = 160;
-  const padX = 8;
-  const padY = 14;
+  const padX = 10;
+  const padY = 12;
   const innerW = W - padX * 2;
   const innerH = H - padY * 2;
 
-  let minP = prices[0] || 0n;
-  let maxP = prices[0] || 1n;
-  for (const p of prices) {
-    if (p < minP) minP = p;
-    if (p > maxP) maxP = p;
+  let minP = candles[0]?.low ?? 0n;
+  let maxP = candles[0]?.high ?? 1n;
+  for (const c of candles) {
+    if (c.low < minP) minP = c.low;
+    if (c.high > maxP) maxP = c.high;
   }
   if (maxP === minP) maxP = minP + 1n;
+  // Small vertical padding so flat candles still have body height.
+  const padRange = (maxP - minP) / 20n || 1n;
+  minP = minP > padRange ? minP - padRange : 0n;
+  maxP = maxP + padRange;
 
-  const n = Math.max(points.length, 2);
-  const coords = points.map((p, i) => {
-    const x = padX + (innerW * i) / Math.max(n - 1, 1);
-    const span = maxP - minP;
-    const yRatio = Number(((BigInt(p.price) - minP) * 10000n) / span) / 10000;
-    const y = padY + innerH * (1 - yRatio);
-    return { x, y, side: p.side };
-  });
+  const span = maxP - minP;
+  const priceToY = (price) => {
+    const yRatio = Number(((price - minP) * 10000n) / span) / 10000;
+    return padY + innerH * (1 - yRatio);
+  };
 
-  if (coords.length === 1) {
-    coords.push({ x: W - padX, y: coords[0].y, side: coords[0].side });
-  }
+  const count = Math.max(candles.length, 1);
+  const slot = innerW / count;
+  const bodyW = Math.max(Math.min(slot * 0.62, 14), 3);
+  const wickW = 1.5;
 
-  const lineD = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
-  const areaD = `${lineD} L${coords[coords.length - 1].x.toFixed(1)},${(H - padY).toFixed(1)} L${coords[0].x.toFixed(1)},${(H - padY).toFixed(1)} Z`;
-
-  const dots = coords
-    .filter((c) => c.side === "buy" || c.side === "sell")
-    .map((c) =>
-      `<circle class="chart-${c.side}" cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.5"></circle>`
-    )
-    .join("");
+  const candleSvg = candles.map((c, i) => {
+    const cx = padX + slot * i + slot / 2;
+    const yOpen = priceToY(c.open);
+    const yClose = priceToY(c.close);
+    const yHigh = priceToY(c.high);
+    const yLow = priceToY(c.low);
+    const bullish = c.close >= c.open;
+    const cls = bullish ? "candle-up" : "candle-down";
+    const bodyTop = Math.min(yOpen, yClose);
+    const bodyBot = Math.max(yOpen, yClose);
+    const bodyH = Math.max(bodyBot - bodyTop, 1.5);
+    return `
+      <g class="candle ${cls}">
+        <line class="candle-wick" x1="${cx.toFixed(1)}" y1="${yHigh.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yLow.toFixed(1)}" stroke-width="${wickW}"></line>
+        <rect class="candle-body" x="${(cx - bodyW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${bodyH.toFixed(1)}"></rect>
+      </g>`;
+  }).join("");
 
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = `
     <line class="chart-grid" x1="${padX}" y1="${padY}" x2="${W - padX}" y2="${padY}"></line>
     <line class="chart-grid" x1="${padX}" y1="${H / 2}" x2="${W - padX}" y2="${H / 2}"></line>
     <line class="chart-grid" x1="${padX}" y1="${H - padY}" x2="${W - padX}" y2="${H - padY}"></line>
-    <path class="chart-area ${dir}" d="${areaD}"></path>
-    <path class="chart-line ${dir}" d="${lineD}"></path>
-    ${dots}
+    ${candleSvg}
   `;
 }
 
