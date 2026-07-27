@@ -554,9 +554,12 @@
 }
 
 .token-chart-meta [data-chart-change].up,
-.token-chart.up [data-chart-price] { color: #26a69a; }
+.token-chart.up [data-chart-price] { color: #14f195; }
 .token-chart-meta [data-chart-change].down,
-.token-chart.down [data-chart-price] { color: #ef5350; }
+.token-chart.down [data-chart-price] { color: #f6465d; }
+
+.token-chart-meta-right [data-chart-ohlc] .up { color: #14f195; }
+.token-chart-meta-right [data-chart-ohlc] .down { color: #f6465d; }
 
 .token-chart-meta-right {
   display: grid;
@@ -596,9 +599,7 @@
   border-color: #f0b90b;
 }
 
-.token-chart-meta-right [data-chart-ohlc] span,
-.token-chart-meta-right [data-chart-ohlc] .up { color: #26a69a; }
-.token-chart-meta-right [data-chart-ohlc] .down { color: #ef5350; }
+.token-chart-meta-right [data-chart-ohlc] span { color: #eaecef; }
 
 .token-chart-stage {
   position: relative;
@@ -610,7 +611,7 @@
 .token-chart-svg {
   display: block;
   width: 100%;
-  height: 300px;
+  height: 320px;
   cursor: crosshair;
 }
 
@@ -619,7 +620,7 @@
 }
 
 .token-chart-svg .chart-grid {
-  stroke: rgba(132, 142, 156, 0.12);
+  stroke: rgba(132, 142, 156, 0.1);
   stroke-width: 1;
 }
 
@@ -634,35 +635,62 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
-.token-chart-svg .candle-up .candle-wick,
+/* pump.fun-style solid green / red candles */
+.token-chart-svg .candle-up .candle-wick {
+  stroke: #14f195;
+  stroke-linecap: round;
+}
 .token-chart-svg .candle-up .vol-bar {
-  stroke: #26a69a;
-  fill: #26a69a;
+  fill: #14f195;
+  opacity: 0.45;
 }
-
 .token-chart-svg .candle-up .candle-body {
-  fill: #26a69a;
-  stroke: #26a69a;
+  fill: #14f195;
+  stroke: #14f195;
 }
 
-.token-chart-svg .candle-down .candle-wick,
+.token-chart-svg .candle-down .candle-wick {
+  stroke: #f6465d;
+  stroke-linecap: round;
+}
 .token-chart-svg .candle-down .vol-bar {
-  stroke: #ef5350;
-  fill: #ef5350;
+  fill: #f6465d;
+  opacity: 0.45;
 }
-
 .token-chart-svg .candle-down .candle-body {
-  fill: #ef5350;
-  stroke: #ef5350;
+  fill: #f6465d;
+  stroke: #f6465d;
 }
 
 .token-chart-svg .vol-bar {
-  opacity: 0.5;
+  opacity: 0.45;
 }
 
 .token-chart-svg .candle-empty .candle-body,
 .token-chart-svg .candle-empty .candle-wick {
-  opacity: 0.35;
+  opacity: 0.22;
+}
+
+.token-chart-svg .chart-last {
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+.token-chart-svg .chart-last.chart-last-up { stroke: rgba(20, 241, 149, 0.55); }
+.token-chart-svg .chart-last.chart-last-down { stroke: rgba(246, 70, 93, 0.55); }
+
+.token-chart-svg .chart-last-tag {
+  pointer-events: none;
+}
+.token-chart-svg .chart-last-tag.chart-last-up { fill: #14f195; }
+.token-chart-svg .chart-last-tag.chart-last-down { fill: #f6465d; }
+
+.token-chart-svg .chart-last-text {
+  fill: #0b0e11;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  pointer-events: none;
 }
 
 .token-chart-svg .chart-vol-label {
@@ -712,8 +740,47 @@
   font-style: normal;
 }
 
-.token-chart-hover .up { color: #26a69a; }
-.token-chart-hover .down { color: #ef5350; }
+.token-chart-hover .up { color: #14f195; }
+.token-chart-hover .down { color: #f6465d; }
+
+.registry-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(20, 241, 149, 0.35);
+  background: rgba(20, 241, 149, 0.08);
+  color: #0d7a4f;
+  font: 700 10px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+.registry-live::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #14f195;
+  box-shadow: 0 0 0 0 rgba(20, 241, 149, 0.6);
+  animation: registry-pulse 1.6s ease-out infinite;
+}
+.registry-live[data-state="syncing"] {
+  border-color: rgba(23, 23, 23, 0.2);
+  background: rgba(23, 23, 23, 0.04);
+  color: #777;
+}
+.registry-live[data-state="syncing"]::before {
+  background: #999;
+  animation: none;
+}
+@keyframes registry-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(20, 241, 149, 0.55); }
+  70% { box-shadow: 0 0 0 6px rgba(20, 241, 149, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(20, 241, 149, 0); }
+}
 
 .token-stats {
   display: grid;
@@ -746,7 +813,8 @@
   white-space: nowrap;
 }
 
-.token-stats strong.stat-buy { color: #26a69a; }
+.token-stats strong.stat-buy { color: #14f195; }
+.token-stats strong.stat-sell { color: #f6465d; }
 .token-stats strong.stat-sell { color: #ef5350; }
 
 .market-identity {

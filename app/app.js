@@ -16,18 +16,32 @@ import {
   deriveAmmPoolAddresses,
 } from "@thru/programs/amm";
 
+/** Explore board state — sort / age / search are live. */
+let marketSort = "recent";
+let marketAge = "all";
+let marketQuery = "";
+let registryLiveAt = 0;
+let registrySyncing = false;
+
 document.querySelectorAll("[role='tablist'] button").forEach((button) => {
   button.addEventListener("click", () => {
     button.parentElement.querySelectorAll("button").forEach((item) => item.classList.remove("selected"));
     button.classList.add("selected");
+    if (button.dataset.filter) {
+      marketSort = button.dataset.filter;
+      renderMarkets();
+    }
+    if (button.dataset.age) {
+      marketAge = button.dataset.age;
+      renderMarkets();
+    }
   });
 });
 
 const search = document.querySelector("[data-search]");
 search?.addEventListener("input", () => {
-  document.querySelector(".token-empty h3").textContent = search.value.trim()
-    ? `No market found for “${search.value.trim()}”.`
-    : "The registry is quiet.";
+  marketQuery = search.value.trim();
+  renderMarkets();
 });
 
 const connectButtons = [...document.querySelectorAll("[data-wallet-open]")];
@@ -569,6 +583,8 @@ function formatSpotPrice(priceBaseUnits) {
   return `${formatUnits(priceBaseUnits, NATIVE_THRU_DECIMALS, 12)} THRU`;
 }
 
+const CHART_HISTORY = 240;
+
 function readChart(market) {
   const points = Array.isArray(market?.chart) ? market.chart : [];
   return points
@@ -580,7 +596,7 @@ function readChart(market) {
       tokens: String(p.tokens || "0"),
     }))
     .filter((p) => BigInt(p.price) >= 0n)
-    .slice(-120);
+    .slice(-CHART_HISTORY);
 }
 
 function readTradeStats(market) {
@@ -635,7 +651,7 @@ function appendChartPoint(market, { side, price, thru = 0n, tokens = 0n }) {
     }
   }
   return updateMarket(market.mintAddress, {
-    chart: chart.slice(-120),
+    chart: chart.slice(-CHART_HISTORY),
     lastPrice: price.toString(),
     stats,
     updatedAt: Date.now(),
@@ -646,7 +662,7 @@ function ensureChartSeed(market) {
   if (!market?.curve) return market;
   const existing = readChart(market);
   if (existing.length > 0) return market;
-  // Seed a short theoretical path so the chart isn't empty at launch.
+  // One flat seed tick so the chart can open; real trades create movement.
   try {
     const c = readCurve(market);
     const oneToken = 10n ** BigInt(market.decimals || 0);
@@ -655,8 +671,7 @@ function ensureChartSeed(market) {
       : 0n;
     const now = Date.now();
     const seed = [
-      { t: now - 60_000, price: startPrice.toString(), side: "seed" },
-      { t: now, price: startPrice.toString(), side: "seed" },
+      { t: now, price: startPrice.toString(), side: "seed", thru: "0", tokens: "0" },
     ];
     return updateMarket(market.mintAddress, {
       chart: seed,
@@ -668,8 +683,8 @@ function ensureChartSeed(market) {
   }
 }
 
-/** Active candle interval in ms (DexScreener-style fixed TFs). Default 15m. */
-let chartIntervalMs = 900_000;
+/** Active candle interval in ms. Default 1m (pump.fun-style live feel). */
+let chartIntervalMs = 60_000;
 
 const CHART_INTERVALS = [
   { ms: 60_000, label: "1m" },
@@ -685,10 +700,11 @@ function intervalLabel(ms = chartIntervalMs) {
 }
 
 /**
- * Build fixed-interval OHLC candles aligned to wall clock
- * (e.g. 15m buckets at :00, :15, :30, :45).
+ * Build fixed-interval OHLC candles (true open from first print in the bucket).
+ * Shows a trailing window ending at "now", trims leading empty bars, and only
+ * pads a few quiet candles after activity — avoids a wall of flat dojis.
  */
-function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 60) {
+function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 48) {
   const ticks = points
     .map((p) => ({
       t: Number(p.t) || 0,
@@ -696,22 +712,22 @@ function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 60) {
       side: p.side || "seed",
       thru: BigInt(p.thru || "0"),
     }))
-    .filter((p) => p.price >= 0n)
+    .filter((p) => p.price > 0n && p.t > 0)
     .sort((a, b) => a.t - b.t);
   if (!ticks.length) return [];
 
   const bucketStart = (t) => Math.floor(t / intervalMs) * intervalMs;
-  const firstBucket = bucketStart(ticks[0].t);
-  const lastTradeBucket = bucketStart(ticks[ticks.length - 1].t);
-  // Extend to "now" so the latest open candle is visible.
   const nowBucket = bucketStart(Date.now());
+  const firstTradeBucket = bucketStart(ticks[0].t);
+  const lastTradeBucket = bucketStart(ticks[ticks.length - 1].t);
   const endBucket = Math.max(lastTradeBucket, nowBucket);
 
-  // Trade buckets
+  // Aggregate true OHLC per wall-clock bucket.
   const tradeMap = new Map();
   for (const tick of ticks) {
     const key = bucketStart(tick.t);
     const existing = tradeMap.get(key);
+    const isReal = tick.side === "buy" || tick.side === "sell";
     if (!existing) {
       tradeMap.set(key, {
         t: key,
@@ -719,57 +735,75 @@ function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 60) {
         high: tick.price,
         low: tick.price,
         close: tick.price,
-        volume: tick.thru,
+        volume: isReal ? tick.thru : 0n,
         buys: tick.side === "buy" ? 1 : 0,
         sells: tick.side === "sell" ? 1 : 0,
-        hasTrades: true,
+        hasTrades: isReal,
+        hasPrint: true,
       });
     } else {
       if (tick.price > existing.high) existing.high = tick.price;
       if (tick.price < existing.low) existing.low = tick.price;
       existing.close = tick.price;
-      existing.volume += tick.thru;
-      if (tick.side === "buy") existing.buys += 1;
-      if (tick.side === "sell") existing.sells += 1;
+      if (isReal) {
+        existing.volume += tick.thru;
+        existing.hasTrades = true;
+        if (tick.side === "buy") existing.buys += 1;
+        if (tick.side === "sell") existing.sells += 1;
+      }
     }
   }
 
-  // How many candles to show: from first trade, but cap at maxCandles ending at endBucket.
-  const totalBuckets = Math.floor((endBucket - firstBucket) / intervalMs) + 1;
-  const startBucket = totalBuckets > maxCandles
-    ? endBucket - (maxCandles - 1) * intervalMs
-    : firstBucket;
+  // Window: prefer recent activity. Keep a few quiet bars after last trade.
+  const quietPad = Math.min(6, Math.max(2, Math.floor(maxCandles / 8)));
+  let windowEnd = endBucket;
+  let windowStart = firstTradeBucket;
+  // Cap width to maxCandles ending at windowEnd.
+  if (Math.floor((windowEnd - windowStart) / intervalMs) + 1 > maxCandles) {
+    windowStart = windowEnd - (maxCandles - 1) * intervalMs;
+  }
+  // If activity is clustered early in a large window, zoom to trades + pad.
+  if (tradeMap.size > 0 && tradeMap.size < maxCandles * 0.35) {
+    const activityStart = firstTradeBucket;
+    const activityEnd = Math.min(endBucket, lastTradeBucket + quietPad * intervalMs);
+    const spanBuckets = Math.floor((activityEnd - activityStart) / intervalMs) + 1;
+    if (spanBuckets <= maxCandles) {
+      windowStart = activityStart;
+      windowEnd = activityEnd;
+      // Center a bit of left padding when sparse (pump-style breathing room).
+      const leftPad = Math.min(4, maxCandles - spanBuckets);
+      windowStart = Math.max(0, windowStart - leftPad * intervalMs);
+    } else {
+      windowEnd = activityEnd;
+      windowStart = windowEnd - (maxCandles - 1) * intervalMs;
+    }
+  }
 
   const candles = [];
   let prevClose = null;
-  // Seed prevClose from earliest known price at or before startBucket.
   for (const tick of ticks) {
-    if (tick.t < startBucket) prevClose = tick.price;
+    if (bucketStart(tick.t) < windowStart) prevClose = tick.price;
     else break;
   }
   if (prevClose == null) prevClose = ticks[0].price;
 
-  for (let t = startBucket; t <= endBucket; t += intervalMs) {
+  for (let t = windowStart; t <= windowEnd; t += intervalMs) {
     const traded = tradeMap.get(t);
     if (traded) {
-      // Open at previous close for continuous series (exchange chart feel).
-      const open = prevClose;
-      const high = traded.high > open ? traded.high : open;
-      const low = traded.low < open ? traded.low : open;
+      // True open from first print in the bucket (pump.fun / exchange style).
       candles.push({
         t,
-        open,
-        high,
-        low,
+        open: traded.open,
+        high: traded.high,
+        low: traded.low,
         close: traded.close,
         volume: traded.volume,
         buys: traded.buys,
         sells: traded.sells,
-        hasTrades: true,
+        hasTrades: traded.hasTrades,
       });
       prevClose = traded.close;
-    } else {
-      // Empty interval: flat candle (doji) at last close — like quiet periods on DEX charts.
+    } else if (prevClose != null) {
       candles.push({
         t,
         open: prevClose,
@@ -782,6 +816,14 @@ function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 60) {
         hasTrades: false,
       });
     }
+  }
+
+  // Drop leading empty bars so the first visual candle has a print.
+  while (candles.length > 2 && !candles[0].hasTrades && candles[0].open === candles[0].close) {
+    const nextHas = candles.slice(1).some((c) => c.hasTrades || c.open !== c.close);
+    if (!nextHas) break;
+    if (!candles[0].hasTrades && candles[1]) candles.shift();
+    else break;
   }
 
   if (candles.length === 1) {
@@ -838,10 +880,13 @@ function renderTokenChart(market) {
   let m = ensureChartSeed(market);
   const points = readChart(m);
   const stats = readTradeStats(m);
-  const candles = buildCandles(points, chartIntervalMs, 60);
+  const candles = buildCandles(points, chartIntervalMs, 48);
   const last = candles.length ? candles[candles.length - 1].close : curveSpotPriceThruPerToken(m);
+  // Session change vs first print in window; direction vs prior candle (pump-style pulse).
   const first = candles.length ? candles[0].open : last;
-  const up = last >= first;
+  const prevClose = candles.length > 1 ? candles[candles.length - 2].close : first;
+  const up = last >= prevClose;
+  const sessionUp = last >= first;
 
   if (root) {
     root.classList.toggle("up", up);
@@ -851,12 +896,12 @@ function renderTokenChart(market) {
   if (priceEl) priceEl.textContent = formatSpotPrice(last);
   if (changeEl) {
     if (first > 0n && last !== first) {
-      const delta = up ? last - first : first - last;
+      const delta = sessionUp ? last - first : first - last;
       const bps = (delta * 10000n) / first;
       const pct = (Number(bps) / 100).toFixed(2);
-      changeEl.textContent = `${up ? "+" : "−"}${pct}%`;
-      changeEl.classList.toggle("up", up);
-      changeEl.classList.toggle("down", !up);
+      changeEl.textContent = `${sessionUp ? "+" : "−"}${pct}%`;
+      changeEl.classList.toggle("up", sessionUp);
+      changeEl.classList.toggle("down", !sessionUp);
     } else {
       changeEl.textContent = "0.00%";
       changeEl.classList.remove("up", "down");
@@ -900,54 +945,73 @@ function renderTokenChart(market) {
     setStat("[data-stat-progress]", "—");
   }
 
-  // DexScreener-like layout: price pane + volume + right price scale + bottom time.
-  const W = 520;
-  const H = 300;
-  const padL = 10;
-  const padR = 64;
-  const padT = 10;
-  const padB = 26;
-  const volH = 56;
-  const gap = 10;
+  // pump.fun / DexScreener layout: price pane + volume + last-price line.
+  const W = 640;
+  const H = 320;
+  const padL = 8;
+  const padR = 72;
+  const padT = 12;
+  const padB = 24;
+  const volH = 52;
+  const gap = 8;
   const priceBottom = H - padB - volH - gap;
   const priceTop = padT;
   const priceH = priceBottom - priceTop;
   const volTop = priceBottom + gap;
   const plotW = W - padL - padR;
 
-  let minP = candles[0]?.low ?? 0n;
-  let maxP = candles[0]?.high ?? 1n;
+  // Scale from candles that have real range; ignore pure empty pads for min/max if any trade exists.
+  const ranged = candles.filter((c) => c.hasTrades || c.high !== c.low || c.open !== c.close);
+  const scaleSrc = ranged.length ? ranged : candles;
+  let minP = scaleSrc[0]?.low ?? 0n;
+  let maxP = scaleSrc[0]?.high ?? 1n;
   let maxVol = 0n;
-  for (const c of candles) {
+  for (const c of scaleSrc) {
     if (c.low < minP) minP = c.low;
     if (c.high > maxP) maxP = c.high;
+  }
+  for (const c of candles) {
     if (c.volume > maxVol) maxVol = c.volume;
   }
-  if (maxP === minP) maxP = minP + 1n;
-  if (maxVol === 0n) maxVol = 1n;
-  const padRange = (maxP - minP) / 10n || 1n;
+  if (maxP <= minP) {
+    const bump = minP > 0n ? minP / 20n || 1n : 1n;
+    minP = minP > bump ? minP - bump : 0n;
+    maxP = maxP + bump;
+  }
+  // Minimum vertical span (~8%) so tiny alphanet moves still read as candles.
+  let span = maxP - minP;
+  const mid = minP + span / 2n;
+  const minSpan = mid / 12n || 1n;
+  if (span < minSpan) {
+    minP = mid > minSpan / 2n ? mid - minSpan / 2n : 0n;
+    maxP = mid + minSpan / 2n;
+    span = maxP - minP;
+  }
+  const padRange = span / 8n || 1n;
   minP = minP > padRange ? minP - padRange : 0n;
   maxP += padRange;
-  const span = maxP - minP;
+  span = maxP - minP;
+  if (maxVol === 0n) maxVol = 1n;
 
   const priceToY = (price) => {
     const yRatio = Number(((price - minP) * 10000n) / span) / 10000;
     return priceTop + priceH * (1 - Math.min(1, Math.max(0, yRatio)));
   };
   const volToH = (vol) => {
+    if (vol <= 0n) return 0;
     const ratio = Number((vol * 10000n) / maxVol) / 10000;
-    return Math.max(volH * ratio * 0.92, vol > 0n ? 3 : 0);
+    return Math.max(volH * ratio * 0.9, 4);
   };
 
   const count = Math.max(candles.length, 1);
   const slot = plotW / count;
-  // Leave a clear gap between candles (DexScreener spacing).
-  const bodyW = Math.max(Math.min(slot * 0.58, 12), 3);
-  const wickW = Math.max(1, Math.min(bodyW * 0.22, 2));
+  // pump.fun: chunky bodies, tight gaps, readable even with few bars.
+  const bodyW = Math.max(Math.min(slot * 0.72, 18), count <= 8 ? 8 : 4);
+  const wickW = Math.max(1.25, Math.min(bodyW * 0.18, 2.5));
 
   const gridLines = [];
   const priceLabels = [];
-  const steps = 5;
+  const steps = 4;
   for (let i = 0; i <= steps; i += 1) {
     const price = minP + (span * BigInt(i)) / BigInt(steps);
     const y = priceToY(price);
@@ -955,12 +1019,17 @@ function renderTokenChart(market) {
       `<line class="chart-grid" x1="${padL}" y1="${y.toFixed(1)}" x2="${padL + plotW}" y2="${y.toFixed(1)}"></line>`,
     );
     priceLabels.push(
-      `<text class="chart-axis-label" x="${W - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${formatUnits(price, NATIVE_THRU_DECIMALS, 6)}</text>`,
+      `<text class="chart-axis-label" x="${W - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${formatUnits(price, NATIVE_THRU_DECIMALS, 8)}</text>`,
     );
   }
 
+  // Live last-price guide (horizontal).
+  const lastY = priceToY(last);
+  const lastLineCls = up ? "chart-last-up" : "chart-last-down";
+  const lastPriceLabel = formatUnits(last, NATIVE_THRU_DECIMALS, 8);
+
   const timeLabels = [];
-  const labelCount = Math.min(5, count);
+  const labelCount = Math.min(6, count);
   for (let i = 0; i < labelCount; i += 1) {
     const idx = labelCount === 1 ? 0 : Math.round((i * (count - 1)) / (labelCount - 1));
     const c = candles[idx];
@@ -979,19 +1048,19 @@ function renderTokenChart(market) {
     const yLow = priceToY(c.low);
     const bullish = c.close >= c.open;
     const cls = bullish ? "candle-up" : "candle-down";
-    const flat = c.close === c.open && c.high === c.low;
+    const flat = c.close === c.open;
     const bodyTop = Math.min(yOpen, yClose);
     const bodyBot = Math.max(yOpen, yClose);
-    // Flat/doji: thin horizontal body (exchange-style).
-    const bodyH = flat ? 1.5 : Math.max(bodyBot - bodyTop, 2);
-    const bodyY = flat ? bodyTop - 0.75 : bodyTop;
+    // Doji: thin body; otherwise at least 2px so small moves still paint.
+    const bodyH = flat ? 2 : Math.max(bodyBot - bodyTop, 2.5);
+    const bodyY = flat ? bodyTop - 1 : bodyTop;
     const vH = volToH(c.volume);
     const vY = volTop + volH - vH;
     const emptyCls = c.hasTrades ? "" : " candle-empty";
     return `
       <g class="candle ${cls}${emptyCls}" data-candle-index="${i}">
         <line class="candle-wick" x1="${cx.toFixed(2)}" y1="${yHigh.toFixed(2)}" x2="${cx.toFixed(2)}" y2="${yLow.toFixed(2)}" stroke-width="${wickW}"></line>
-        <rect class="candle-body" x="${(cx - bodyW / 2).toFixed(2)}" y="${bodyY.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${bodyH.toFixed(2)}"></rect>
+        <rect class="candle-body" x="${(cx - bodyW / 2).toFixed(2)}" y="${bodyY.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${bodyH.toFixed(2)}" rx="0.5"></rect>
         <rect class="vol-bar" x="${(cx - bodyW / 2).toFixed(2)}" y="${vY.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${Math.max(vH, 0).toFixed(2)}"></rect>
         <rect class="candle-hit" x="${(padL + slot * i).toFixed(2)}" y="${priceTop}" width="${Math.max(slot, 1).toFixed(2)}" height="${(priceH + gap + volH).toFixed(2)}" fill="transparent"></rect>
       </g>`;
@@ -1006,6 +1075,9 @@ function renderTokenChart(market) {
     <line class="chart-sep" x1="${padL}" y1="${sepY.toFixed(1)}" x2="${(padL + plotW).toFixed(1)}" y2="${sepY.toFixed(1)}"></line>
     <text class="chart-vol-label" x="${padL + 2}" y="${(volTop + 10).toFixed(1)}">Vol</text>
     ${candleSvg}
+    <line class="chart-last ${lastLineCls}" x1="${padL}" y1="${lastY.toFixed(2)}" x2="${(padL + plotW).toFixed(1)}" y2="${lastY.toFixed(2)}"></line>
+    <rect class="chart-last-tag ${lastLineCls}" x="${(padL + plotW + 2).toFixed(1)}" y="${(lastY - 8).toFixed(1)}" width="${Math.max(padR - 8, 40)}" height="16" rx="2"></rect>
+    <text class="chart-last-text" x="${(W - 6).toFixed(1)}" y="${(lastY + 3.5).toFixed(1)}" text-anchor="end">${lastPriceLabel}</text>
     ${priceLabels.join("")}
     ${timeLabels.join("")}
     <line class="chart-cross-x" data-cross-x hidden x1="${padL}" y1="0" x2="${padL + plotW}" y2="0"></line>
@@ -1195,15 +1267,129 @@ function marketTimestamp(market) {
   return Number(market?.updatedAt || market?.createdAt || 0);
 }
 
+function marketCreatedAt(market) {
+  return Number(market?.createdAt || market?.updatedAt || 0);
+}
+
+function marketVolumeThru(market) {
+  const stats = market?.stats;
+  if (stats) {
+    try {
+      return BigInt(stats.buyThru || "0") + BigInt(stats.sellThru || "0");
+    } catch { /* fall through */ }
+  }
+  let vol = 0n;
+  for (const p of readChart(market)) {
+    if (p.side === "buy" || p.side === "sell") vol += BigInt(p.thru || "0");
+  }
+  return vol;
+}
+
+function marketCapProxy(market) {
+  try {
+    const price = BigInt(market?.lastPrice || "0");
+    const supply = BigInt(market?.supply || "0");
+    if (price <= 0n || supply <= 0n) return 0n;
+    // lastPrice is THRU base units per 1 whole token; mcap ≈ price * supply.
+    return price * supply;
+  } catch {
+    return 0n;
+  }
+}
+
+function mergeChartPoints(a, b) {
+  const map = new Map();
+  for (const p of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
+    if (!p) continue;
+    const key = `${Number(p.t) || 0}|${p.side || ""}|${p.price || ""}|${p.thru || ""}|${p.tokens || ""}`;
+    if (!map.has(key)) map.set(key, p);
+  }
+  return [...map.values()]
+    .sort((x, y) => (Number(x.t) || 0) - (Number(y.t) || 0))
+    .slice(-CHART_HISTORY);
+}
+
+function mergeCurveRecords(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  // Prefer richer curve (has key) and higher vault depth.
+  const pick = (a.privateKeyHex ? a : null) || (b.privateKeyHex ? b : null) || a;
+  const other = pick === a ? b : a;
+  try {
+    const realThruA = BigInt(a.realThru || "0");
+    const realThruB = BigInt(b.realThru || "0");
+    const realTokenA = BigInt(a.realToken || "0");
+    const realTokenB = BigInt(b.realToken || "0");
+    const virtThruA = BigInt(a.virtualThru || "0");
+    const virtThruB = BigInt(b.virtualThru || "0");
+    return {
+      ...other,
+      ...pick,
+      realThru: (realThruA >= realThruB ? a.realThru : b.realThru) ?? pick.realThru,
+      realToken: (realTokenA >= realTokenB ? a.realToken : b.realToken) ?? pick.realToken,
+      virtualThru: (virtThruA >= virtThruB ? a.virtualThru : b.virtualThru) ?? pick.virtualThru,
+      virtualToken: pick.virtualToken ?? other.virtualToken,
+      privateKeyHex: a.privateKeyHex || b.privateKeyHex,
+      address: a.address || b.address,
+      tokenAccount: a.tokenAccount || b.tokenAccount,
+    };
+  } catch {
+    return { ...other, ...pick, privateKeyHex: a.privateKeyHex || b.privateKeyHex };
+  }
+}
+
+function mergeTwoMarkets(a, b) {
+  const newer = marketTimestamp(a) >= marketTimestamp(b) ? a : b;
+  const older = newer === a ? b : a;
+  const chart = mergeChartPoints(a.chart, b.chart);
+  let lastPrice = newer.lastPrice || older.lastPrice;
+  if (chart.length) {
+    const last = chart[chart.length - 1];
+    if (last?.price) lastPrice = String(last.price);
+  }
+  // Recompute trade stats from merged chart.
+  let buys = 0;
+  let sells = 0;
+  let buyThru = 0n;
+  let sellThru = 0n;
+  for (const p of chart) {
+    if (p.side === "buy") {
+      buys += 1;
+      buyThru += BigInt(p.thru || "0");
+    } else if (p.side === "sell") {
+      sells += 1;
+      sellThru += BigInt(p.thru || "0");
+    }
+  }
+  return {
+    ...older,
+    ...newer,
+    createdAt: marketCreatedAt(a) && marketCreatedAt(b)
+      ? Math.min(marketCreatedAt(a), marketCreatedAt(b))
+      : (a.createdAt || b.createdAt),
+    updatedAt: Math.max(marketTimestamp(a), marketTimestamp(b)),
+    chart,
+    lastPrice,
+    curve: mergeCurveRecords(a.curve, b.curve),
+    graduated: Boolean(a.graduated || b.graduated),
+    liquidity: a.liquidity || b.liquidity || false,
+    phase: newer.phase || older.phase,
+    stats: {
+      buys,
+      sells,
+      buyThru: buyThru.toString(),
+      sellThru: sellThru.toString(),
+    },
+  };
+}
+
 function mergeMarketLists(...lists) {
   const map = new Map();
   for (const list of lists) {
     for (const market of list || []) {
       if (!market?.mintAddress) continue;
       const prev = map.get(market.mintAddress);
-      if (!prev || marketTimestamp(market) >= marketTimestamp(prev)) {
-        map.set(market.mintAddress, market);
-      }
+      map.set(market.mintAddress, prev ? mergeTwoMarkets(prev, market) : market);
     }
   }
   return [...map.values()]
@@ -1211,14 +1397,16 @@ function mergeMarketLists(...lists) {
     .slice(0, 100);
 }
 
-function saveMarkets(markets) {
+function saveMarkets(markets, { publish = true } = {}) {
   const stamped = markets.slice(0, 100).map((market) => ({
     ...market,
     updatedAt: market.updatedAt || market.createdAt || Date.now(),
   }));
   localStorage.setItem(MARKETS_KEY, JSON.stringify(stamped));
   // Fire-and-forget public publish so other visitors can trade.
-  publishPublicMarkets(stamped).catch(() => { /* offline / registry optional */ });
+  if (publish) {
+    publishPublicMarkets(stamped).catch(() => { /* offline / registry optional */ });
+  }
   return stamped;
 }
 
@@ -1252,16 +1440,42 @@ async function publishPublicMarkets(markets) {
   if (!response.ok) throw new Error(`publish ${response.status}`);
 }
 
+function marketsSignature(markets) {
+  return (markets || [])
+    .map((m) => `${m.mintAddress}:${marketTimestamp(m)}:${(m.chart || []).length}`)
+    .join("|");
+}
+
 async function syncPublicMarkets() {
-  const local = readMarkets();
-  const remote = await fetchPublicMarkets();
-  const merged = mergeMarketLists(remote, local);
-  localStorage.setItem(MARKETS_KEY, JSON.stringify(merged));
-  // Push merge upstream so local-only launches become public.
-  if (merged.length) {
-    try { await publishPublicMarkets(merged); } catch { /* ignore */ }
+  if (registrySyncing) return readMarkets();
+  registrySyncing = true;
+  try {
+    const local = readMarkets();
+    const remote = await fetchPublicMarkets();
+    const merged = mergeMarketLists(remote, local);
+    const before = marketsSignature(local);
+    const after = marketsSignature(merged);
+    localStorage.setItem(MARKETS_KEY, JSON.stringify(merged));
+    registryLiveAt = Date.now();
+    // Push only when we have local-only data or richer merge than remote alone.
+    const remoteSig = marketsSignature(mergeMarketLists(remote));
+    if (merged.length && after !== remoteSig) {
+      try { await publishPublicMarkets(merged); } catch { /* ignore */ }
+    } else if (merged.length && !remote.length) {
+      try { await publishPublicMarkets(merged); } catch { /* ignore */ }
+    }
+    // Keep open trade modal + chart live when remote activity lands.
+    if (before !== after && activeTrade?.mintAddress) {
+      const fresh = merged.find((m) => m.mintAddress === activeTrade.mintAddress);
+      if (fresh) {
+        activeTrade = fresh;
+        renderTokenChart(activeTrade);
+      }
+    }
+    return merged;
+  } finally {
+    registrySyncing = false;
   }
-  return merged;
 }
 
 function updateMarket(mintAddress, patch) {
@@ -1911,14 +2125,80 @@ function renderMarketCard(market, index) {
     </article>`;
 }
 
+function filterAndSortMarkets(markets) {
+  const now = Date.now();
+  const ageMs = marketAge === "24h"
+    ? 86_400_000
+    : marketAge === "7d"
+      ? 7 * 86_400_000
+      : 0;
+  const q = marketQuery.toLowerCase();
+
+  let list = markets.map((market, index) => ({ market, index }));
+
+  if (ageMs > 0) {
+    list = list.filter(({ market }) => {
+      const ts = Math.max(marketTimestamp(market), marketCreatedAt(market));
+      return ts > 0 && now - ts <= ageMs;
+    });
+  }
+
+  if (q) {
+    list = list.filter(({ market }) => {
+      const hay = [
+        market.name,
+        market.ticker,
+        market.mintAddress,
+        market.description,
+        market.creator,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+  }
+
+  const cmpBig = (a, b) => (a === b ? 0 : a > b ? -1 : 1);
+  list.sort((a, b) => {
+    if (marketSort === "newest") {
+      return marketCreatedAt(b.market) - marketCreatedAt(a.market);
+    }
+    if (marketSort === "market") {
+      const cap = cmpBig(marketCapProxy(b.market), marketCapProxy(a.market));
+      return cap || (marketTimestamp(b.market) - marketTimestamp(a.market));
+    }
+    if (marketSort === "volume") {
+      const vol = cmpBig(marketVolumeThru(b.market), marketVolumeThru(a.market));
+      return vol || (marketTimestamp(b.market) - marketTimestamp(a.market));
+    }
+    // recent activity (default)
+    return marketTimestamp(b.market) - marketTimestamp(a.market);
+  });
+
+  return list;
+}
+
+function updateRegistryLiveBadge() {
+  const el = document.querySelector("[data-registry-live]");
+  if (!el) return;
+  if (!registryLiveAt) {
+    el.textContent = "Syncing…";
+    el.dataset.state = "syncing";
+    return;
+  }
+  const ageSec = Math.max(0, Math.round((Date.now() - registryLiveAt) / 1000));
+  el.textContent = ageSec < 3 ? "Live" : `Live · ${ageSec}s ago`;
+  el.dataset.state = "live";
+}
+
 function renderMarkets() {
   const markets = readMarkets();
   const table = document.querySelector(".token-table");
-  document.querySelector("[data-count]").textContent = String(markets.length);
+  const countEl = document.querySelector("[data-count]");
+  if (countEl) countEl.textContent = String(markets.length);
+  updateRegistryLiveBadge();
 
-  // Public board: every visitor sees every market (from shared registry + local cache).
-  const indexed = markets.map((market, index) => ({ market, index }));
-  const graduated = indexed.filter(({ market }) => isGraduatedMarket(market));
+  // Graduated rail uses full list (not explore filters).
+  const allIndexed = markets.map((market, index) => ({ market, index }));
+  const graduated = allIndexed.filter(({ market }) => isGraduatedMarket(market));
 
   const graduatedHost = document.querySelector("[data-graduated-list]");
   if (graduatedHost) {
@@ -1934,6 +2214,8 @@ function renderMarkets() {
     }
   }
 
+  const indexed = filterAndSortMarkets(markets);
+
   if (!markets.length) {
     table.innerHTML = `
       <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
@@ -1942,6 +2224,20 @@ function renderMarkets() {
         <h3>The registry is quiet.</h3>
         <p>Launches are public. Create a market and anyone on Genesis can trade it with their own wallet.</p>
         <a href="#create">Create the first market</a>
+      </div>`;
+    return;
+  }
+
+  if (!indexed.length) {
+    const emptyTitle = marketQuery
+      ? `No market found for “${marketQuery}”.`
+      : "No markets match this filter.";
+    table.innerHTML = `
+      <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
+      <div class="token-empty">
+        <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <h3>${emptyTitle}</h3>
+        <p>Try another sort, clear search, or switch age to All.</p>
       </div>`;
     return;
   }
@@ -2729,17 +3025,24 @@ async function bootMarkets() {
     /* local cache still works offline */
   }
   renderMarkets();
-  // Keep the public board fresh for visitors trading from other wallets/browsers.
+  // Live registry: poll often so Newest / Recent / charts stay current.
+  const REGISTRY_POLL_MS = 5000;
   setInterval(async () => {
     try {
       await syncPublicMarkets();
-      if (document.querySelector("[data-trade-modal]")?.hidden !== false) {
-        renderMarkets();
-      } else {
-        renderMarkets();
-      }
+      renderMarkets();
     } catch { /* ignore */ }
-  }, 12000);
+  }, REGISTRY_POLL_MS);
+  // Live badge clock.
+  setInterval(updateRegistryLiveBadge, 1000);
+  // Keep open candle chart ticking (current interval bar advances with wall clock).
+  setInterval(() => {
+    if (activeTrade && document.querySelector("[data-trade-modal]")?.hidden === false) {
+      const fresh = readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress);
+      if (fresh) activeTrade = fresh;
+      renderTokenChart(activeTrade);
+    }
+  }, 15_000);
 }
 
 bootMarkets();

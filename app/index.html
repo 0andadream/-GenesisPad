@@ -47,7 +47,10 @@
 
       <section class="explore" id="activity" aria-labelledby="explore-title">
         <div class="section-heading">
-          <div><p class="eyebrow">Live registry</p><h2 id="explore-title">Explore</h2></div>
+          <div>
+            <p class="eyebrow">Live registry <span class="registry-live" data-registry-live data-state="syncing">Syncing…</span></p>
+            <h2 id="explore-title">Explore</h2>
+          </div>
           <p><strong data-count>0</strong> tokens launched on Genesis.</p>
         </div>
         <div class="filters">
@@ -58,7 +61,9 @@
             <button type="button" data-filter="volume">Volume</button>
           </div>
           <div role="tablist" aria-label="Filter by age">
-            <button class="selected" type="button">All</button><button type="button">24h</button><button type="button">7d</button>
+            <button class="selected" type="button" data-age="all">All</button>
+            <button type="button" data-age="24h">24h</button>
+            <button type="button" data-age="7d">7d</button>
           </div>
         </div>
         <div class="token-table">
@@ -112,15 +117,15 @@
             </div>
           </div>
           <div class="chart-intervals" data-chart-intervals role="tablist" aria-label="Candle interval">
-            <button type="button" data-interval="60000">1m</button>
+            <button type="button" class="selected" data-interval="60000">1m</button>
             <button type="button" data-interval="300000">5m</button>
-            <button type="button" class="selected" data-interval="900000">15m</button>
+            <button type="button" data-interval="900000">15m</button>
             <button type="button" data-interval="3600000">1H</button>
             <button type="button" data-interval="14400000">4H</button>
             <button type="button" data-interval="86400000">1D</button>
           </div>
           <div class="token-chart-stage">
-            <svg class="token-chart-svg" data-chart-svg viewBox="0 0 520 300" preserveAspectRatio="none" aria-label="Token candlestick chart"></svg>
+            <svg class="token-chart-svg" data-chart-svg viewBox="0 0 640 320" preserveAspectRatio="none" aria-label="Token candlestick chart"></svg>
             <div class="token-chart-hover" data-chart-hover hidden></div>
           </div>
           <div class="token-stats" data-token-stats>
