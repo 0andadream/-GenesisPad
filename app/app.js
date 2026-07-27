@@ -646,19 +646,32 @@ function ensureChartSeed(market) {
   }
 }
 
-/** Build OHLC candles from price ticks (time buckets, fallback per-trade). */
-function buildCandles(points, maxCandles = 40) {
+/** Build OHLC + volume candles (DexScreener / TradingView style). */
+function buildCandles(points, maxCandles = 48) {
   const ticks = points
-    .map((p) => ({ t: Number(p.t) || 0, price: BigInt(p.price || "0"), side: p.side || "seed" }))
+    .map((p) => ({
+      t: Number(p.t) || 0,
+      price: BigInt(p.price || "0"),
+      side: p.side || "seed",
+      thru: BigInt(p.thru || "0"),
+    }))
     .filter((p) => p.price >= 0n)
     .sort((a, b) => a.t - b.t);
   if (!ticks.length) return [];
 
-  // Adaptive bucket: aim for ~maxCandles candles across the span.
   const t0 = ticks[0].t;
-  const t1 = ticks[ticks.length - 1].t;
-  const spanMs = Math.max(t1 - t0, 1);
-  const bucketMs = Math.max(Math.ceil(spanMs / maxCandles), 1);
+  const t1 = Math.max(ticks[ticks.length - 1].t, t0 + 1);
+  const spanMs = Math.max(t1 - t0, 60_000);
+  // Prefer fixed-ish intervals when possible (more like real charts).
+  const preferred = [15_000, 30_000, 60_000, 120_000, 300_000, 900_000, 1_800_000, 3_600_000];
+  let bucketMs = preferred[0];
+  for (const ms of preferred) {
+    bucketMs = ms;
+    if (Math.ceil(spanMs / ms) <= maxCandles) break;
+  }
+  if (Math.ceil(spanMs / bucketMs) > maxCandles) {
+    bucketMs = Math.max(Math.ceil(spanMs / maxCandles), 1);
+  }
 
   const buckets = new Map();
   for (const tick of ticks) {
@@ -671,6 +684,7 @@ function buildCandles(points, maxCandles = 40) {
         high: tick.price,
         low: tick.price,
         close: tick.price,
+        volume: tick.thru,
         buys: tick.side === "buy" ? 1 : 0,
         sells: tick.side === "sell" ? 1 : 0,
       });
@@ -678,6 +692,7 @@ function buildCandles(points, maxCandles = 40) {
       if (tick.price > existing.high) existing.high = tick.price;
       if (tick.price < existing.low) existing.low = tick.price;
       existing.close = tick.price;
+      existing.volume += tick.thru;
       if (tick.side === "buy") existing.buys += 1;
       if (tick.side === "sell") existing.sells += 1;
     }
@@ -687,21 +702,38 @@ function buildCandles(points, maxCandles = 40) {
     .sort((a, b) => a[0] - b[0])
     .map(([, c]) => c);
 
-  // Carry open from previous close for continuity when a bucket is a single tick.
+  // Continuous series: each candle opens at previous close (standard chart feel).
   for (let i = 1; i < candles.length; i += 1) {
-    // Keep natural open from first trade in bucket; only fix if missing.
-    if (candles[i].open === 0n) candles[i].open = candles[i - 1].close;
+    candles[i].open = candles[i - 1].close;
+    if (candles[i].high < candles[i].open) candles[i].high = candles[i].open;
+    if (candles[i].low > candles[i].open) candles[i].low = candles[i].open;
   }
 
-  // Ensure at least 2 candles for a readable chart.
   if (candles.length === 1) {
     const c = candles[0];
     candles = [
-      { ...c, t: c.t - bucketMs, open: c.open, high: c.open, low: c.open, close: c.open, buys: 0, sells: 0 },
+      {
+        t: c.t - bucketMs,
+        open: c.open,
+        high: c.open,
+        low: c.open,
+        close: c.open,
+        volume: 0n,
+        buys: 0,
+        sells: 0,
+      },
       c,
     ];
   }
   return candles.slice(-maxCandles);
+}
+
+function formatChartTime(ts) {
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
 }
 
 function renderTokenChart(market) {
@@ -710,7 +742,9 @@ function renderTokenChart(market) {
   const priceEl = document.querySelector("[data-chart-price]");
   const changeEl = document.querySelector("[data-chart-change]");
   const tradesEl = document.querySelector("[data-chart-trades]");
-  const rangeEl = document.querySelector("[data-chart-range]");
+  const pairEl = document.querySelector("[data-chart-pair]");
+  const ohlcEl = document.querySelector("[data-chart-ohlc]");
+  const hoverEl = document.querySelector("[data-chart-hover]");
   if (!svg || !market) return;
 
   let m = ensureChartSeed(market);
@@ -725,6 +759,7 @@ function renderTokenChart(market) {
     root.classList.toggle("up", up);
     root.classList.toggle("down", !up);
   }
+  if (pairEl) pairEl.textContent = `${market.ticker || "TOKEN"}/THRU`;
   if (priceEl) priceEl.textContent = formatSpotPrice(last);
   if (changeEl) {
     if (first > 0n && last !== first) {
@@ -742,10 +777,17 @@ function renderTokenChart(market) {
   if (tradesEl) {
     const realTrades = stats.buys + stats.sells;
     tradesEl.textContent = realTrades
-      ? `${realTrades} trade${realTrades === 1 ? "" : "s"} · ${stats.buys}B / ${stats.sells}S · ${candles.length} candles`
-      : "No trades yet";
+      ? `${realTrades} txns · ${stats.buys} buys · ${stats.sells} sells`
+      : "Waiting for trades";
   }
-  if (rangeEl) rangeEl.textContent = "Candles · THRU per token";
+  if (ohlcEl && candles.length) {
+    const c = candles[candles.length - 1];
+    ohlcEl.textContent =
+      `O ${formatUnits(c.open, NATIVE_THRU_DECIMALS, 8)}  ` +
+      `H ${formatUnits(c.high, NATIVE_THRU_DECIMALS, 8)}  ` +
+      `L ${formatUnits(c.low, NATIVE_THRU_DECIMALS, 8)}  ` +
+      `C ${formatUnits(c.close, NATIVE_THRU_DECIMALS, 8)}`;
+  }
 
   const setStat = (sel, text, cls) => {
     const el = document.querySelector(sel);
@@ -769,38 +811,78 @@ function renderTokenChart(market) {
     setStat("[data-stat-progress]", "—");
   }
 
-  const W = 400;
-  const H = 160;
-  const padX = 10;
-  const padY = 12;
-  const innerW = W - padX * 2;
-  const innerH = H - padY * 2;
+  // Layout: price pane + volume pane + axes (DexScreener-like).
+  const W = 480;
+  const H = 260;
+  const padL = 8;
+  const padR = 58;
+  const padT = 8;
+  const padB = 22;
+  const volH = 52;
+  const gap = 8;
+  const priceBottom = H - padB - volH - gap;
+  const priceTop = padT;
+  const priceH = priceBottom - priceTop;
+  const volTop = priceBottom + gap;
+  const plotW = W - padL - padR;
 
   let minP = candles[0]?.low ?? 0n;
   let maxP = candles[0]?.high ?? 1n;
+  let maxVol = 0n;
   for (const c of candles) {
     if (c.low < minP) minP = c.low;
     if (c.high > maxP) maxP = c.high;
+    if (c.volume > maxVol) maxVol = c.volume;
   }
   if (maxP === minP) maxP = minP + 1n;
-  // Small vertical padding so flat candles still have body height.
-  const padRange = (maxP - minP) / 20n || 1n;
+  if (maxVol === 0n) maxVol = 1n;
+  const padRange = (maxP - minP) / 12n || 1n;
   minP = minP > padRange ? minP - padRange : 0n;
-  maxP = maxP + padRange;
-
+  maxP += padRange;
   const span = maxP - minP;
+
   const priceToY = (price) => {
     const yRatio = Number(((price - minP) * 10000n) / span) / 10000;
-    return padY + innerH * (1 - yRatio);
+    return priceTop + priceH * (1 - yRatio);
+  };
+  const volToH = (vol) => {
+    const ratio = Number((vol * 10000n) / maxVol) / 10000;
+    return Math.max(volH * ratio, vol > 0n ? 2 : 0);
   };
 
   const count = Math.max(candles.length, 1);
-  const slot = innerW / count;
-  const bodyW = Math.max(Math.min(slot * 0.62, 14), 3);
-  const wickW = 1.5;
+  const slot = plotW / count;
+  const bodyW = Math.max(Math.min(slot * 0.7, 16), 2.5);
+  const wickW = Math.max(Math.min(bodyW * 0.18, 2), 1);
+
+  // Horizontal price grid + labels (right axis).
+  const gridLines = [];
+  const priceLabels = [];
+  const steps = 4;
+  for (let i = 0; i <= steps; i += 1) {
+    const price = minP + (span * BigInt(i)) / BigInt(steps);
+    const y = priceToY(price);
+    gridLines.push(
+      `<line class="chart-grid" x1="${padL}" y1="${y.toFixed(1)}" x2="${padL + plotW}" y2="${y.toFixed(1)}"></line>`,
+    );
+    priceLabels.push(
+      `<text class="chart-axis-label" x="${W - 4}" y="${(y + 3).toFixed(1)}" text-anchor="end">${formatUnits(price, NATIVE_THRU_DECIMALS, 6)}</text>`,
+    );
+  }
+
+  // Time labels under volume.
+  const timeLabels = [];
+  const timeIdx = [0, Math.floor((count - 1) / 2), count - 1].filter((v, i, a) => a.indexOf(v) === i);
+  for (const i of timeIdx) {
+    if (!candles[i]) continue;
+    const cx = padL + slot * i + slot / 2;
+    timeLabels.push(
+      `<text class="chart-axis-label" x="${cx.toFixed(1)}" y="${H - 6}" text-anchor="middle">${formatChartTime(candles[i].t)}</text>`,
+    );
+  }
 
   const candleSvg = candles.map((c, i) => {
-    const cx = padX + slot * i + slot / 2;
+    const cx = padL + slot * i + slot / 2;
     const yOpen = priceToY(c.open);
     const yClose = priceToY(c.close);
     const yHigh = priceToY(c.high);
@@ -809,21 +891,91 @@ function renderTokenChart(market) {
     const cls = bullish ? "candle-up" : "candle-down";
     const bodyTop = Math.min(yOpen, yClose);
     const bodyBot = Math.max(yOpen, yClose);
-    const bodyH = Math.max(bodyBot - bodyTop, 1.5);
+    const bodyH = Math.max(bodyBot - bodyTop, 1.2);
+    const vH = volToH(c.volume);
+    const vY = volTop + volH - vH;
     return `
-      <g class="candle ${cls}">
+      <g class="candle ${cls}" data-candle-index="${i}">
         <line class="candle-wick" x1="${cx.toFixed(1)}" y1="${yHigh.toFixed(1)}" x2="${cx.toFixed(1)}" y2="${yLow.toFixed(1)}" stroke-width="${wickW}"></line>
-        <rect class="candle-body" x="${(cx - bodyW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${bodyH.toFixed(1)}"></rect>
+        <rect class="candle-body" x="${(cx - bodyW / 2).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${bodyH.toFixed(1)}" rx="0.5"></rect>
+        <rect class="vol-bar" x="${(cx - bodyW / 2).toFixed(1)}" y="${vY.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${vH.toFixed(1)}"></rect>
+        <rect class="candle-hit" x="${(padL + slot * i).toFixed(1)}" y="${priceTop}" width="${slot.toFixed(1)}" height="${(priceH + gap + volH).toFixed(1)}" fill="transparent"></rect>
       </g>`;
   }).join("");
 
+  // Separator between price and volume panes.
+  const sepY = priceBottom + gap / 2;
+
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = `
-    <line class="chart-grid" x1="${padX}" y1="${padY}" x2="${W - padX}" y2="${padY}"></line>
-    <line class="chart-grid" x1="${padX}" y1="${H / 2}" x2="${W - padX}" y2="${H / 2}"></line>
-    <line class="chart-grid" x1="${padX}" y1="${H - padY}" x2="${W - padX}" y2="${H - padY}"></line>
+    <rect class="chart-bg" x="0" y="0" width="${W}" height="${H}"></rect>
+    ${gridLines.join("")}
+    <line class="chart-sep" x1="${padL}" y1="${sepY.toFixed(1)}" x2="${(padL + plotW).toFixed(1)}" y2="${sepY.toFixed(1)}"></line>
     ${candleSvg}
+    ${priceLabels.join("")}
+    ${timeLabels.join("")}
+    <line class="chart-cross-x" data-cross-x hidden x1="${padL}" y1="0" x2="${padL + plotW}" y2="0"></line>
+    <line class="chart-cross-y" data-cross-y hidden x1="0" y1="${priceTop}" x2="0" y2="${priceBottom}"></line>
   `;
+
+  // Hover OHLC like DexScreener / TradingView.
+  const showHover = (index, clientX, clientY) => {
+    const c = candles[index];
+    if (!c || !hoverEl) return;
+    const bullish = c.close >= c.open;
+    hoverEl.hidden = false;
+    hoverEl.innerHTML = `
+      <div class="hover-time">${formatChartTime(c.t)}</div>
+      <div><i>O</i> ${formatUnits(c.open, NATIVE_THRU_DECIMALS, 9)}</div>
+      <div><i>H</i> ${formatUnits(c.high, NATIVE_THRU_DECIMALS, 9)}</div>
+      <div><i>L</i> ${formatUnits(c.low, NATIVE_THRU_DECIMALS, 9)}</div>
+      <div><i>C</i> <b class="${bullish ? "up" : "down"}">${formatUnits(c.close, NATIVE_THRU_DECIMALS, 9)}</b></div>
+      <div><i>Vol</i> ${formatUnits(c.volume, NATIVE_THRU_DECIMALS, 6)} THRU</div>
+    `;
+    if (ohlcEl) {
+      ohlcEl.innerHTML =
+        `O <span>${formatUnits(c.open, NATIVE_THRU_DECIMALS, 8)}</span> ` +
+        `H <span>${formatUnits(c.high, NATIVE_THRU_DECIMALS, 8)}</span> ` +
+        `L <span>${formatUnits(c.low, NATIVE_THRU_DECIMALS, 8)}</span> ` +
+        `C <span class="${bullish ? "up" : "down"}">${formatUnits(c.close, NATIVE_THRU_DECIMALS, 8)}</span>`;
+    }
+    const stage = root?.querySelector(".token-chart-stage");
+    if (stage) {
+      const rect = stage.getBoundingClientRect();
+      const left = Math.min(Math.max(clientX - rect.left + 12, 8), rect.width - 150);
+      const top = Math.min(Math.max(clientY - rect.top + 12, 8), rect.height - 110);
+      hoverEl.style.left = `${left}px`;
+      hoverEl.style.top = `${top}px`;
+    }
+    const crossX = svg.querySelector("[data-cross-x]");
+    const crossY = svg.querySelector("[data-cross-y]");
+    const cx = padL + slot * index + slot / 2;
+    const cy = priceToY(c.close);
+    if (crossX) {
+      crossX.removeAttribute("hidden");
+      crossX.setAttribute("y1", String(cy));
+      crossX.setAttribute("y2", String(cy));
+    }
+    if (crossY) {
+      crossY.removeAttribute("hidden");
+      crossY.setAttribute("x1", String(cx));
+      crossY.setAttribute("x2", String(cx));
+    }
+  };
+
+  const hideHover = () => {
+    if (hoverEl) hoverEl.hidden = true;
+    svg.querySelector("[data-cross-x]")?.setAttribute("hidden", "");
+    svg.querySelector("[data-cross-y]")?.setAttribute("hidden", "");
+  };
+
+  svg.onmousemove = (event) => {
+    const rect = svg.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * W;
+    const idx = Math.min(count - 1, Math.max(0, Math.floor((x - padL) / slot)));
+    showHover(idx, event.clientX, event.clientY);
+  };
+  svg.onmouseleave = hideHover;
 }
 
 function quoteCurveBuy(market, thruIn) {
