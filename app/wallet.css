@@ -540,6 +540,35 @@
   font: 24px var(--serif);
 }
 
+.trade-balance-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 10px 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.trade-balance-row strong {
+  flex: 1;
+  text-align: right;
+  color: var(--ink);
+  font: 14px/1.2 monospace;
+}
+
+.trade-max {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
 .trade-quote {
   display: flex;
   justify-content: space-between;

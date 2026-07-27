@@ -101,7 +101,12 @@
         <h2 id="trade-title" data-trade-title>Trade token</h2>
         <div class="trade-switch"><button class="selected" type="button" data-side="buy">Buy</button><button type="button" data-side="sell">Sell</button></div>
         <label>Amount<input data-trade-amount type="number" min="0" step="any" placeholder="0.00" /></label>
-        <div class="trade-quote"><span data-trade-input-label>Pay with THRU</span><strong data-trade-quote>—</strong></div>
+        <div class="trade-balance-row">
+          <span data-trade-balance-label>Your balance</span>
+          <strong data-trade-balance>—</strong>
+          <button type="button" class="trade-max" data-trade-max>Max</button>
+        </div>
+        <div class="trade-quote"><span data-trade-input-label>You receive</span><strong data-trade-quote>—</strong></div>
         <button class="ink-button wallet-primary" type="button" data-trade-submit>Buy with THRU</button>
         <p data-trade-status>Bonding-curve markets trade immediately. Graduated markets use the AMM when seeded.</p>
       </section>

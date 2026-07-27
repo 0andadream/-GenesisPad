@@ -1682,6 +1682,53 @@ const liquidityModal = document.querySelector("[data-liquidity-modal]");
 let activeTrade = null;
 let activeLiquidityMarket = null;
 let activeSide = "buy";
+/** Cached raw balances for the open trade modal (base units). */
+let tradeBalances = { thru: 0n, token: 0n };
+
+async function refreshTradeBalances() {
+  const balanceEl = document.querySelector("[data-trade-balance]");
+  const labelEl = document.querySelector("[data-trade-balance-label]");
+  if (!balanceEl) return;
+  if (!connectedAccount || !activeTrade) {
+    tradeBalances = { thru: 0n, token: 0n };
+    if (labelEl) labelEl.textContent = "Your balance";
+    balanceEl.textContent = "Connect wallet";
+    return;
+  }
+  if (labelEl) {
+    labelEl.textContent = activeSide === "buy"
+      ? "Your THRU balance"
+      : `Your ${activeTrade.ticker} balance`;
+  }
+  balanceEl.textContent = "Loading…";
+  try {
+    const native = await getAccountSnapshot();
+    tradeBalances.thru = native.balance || 0n;
+    try {
+      const tokenAccount = deriveTokenAccountAddress(
+        client,
+        connectedAccount.address,
+        activeTrade.mintAddress,
+        TOKEN_PROGRAM,
+      );
+      if ((await getAccountSnapshot(tokenAccount.address)).exists) {
+        tradeBalances.token = await readTokenAmount(tokenAccount.address);
+      } else {
+        tradeBalances.token = 0n;
+      }
+    } catch {
+      tradeBalances.token = 0n;
+    }
+    if (activeSide === "buy") {
+      balanceEl.textContent = `${formatUnits(tradeBalances.thru, NATIVE_THRU_DECIMALS, 9)} THRU`;
+    } else {
+      balanceEl.textContent =
+        `${formatUnits(tradeBalances.token, activeTrade.decimals)} ${activeTrade.ticker}`;
+    }
+  } catch {
+    balanceEl.textContent = "Unavailable";
+  }
+}
 
 function openTrade(index, side) {
   activeTrade = readMarkets()[index];
@@ -1691,7 +1738,7 @@ function openTrade(index, side) {
   document.body.classList.add("modal-open");
   document.querySelector("[data-trade-title]").textContent = `${side === "buy" ? "Buy" : "Sell"} ${activeTrade.ticker}`;
   document.querySelector("[data-trade-submit]").textContent = side === "buy" ? "Buy with THRU" : `Sell ${activeTrade.ticker}`;
-  document.querySelector("[data-trade-input-label]").textContent = side === "buy" ? "Pay with THRU" : `Sell ${activeTrade.ticker}`;
+  document.querySelector("[data-trade-input-label]").textContent = side === "buy" ? "You receive" : "You receive";
   const progress = activeTrade.curve ? curveProgress(activeTrade) : null;
   if (isBondingMarket(activeTrade)) {
     const c = readCurve(activeTrade);
@@ -1715,6 +1762,7 @@ function openTrade(index, side) {
   document.querySelectorAll("[data-side]").forEach((button) => button.classList.toggle("selected", button.dataset.side === side));
   document.querySelector("[data-trade-amount]").value = "";
   document.querySelector("[data-trade-quote]").textContent = "—";
+  refreshTradeBalances();
 }
 
 function closeTrade() {
@@ -1911,6 +1959,8 @@ async function executeCurveTrade(amount, status) {
     }
     activeTrade = updated || readMarkets().find((m) => m.mintAddress === market.mintAddress);
     renderMarkets();
+    await refreshTradeBalances();
+    await refreshBalance();
     return;
   }
 
@@ -1931,6 +1981,8 @@ async function executeCurveTrade(amount, status) {
     `Sold for ${formatUnits(quote.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
     `(fee ${formatUnits(quote.fee, NATIVE_THRU_DECIMALS, 9)} THRU).`;
   renderMarkets();
+  await refreshTradeBalances();
+  await refreshBalance();
 }
 
 async function executeTrade() {
@@ -2019,6 +2071,19 @@ document.querySelectorAll("[data-trade-close]").forEach((button) => button.addEv
 document.querySelectorAll("[data-side]").forEach((button) => button.addEventListener("click", () => {
   if (activeTrade) openTrade(readMarkets().findIndex((market) => market.mintAddress === activeTrade.mintAddress), button.dataset.side);
 }));
+document.querySelector("[data-trade-max]")?.addEventListener("click", () => {
+  if (!activeTrade) return;
+  const input = document.querySelector("[data-trade-amount]");
+  if (!input) return;
+  if (activeSide === "buy") {
+    // Leave 1 base unit for fee when possible.
+    const spendable = tradeBalances.thru > 1n ? tradeBalances.thru - 1n : 0n;
+    input.value = formatUnits(spendable, NATIVE_THRU_DECIMALS, 9);
+  } else {
+    input.value = formatUnits(tradeBalances.token, activeTrade.decimals);
+  }
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+});
 document.querySelector("[data-trade-amount]")?.addEventListener("input", (event) => {
   const quote = document.querySelector("[data-trade-quote]");
   if (!event.target.value || !activeTrade) {
@@ -2051,7 +2116,7 @@ document.querySelector("[data-trade-amount]")?.addEventListener("input", (event)
     const afterFees = raw * 9970n / 10000n;
     quote.textContent = activeSide === "buy"
       ? `≈ ${formatUnits(afterFees * PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals)) / (10n ** BigInt(NATIVE_THRU_DECIMALS)), activeTrade.decimals)} ${activeTrade.ticker}`
-      : `≈ ${formatUnits(afterFees * (10n ** BigInt(NATIVE_THRU_DECIMALS)) / (PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals))), NATIVE_THRU_DECIMALS, 9)} WTHRU`;
+      : `≈ ${formatUnits(afterFees * (10n ** BigInt(NATIVE_THRU_DECIMALS)) / (PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals))), NATIVE_THRU_DECIMALS, 9)} THRU`;
   } catch (reason) {
     quote.textContent = reason instanceof Error ? reason.message : "—";
   }
