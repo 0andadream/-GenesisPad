@@ -57,8 +57,11 @@ const WTHRU_DECIMALS = 8;
 const CREATOR_FEE_BPS = 21;
 const PROTOCOL_FEE_BPS = 9;
 const PRICE_TOKENS_PER_THRU = 500n;
-// System / EOA program is the all-zero address (not 0x…03).
+// Native THRU transfers use the all-zero system program.
 const EOA_PROGRAM = new Uint8Array(32);
+// Opening a new fee-payer account (state-proof create) uses the EOA program at 0x…03.
+// Using zeros here is why curve vault open failed with VM -765 / code 1.
+const EOA_CREATE_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => (index === 31 ? 3 : 0));
 const FAUCET_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 250 : 0);
 const AMM_MINIMUM_LIQUIDITY = 1000n;
 // Pump.fun-style bonding curve (alphanet scale).
@@ -347,7 +350,7 @@ async function ensureAccountExists(setStatus) {
   setStatus("Preparing your account…");
   const proof = await client.proofs.generate({ address: connectedAccount.address, proofType: 1 });
   await submitWithNonce(0n, (nonce) => buildAndSign({
-    program: EOA_PROGRAM,
+    program: EOA_CREATE_PROGRAM,
     header: {
       fee: 0n, nonce, startSlot: proof.slot, expiryAfter: 100,
       computeUnits: 10000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
@@ -661,18 +664,32 @@ async function submitAs(signer, program, {
 async function ensureAccountExistsFor(signer, setStatus = () => {}) {
   if ((await getAccountSnapshot(signer.address)).exists) return;
   setStatus("Opening the bonding-curve account…");
+  // Match SDK accounts.createAccount: program 0x…03 + creation state proof (proofType 1).
+  // Native transfers use all-zero program; account *creation* must use 0x…03.
   const proof = await client.proofs.generate({ address: signer.address, proofType: 1 });
-  const { rawTransaction } = await client.transactions.buildAndSign({
-    feePayer: { publicKey: signer.publicKey, privateKey: signer.privateKey },
-    program: EOA_PROGRAM,
-    header: {
-      fee: 0n, nonce: 0n, startSlot: proof.slot, expiryAfter: 100,
-      computeUnits: 10000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
-    },
-    feePayerStateProof: proof.proof,
-  });
-  await submitTransaction(rawTransaction, { programLabel: "Curve account" });
-  await waitForAccount(signer.address, "Bonding curve account");
+  let nonce = 0n;
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    try {
+      const { rawTransaction } = await client.transactions.buildAndSign({
+        feePayer: { publicKey: signer.publicKey, privateKey: signer.privateKey },
+        program: EOA_CREATE_PROGRAM,
+        header: {
+          fee: 0n, nonce, startSlot: proof.slot, expiryAfter: 100,
+          computeUnits: 10000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
+        },
+        feePayerStateProof: proof.proof,
+      });
+      await submitTransaction(rawTransaction, { programLabel: "Curve account" });
+      await waitForAccount(signer.address, "Bonding curve account");
+      return;
+    } catch (reason) {
+      const message = String(reason?.message || reason);
+      if (message.includes("-511")) { nonce += 1n; continue; }
+      if (message.includes("-510")) { nonce = nonce > 0n ? nonce - 1n : 0n; continue; }
+      throw reason;
+    }
+  }
+  throw new Error("Could not open the bonding-curve account.");
 }
 
 async function fundCurveAccount(curveAddress, amount = CURVE_GAS_FUND) {
