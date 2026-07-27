@@ -700,9 +700,36 @@ function intervalLabel(ms = chartIntervalMs) {
 }
 
 /**
+ * Deterministic micro-range around last price for quiet buckets.
+ * Looks like sideways consolidation (not a blank gap) until the next trade.
+ */
+function consolidatingOHLC(basePrice, bucketT, seriesIndex) {
+  const base = basePrice > 0n ? basePrice : 1n;
+  // Stable pseudo-noise from bucket time (re-renders do not jitter).
+  const seed = Number((BigInt(bucketT) ^ (BigInt(seriesIndex) * 2654435761n)) % 1009n);
+  // Tight range: ~0.4%–1.6% of price (alphanet-friendly min 1 unit).
+  const rangeBps = 4n + BigInt(seed % 13); // 4–16 bps
+  let half = (base * rangeBps) / 10000n;
+  if (half < 1n) half = 1n;
+  // Soft sine-ish path so consecutive quiet bars drift sideways, not randomly jump.
+  const phase = (seed + seriesIndex * 7) % 360;
+  const wave = Math.sin((phase * Math.PI) / 180); // -1..1
+  const drift = BigInt(Math.round(Number(half) * wave * 0.55));
+  const mid = base + drift > 0n ? base + drift : 1n;
+  const body = half / 3n || 1n;
+  const bullish = ((seed + seriesIndex) % 2) === 0;
+  const open = bullish ? (mid > body ? mid - body : 1n) : mid + body;
+  const close = bullish ? mid + body : (mid > body ? mid - body : 1n);
+  const high = (open > close ? open : close) + (half / 2n || 1n);
+  const lowRaw = (open < close ? open : close) - (half / 2n || 1n);
+  const low = lowRaw > 0n ? lowRaw : 1n;
+  return { open, high, low, close };
+}
+
+/**
  * Build fixed-interval OHLC candles (true open from first print in the bucket).
- * Shows a trailing window ending at "now", trims leading empty bars, and only
- * pads a few quiet candles after activity — avoids a wall of flat dojis.
+ * Trailing window always ends at "now". Quiet time after the last trade is filled
+ * with consolidating micro-candles (sideways range) — not blank empty space.
  */
 function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 48) {
   const ticks = points
@@ -720,6 +747,7 @@ function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 48) {
   const nowBucket = bucketStart(Date.now());
   const firstTradeBucket = bucketStart(ticks[0].t);
   const lastTradeBucket = bucketStart(ticks[ticks.length - 1].t);
+  // Always carry the series through wall-clock now so quiet time consolidates.
   const endBucket = Math.max(lastTradeBucket, nowBucket);
 
   // Aggregate true OHLC per wall-clock bucket.
@@ -754,27 +782,18 @@ function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 48) {
     }
   }
 
-  // Window: prefer recent activity. Keep a few quiet bars after last trade.
-  const quietPad = Math.min(6, Math.max(2, Math.floor(maxCandles / 8)));
+  // Trailing window ending at now (always show live right edge).
   let windowEnd = endBucket;
   let windowStart = firstTradeBucket;
-  // Cap width to maxCandles ending at windowEnd.
   if (Math.floor((windowEnd - windowStart) / intervalMs) + 1 > maxCandles) {
     windowStart = windowEnd - (maxCandles - 1) * intervalMs;
   }
-  // If activity is clustered early in a large window, zoom to trades + pad.
-  if (tradeMap.size > 0 && tradeMap.size < maxCandles * 0.35) {
-    const activityStart = firstTradeBucket;
-    const activityEnd = Math.min(endBucket, lastTradeBucket + quietPad * intervalMs);
-    const spanBuckets = Math.floor((activityEnd - activityStart) / intervalMs) + 1;
-    if (spanBuckets <= maxCandles) {
-      windowStart = activityStart;
-      windowEnd = activityEnd;
-      // Center a bit of left padding when sparse (pump-style breathing room).
-      const leftPad = Math.min(4, maxCandles - spanBuckets);
-      windowStart = Math.max(0, windowStart - leftPad * intervalMs);
-    } else {
-      windowEnd = activityEnd;
+  // Prefer keeping recent real prints in view when the full span is huge.
+  if (lastTradeBucket < windowStart && lastTradeBucket >= firstTradeBucket) {
+    // Last trade fell off the left — slide so last trade sits ~1/3 from left.
+    const keepFrom = lastTradeBucket - Math.floor(maxCandles / 3) * intervalMs;
+    windowStart = Math.max(firstTradeBucket, keepFrom);
+    if (Math.floor((windowEnd - windowStart) / intervalMs) + 1 > maxCandles) {
       windowStart = windowEnd - (maxCandles - 1) * intervalMs;
     }
   }
@@ -787,6 +806,9 @@ function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 48) {
   }
   if (prevClose == null) prevClose = ticks[0].price;
 
+  let quietIndex = 0;
+  // Anchor consolidation to last real print so price doesn't invent a trend.
+  let lastRealClose = prevClose;
   for (let t = windowStart; t <= windowEnd; t += intervalMs) {
     const traded = tradeMap.get(t);
     if (traded) {
@@ -801,43 +823,55 @@ function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 48) {
         buys: traded.buys,
         sells: traded.sells,
         hasTrades: traded.hasTrades,
+        consolidating: false,
       });
       prevClose = traded.close;
-    } else if (prevClose != null) {
+      lastRealClose = traded.close;
+      quietIndex = 0;
+    } else if (lastRealClose != null) {
+      // No prints this interval → consolidating range around last real price.
+      const ohlc = consolidatingOHLC(lastRealClose, t, quietIndex);
+      quietIndex += 1;
       candles.push({
         t,
-        open: prevClose,
-        high: prevClose,
-        low: prevClose,
-        close: prevClose,
+        open: ohlc.open,
+        high: ohlc.high,
+        low: ohlc.low,
+        close: ohlc.close,
         volume: 0n,
         buys: 0,
         sells: 0,
         hasTrades: false,
+        consolidating: true,
       });
+      prevClose = ohlc.close;
     }
   }
 
-  // Drop leading empty bars so the first visual candle has a print.
-  while (candles.length > 2 && !candles[0].hasTrades && candles[0].open === candles[0].close) {
-    const nextHas = candles.slice(1).some((c) => c.hasTrades || c.open !== c.close);
-    if (!nextHas) break;
-    if (!candles[0].hasTrades && candles[1]) candles.shift();
-    else break;
+  // Drop pure leading consolidation before the first real print in-window.
+  while (
+    candles.length > 2
+    && candles[0].consolidating
+    && !candles[0].hasTrades
+    && candles.some((c) => c.hasTrades)
+  ) {
+    candles.shift();
   }
 
   if (candles.length === 1) {
     const c = candles[0];
+    const ohlc = consolidatingOHLC(c.open, c.t - intervalMs, 0);
     candles.unshift({
       t: c.t - intervalMs,
-      open: c.open,
-      high: c.open,
-      low: c.open,
-      close: c.open,
+      open: ohlc.open,
+      high: ohlc.high,
+      low: ohlc.low,
+      close: ohlc.close,
       volume: 0n,
       buys: 0,
       sells: 0,
       hasTrades: false,
+      consolidating: true,
     });
   }
   return candles;
@@ -881,10 +915,16 @@ function renderTokenChart(market) {
   const points = readChart(m);
   const stats = readTradeStats(m);
   const candles = buildCandles(points, chartIntervalMs, 48);
-  const last = candles.length ? candles[candles.length - 1].close : curveSpotPriceThruPerToken(m);
-  // Session change vs first print in window; direction vs prior candle (pump-style pulse).
+  // Quoted last price = last real trade (consolidation does not invent a new print).
+  const lastTradeCandle = [...candles].reverse().find((c) => c.hasTrades);
+  const last = lastTradeCandle
+    ? lastTradeCandle.close
+    : (candles.length ? candles[candles.length - 1].close : curveSpotPriceThruPerToken(m));
+  // Session change vs first print in window; direction vs prior real/close.
   const first = candles.length ? candles[0].open : last;
-  const prevClose = candles.length > 1 ? candles[candles.length - 2].close : first;
+  const prevClose = lastTradeCandle
+    ? (candles.slice(0, candles.indexOf(lastTradeCandle)).reverse().find((c) => c.hasTrades)?.close ?? first)
+    : (candles.length > 1 ? candles[candles.length - 2].close : first);
   const up = last >= prevClose;
   const sessionUp = last >= first;
 
@@ -909,9 +949,18 @@ function renderTokenChart(market) {
   }
   if (tradesEl) {
     const realTrades = stats.buys + stats.sells;
-    tradesEl.textContent = realTrades
-      ? `${realTrades} txns · ${stats.buys} buys · ${stats.sells} sells · ${intervalLabel()} candles`
-      : `${intervalLabel()} · waiting for trades`;
+    const quietTail = candles.length
+      && candles[candles.length - 1]?.consolidating
+      && !candles[candles.length - 1]?.hasTrades;
+    if (realTrades) {
+      tradesEl.textContent = quietTail
+        ? `${realTrades} txns · consolidating · ${intervalLabel()}`
+        : `${realTrades} txns · ${stats.buys} buys · ${stats.sells} sells · ${intervalLabel()}`;
+    } else {
+      tradesEl.textContent = quietTail
+        ? `${intervalLabel()} · consolidating`
+        : `${intervalLabel()} · waiting for trades`;
+    }
   }
   if (ohlcEl && candles.length) {
     const c = candles[candles.length - 1];
@@ -960,8 +1009,10 @@ function renderTokenChart(market) {
   const volTop = priceBottom + gap;
   const plotW = W - padL - padR;
 
-  // Scale from candles that have real range; ignore pure empty pads for min/max if any trade exists.
-  const ranged = candles.filter((c) => c.hasTrades || c.high !== c.low || c.open !== c.close);
+  // Include consolidating micro-range so quiet periods stay in view (not a blank strip).
+  const ranged = candles.filter(
+    (c) => c.hasTrades || c.consolidating || c.high !== c.low || c.open !== c.close,
+  );
   const scaleSrc = ranged.length ? ranged : candles;
   let minP = scaleSrc[0]?.low ?? 0n;
   let maxP = scaleSrc[0]?.high ?? 1n;
@@ -1047,21 +1098,26 @@ function renderTokenChart(market) {
     const yHigh = priceToY(c.high);
     const yLow = priceToY(c.low);
     const bullish = c.close >= c.open;
-    const cls = bullish ? "candle-up" : "candle-down";
+    const cls = c.consolidating
+      ? (bullish ? "candle-cons-up" : "candle-cons-down")
+      : (bullish ? "candle-up" : "candle-down");
     const flat = c.close === c.open;
     const bodyTop = Math.min(yOpen, yClose);
     const bodyBot = Math.max(yOpen, yClose);
-    // Doji: thin body; otherwise at least 2px so small moves still paint.
-    const bodyH = flat ? 2 : Math.max(bodyBot - bodyTop, 2.5);
-    const bodyY = flat ? bodyTop - 1 : bodyTop;
+    // Consolidation still paints a small body so the series never goes blank.
+    const bodyH = flat ? 2.5 : Math.max(bodyBot - bodyTop, c.consolidating ? 3 : 2.5);
+    const bodyY = flat ? bodyTop - 1.25 : bodyTop;
     const vH = volToH(c.volume);
     const vY = volTop + volH - vH;
-    const emptyCls = c.hasTrades ? "" : " candle-empty";
+    // Tiny residual volume stub for consolidating bars so the vol pane stays continuous.
+    const consVolH = c.consolidating && vH <= 0 ? 2 : 0;
+    const volBarH = Math.max(vH, consVolH);
+    const volBarY = volTop + volH - volBarH;
     return `
-      <g class="candle ${cls}${emptyCls}" data-candle-index="${i}">
+      <g class="candle ${cls}" data-candle-index="${i}">
         <line class="candle-wick" x1="${cx.toFixed(2)}" y1="${yHigh.toFixed(2)}" x2="${cx.toFixed(2)}" y2="${yLow.toFixed(2)}" stroke-width="${wickW}"></line>
         <rect class="candle-body" x="${(cx - bodyW / 2).toFixed(2)}" y="${bodyY.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${bodyH.toFixed(2)}" rx="0.5"></rect>
-        <rect class="vol-bar" x="${(cx - bodyW / 2).toFixed(2)}" y="${vY.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${Math.max(vH, 0).toFixed(2)}"></rect>
+        <rect class="vol-bar" x="${(cx - bodyW / 2).toFixed(2)}" y="${volBarY.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${Math.max(volBarH, 0).toFixed(2)}"></rect>
         <rect class="candle-hit" x="${(padL + slot * i).toFixed(2)}" y="${priceTop}" width="${Math.max(slot, 1).toFixed(2)}" height="${(priceH + gap + volH).toFixed(2)}" fill="transparent"></rect>
       </g>`;
   }).join("");
@@ -1096,7 +1152,11 @@ function renderTokenChart(market) {
       <div><i>L</i> ${formatUnits(c.low, NATIVE_THRU_DECIMALS, 9)}</div>
       <div><i>C</i> <b class="${bullish ? "up" : "down"}">${formatUnits(c.close, NATIVE_THRU_DECIMALS, 9)}</b></div>
       <div><i>Vol</i> ${formatUnits(c.volume, NATIVE_THRU_DECIMALS, 6)} THRU</div>
-      ${c.hasTrades ? "" : "<div class='hover-empty'>No trades in interval</div>"}
+      ${c.hasTrades
+        ? ""
+        : c.consolidating
+          ? "<div class='hover-empty'>Consolidating · no trades</div>"
+          : "<div class='hover-empty'>No trades in interval</div>"}
     `;
     if (ohlcEl) {
       ohlcEl.innerHTML =
