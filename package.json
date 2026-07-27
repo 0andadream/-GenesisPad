@@ -2,9 +2,7 @@
   "name": "genesispad",
   "version": "1.0.0",
   "private": true,
-  "engines": {
-    "node": "20.x"
-  },
+  "packageManager": "pnpm@10.34.5",
   "scripts": {
     "build": "node scripts/build.mjs"
   },

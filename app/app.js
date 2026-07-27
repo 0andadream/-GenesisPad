@@ -76,9 +76,8 @@ let connectedAccount = null;
 let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
 const MARKETS_KEY = "genesis-markets";
-// Public shared registry so anyone on the site can see launches and trade.
-const MARKET_REGISTRY_API = "/api/markets";
-const MARKET_REGISTRY_FALLBACK =
+// Public shared registry (direct — no Vercel serverless, avoids Node version issues).
+const MARKET_REGISTRY_URL =
   "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70";
 
 function compactAddress(address) {
@@ -837,22 +836,17 @@ function saveMarkets(markets) {
 }
 
 async function fetchPublicMarkets() {
-  const endpoints = [MARKET_REGISTRY_API, MARKET_REGISTRY_FALLBACK];
-  for (const url of endpoints) {
-    try {
-      const response = await fetch(url, {
-        headers: { Accept: "application/json" },
-        cache: "no-store",
-      });
-      if (!response.ok) continue;
-      const data = await response.json();
-      const markets = Array.isArray(data.markets) ? data.markets : Array.isArray(data) ? data : [];
-      if (markets.length || url === MARKET_REGISTRY_API) return markets;
-    } catch {
-      /* try next */
-    }
+  try {
+    const response = await fetch(MARKET_REGISTRY_URL, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+    const data = await response.json();
+    return Array.isArray(data.markets) ? data.markets : Array.isArray(data) ? data : [];
+  } catch {
+    return [];
   }
-  return [];
 }
 
 async function publishPublicMarkets(markets) {
@@ -860,24 +854,15 @@ async function publishPublicMarkets(markets) {
     markets: markets.slice(0, 100),
     updatedAt: Date.now(),
   };
-  const tryPut = async (url) => {
-    const response = await fetch(url, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) throw new Error(`publish ${response.status}`);
-    return response;
-  };
-  try {
-    await tryPut(MARKET_REGISTRY_API);
-    return;
-  } catch {
-    await tryPut(MARKET_REGISTRY_FALLBACK);
-  }
+  const response = await fetch(MARKET_REGISTRY_URL, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(`publish ${response.status}`);
 }
 
 async function syncPublicMarkets() {
