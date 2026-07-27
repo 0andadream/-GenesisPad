@@ -379,8 +379,14 @@ async function ensureTokenAccount(ownerAddress, mintAddress, seed = new Uint8Arr
   const account = deriveTokenAccountAddress(client, ownerAddress, mintAddress, TOKEN_PROGRAM, seed);
   if ((await getAccountSnapshot(account.address)).exists) return account;
   const proof = await client.proofs.generate({ address: account.address, proofType: 1 });
+  // Fee payer is always index 0. Any other owner pubkey must appear in the account list
+  // so instruction encoding can resolve its index (pool PDAs are not fee payers).
+  const ownerIsFeePayer = connectedAccount && ownerAddress === connectedAccount.address;
+  const readOnly = ownerIsFeePayer
+    ? [mintAddress]
+    : [mintAddress, ownerAddress];
   await submitTokenInstruction({
-    accounts: { readWrite: [account.address], readOnly: [mintAddress] },
+    accounts: { readWrite: [account.address], readOnly },
     instructionData: createInitializeAccountInstruction({
       tokenAccountBytes: account.bytes,
       mintAccountBytes: Pubkey.from(mintAddress).toBytes(),
@@ -427,30 +433,26 @@ async function wrapThru(amount, destination) {
   });
 }
 
-function lpMintRawSeed() {
-  // Token mints are derived as PDA(token, hash(creator, seed)). Use a fixed
-  // 32-byte seed so the website and token program agree.
-  const seed = new Uint8Array(32);
-  const label = new TextEncoder().encode("lp_mint");
-  seed.set(label);
-  return seed;
-}
-
 function bytesToHexSeed(bytes) {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function derivePool(mintAddress) {
+  if (!connectedAccount) {
+    throw new Error("Connect a Thru wallet before deriving a pool.");
+  }
   const pool = deriveAmmPoolAddresses(client, {
     ammProgramAddress: GENESIS_AMM_PROGRAM,
     mintAAddress: mintAddress,
     mintBAddress: WTHRU_MINT,
     swapFeeBps: CREATOR_FEE_BPS,
   });
-  const lpRawSeed = lpMintRawSeed();
-  // Creator/mint authority is the pool PDA; token program hashes creator+seed.
+  // Token program requires the mint *creator* to authorize creation (fee payer).
+  // Seed the LP mint with the pool address so each pool gets a unique LP mint;
+  // mint authority remains the pool PDA so the AMM can mint LP tokens later.
+  const lpRawSeed = pool.poolBytes;
   const lpMint = deriveMintAddress(
-    client, pool.poolAddress, bytesToHexSeed(lpRawSeed), TOKEN_PROGRAM,
+    client, connectedAccount.address, bytesToHexSeed(lpRawSeed), TOKEN_PROGRAM,
   );
   const vaultOne = deriveTokenAccountAddress(
     client, pool.poolAddress, pool.mintOneAddress, TOKEN_PROGRAM, pool.vaultOneSeed,
@@ -477,7 +479,7 @@ async function ensureLpMint(pool, setStatus) {
       ticker: "GEN-LP",
       seedHex: bytesToHexSeed(pool.lpRawSeed),
       stateProof: proof.proof,
-      creatorBytes: pool.poolBytes,
+      creatorBytes: connectedAccount.publicKey,
     }),
   });
   await waitForAccount(pool.lpMint.address, "LP mint");

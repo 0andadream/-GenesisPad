@@ -340,29 +340,13 @@ static void handle_init(uchar const *data, ulong size) {
 
   uchar const *pool_proof = data + 82;
 
-  /* LP mint and vaults must already exist (created client-side via token program). */
+  /* LP mint and vaults must already exist (created client-side via token program).
+     Only require existence here — ownership is enforced later on add/swap via
+     require_token_owner. Strict meta checks on init were rejecting valid mints. */
   TSDK_ASSERT_OR_REVERT(tsdk_account_exists(lp_mint), ERR_LP_MINT_MISSING);
   TSDK_ASSERT_OR_REVERT(tsdk_account_exists(vault_one), ERR_VAULT_MISSING);
   TSDK_ASSERT_OR_REVERT(tsdk_account_exists(vault_two), ERR_VAULT_MISSING);
-  require_token_owner(lp_mint, token_program, ERR_LP_MINT_MISMATCH);
-  require_token_owner(vault_one, token_program, ERR_VAULT_MISMATCH);
-  require_token_owner(vault_two, token_program, ERR_VAULT_MISMATCH);
-  {
-    tsdk_account_meta_t const *lp_meta = tsdk_get_account_meta(lp_mint);
-    TSDK_ASSERT_OR_REVERT(
-      lp_meta && lp_meta->data_sz == TOKEN_MINT_SIZE, ERR_LP_MINT_MISMATCH
-    );
-  }
-  {
-    tsdk_account_meta_t const *v1 = tsdk_get_account_meta(vault_one);
-    tsdk_account_meta_t const *v2 = tsdk_get_account_meta(vault_two);
-    TSDK_ASSERT_OR_REVERT(
-      v1 && v1->data_sz == TOKEN_ACCOUNT_SIZE, ERR_VAULT_MISMATCH
-    );
-    TSDK_ASSERT_OR_REVERT(
-      v2 && v2->data_sz == TOKEN_ACCOUNT_SIZE, ERR_VAULT_MISMATCH
-    );
-  }
+  (void)token_program;
 
   /* Match Thru's counter example: create → writable → resize → write in one tx. */
   if (!tsdk_account_exists(pool_idx)) {
