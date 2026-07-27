@@ -554,21 +554,68 @@ function readChart(market) {
       t: Number(p.t) || 0,
       price: String(p.price || "0"),
       side: p.side || "seed",
+      thru: String(p.thru || "0"),
+      tokens: String(p.tokens || "0"),
     }))
     .filter((p) => BigInt(p.price) >= 0n)
     .slice(-120);
 }
 
-function appendChartPoint(market, { side, price }) {
+function readTradeStats(market) {
+  const points = readChart(market);
+  let buys = 0;
+  let sells = 0;
+  let buyThru = 0n;
+  let sellThru = 0n;
+  let buyTokens = 0n;
+  let sellTokens = 0n;
+  let high = 0n;
+  let low = 0n;
+  for (const p of points) {
+    const price = BigInt(p.price || "0");
+    if (high === 0n || price > high) high = price;
+    if (low === 0n || (price > 0n && price < low)) low = price;
+    if (p.side === "buy") {
+      buys += 1;
+      buyThru += BigInt(p.thru || "0");
+      buyTokens += BigInt(p.tokens || "0");
+    } else if (p.side === "sell") {
+      sells += 1;
+      sellThru += BigInt(p.thru || "0");
+      sellTokens += BigInt(p.tokens || "0");
+    }
+  }
+  return { buys, sells, buyThru, sellThru, buyTokens, sellTokens, high, low, points };
+}
+
+function appendChartPoint(market, { side, price, thru = 0n, tokens = 0n }) {
   const chart = readChart(market);
   chart.push({
     t: Date.now(),
     price: price.toString(),
     side: side || "seed",
+    thru: thru.toString(),
+    tokens: tokens.toString(),
   });
+  const stats = {
+    buys: 0,
+    sells: 0,
+    buyThru: "0",
+    sellThru: "0",
+  };
+  for (const p of chart) {
+    if (p.side === "buy") {
+      stats.buys += 1;
+      stats.buyThru = (BigInt(stats.buyThru) + BigInt(p.thru || "0")).toString();
+    } else if (p.side === "sell") {
+      stats.sells += 1;
+      stats.sellThru = (BigInt(stats.sellThru) + BigInt(p.thru || "0")).toString();
+    }
+  }
   return updateMarket(market.mintAddress, {
     chart: chart.slice(-120),
     lastPrice: price.toString(),
+    stats,
     updatedAt: Date.now(),
   }) || market;
 }
@@ -600,6 +647,7 @@ function ensureChartSeed(market) {
 }
 
 function renderTokenChart(market) {
+  const root = document.querySelector("[data-token-chart]");
   const svg = document.querySelector("[data-chart-svg]");
   const priceEl = document.querySelector("[data-chart-price]");
   const changeEl = document.querySelector("[data-chart-change]");
@@ -608,14 +656,20 @@ function renderTokenChart(market) {
 
   let m = ensureChartSeed(market);
   const points = readChart(m);
+  const stats = readTradeStats(m);
   const prices = points.map((p) => BigInt(p.price));
   const last = prices.length ? prices[prices.length - 1] : curveSpotPriceThruPerToken(m);
   const first = prices.length ? prices[0] : last;
+  const up = last >= first;
+  const dir = up ? "up" : "down";
 
+  if (root) {
+    root.classList.toggle("up", up);
+    root.classList.toggle("down", !up);
+  }
   if (priceEl) priceEl.textContent = formatSpotPrice(last);
   if (changeEl) {
     if (first > 0n && last !== first) {
-      const up = last > first;
       const delta = up ? last - first : first - last;
       const bps = (delta * 10000n) / first;
       const pct = (Number(bps) / 100).toFixed(2);
@@ -628,16 +682,39 @@ function renderTokenChart(market) {
     }
   }
   if (tradesEl) {
-    const realTrades = points.filter((p) => p.side === "buy" || p.side === "sell").length;
+    const realTrades = stats.buys + stats.sells;
     tradesEl.textContent = realTrades
-      ? `${realTrades} trade${realTrades === 1 ? "" : "s"}`
+      ? `${realTrades} trade${realTrades === 1 ? "" : "s"} · ${stats.buys}B / ${stats.sells}S`
       : "No trades yet";
   }
 
+  // Stats grid
+  const setStat = (sel, text, cls) => {
+    const el = document.querySelector(sel);
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove("stat-buy", "stat-sell");
+    if (cls) el.classList.add(cls);
+  };
+  setStat("[data-stat-buys]", String(stats.buys), "stat-buy");
+  setStat("[data-stat-sells]", String(stats.sells), "stat-sell");
+  setStat("[data-stat-buy-vol]", `${formatUnits(stats.buyThru, NATIVE_THRU_DECIMALS, 6)} THRU`, "stat-buy");
+  setStat("[data-stat-sell-vol]", `${formatUnits(stats.sellThru, NATIVE_THRU_DECIMALS, 6)} THRU`, "stat-sell");
+  setStat("[data-stat-high]", formatSpotPrice(stats.high || last));
+  setStat("[data-stat-low]", formatSpotPrice(stats.low || last));
+  try {
+    const c = readCurve(m);
+    setStat("[data-stat-vault]", `${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 6)} THRU`);
+    setStat("[data-stat-progress]", `${curveProgress(m).toFixed(1)}%`);
+  } catch {
+    setStat("[data-stat-vault]", "—");
+    setStat("[data-stat-progress]", "—");
+  }
+
   const W = 400;
-  const H = 140;
+  const H = 160;
   const padX = 8;
-  const padY = 12;
+  const padY = 14;
   const innerW = W - padX * 2;
   const innerH = H - padY * 2;
 
@@ -647,9 +724,7 @@ function renderTokenChart(market) {
     if (p < minP) minP = p;
     if (p > maxP) maxP = p;
   }
-  if (maxP === minP) {
-    maxP = minP + 1n;
-  }
+  if (maxP === minP) maxP = minP + 1n;
 
   const n = Math.max(points.length, 2);
   const coords = points.map((p, i) => {
@@ -660,7 +735,6 @@ function renderTokenChart(market) {
     return { x, y, side: p.side };
   });
 
-  // If only one point, duplicate for a flat line.
   if (coords.length === 1) {
     coords.push({ x: W - padX, y: coords[0].y, side: coords[0].side });
   }
@@ -671,16 +745,17 @@ function renderTokenChart(market) {
   const dots = coords
     .filter((c) => c.side === "buy" || c.side === "sell")
     .map((c) =>
-      `<circle class="chart-${c.side}" cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.2"></circle>`
+      `<circle class="chart-${c.side}" cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.5"></circle>`
     )
     .join("");
 
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = `
     <line class="chart-grid" x1="${padX}" y1="${padY}" x2="${W - padX}" y2="${padY}"></line>
     <line class="chart-grid" x1="${padX}" y1="${H / 2}" x2="${W - padX}" y2="${H / 2}"></line>
     <line class="chart-grid" x1="${padX}" y1="${H - padY}" x2="${W - padX}" y2="${H - padY}"></line>
-    <path class="chart-area" d="${areaD}"></path>
-    <path class="chart-line" d="${lineD}"></path>
+    <path class="chart-area ${dir}" d="${areaD}"></path>
+    <path class="chart-line ${dir}" d="${lineD}"></path>
     ${dots}
   `;
 }
@@ -1496,9 +1571,21 @@ function marketStatusLabel(market) {
 
 function renderMarketCard(market, index) {
   const progress = market.curve ? curveProgress(market) : (market.liquidity ? 100 : 0);
+  const stats = readTradeStats(market);
+  const last = market.lastPrice
+    ? BigInt(market.lastPrice)
+    : (stats.points.length ? BigInt(stats.points[stats.points.length - 1].price) : 0n);
+  const priceLabel = last > 0n ? formatSpotPrice(last) : "—";
   return `
     <article class="market-row">
-      <div class="market-identity"><span>${market.ticker.slice(0, 1)}</span><div><strong>${market.name}</strong><small>${market.ticker} · ${market.mintAddress.slice(0, 7)}…${market.mintAddress.slice(-5)}</small></div></div>
+      <button type="button" class="market-identity" data-open-market="${index}" title="Open chart and stats">
+        <span>${market.ticker.slice(0, 1)}</span>
+        <div>
+          <strong>${market.name}</strong>
+          <small>${market.ticker} · ${priceLabel}</small>
+          <small class="market-mini-stats"><b class="stat-buy">${stats.buys} buys</b> · <b class="stat-sell">${stats.sells} sells</b></small>
+        </div>
+      </button>
       <strong>${BigInt(market.supply || "0").toLocaleString()}</strong>
       <div class="curve-progress" title="Bonding progress to graduation">
         <div class="curve-progress-bar"><i style="width:${progress}%"></i></div>
@@ -2090,6 +2177,8 @@ async function executeCurveTrade(amount, status) {
     updated = appendChartPoint(nextMarket, {
       side: "buy",
       price: curveSpotPriceThruPerToken(nextMarket),
+      thru: amount,
+      tokens: quote.tokensOut,
     }) || nextMarket;
     status.textContent =
       `Bought ${formatUnits(quote.tokensOut, market.decimals)} ${market.ticker} ` +
@@ -2133,6 +2222,8 @@ async function executeCurveTrade(amount, status) {
   updated = appendChartPoint(nextMarket, {
     side: "sell",
     price: curveSpotPriceThruPerToken(nextMarket),
+    thru: quote.netThru,
+    tokens: amount,
   }) || nextMarket;
   activeTrade = updated || market;
   status.textContent =
@@ -2219,6 +2310,12 @@ async function executeTrade() {
 }
 
 function onMarketActionClick(event) {
+  const openMarket = event.target.closest("[data-open-market]");
+  if (openMarket) {
+    // Clicking the token opens chart + stats (default buy side for trading controls).
+    openTrade(Number(openMarket.dataset.openMarket), "buy");
+    return;
+  }
   const button = event.target.closest("[data-trade]");
   if (button) openTrade(Number(button.dataset.trade), button.dataset.tradeSide);
   const liquidityButton = event.target.closest("[data-liquidity]");

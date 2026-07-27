@@ -510,9 +510,10 @@
 
 .token-chart {
   margin: 0 0 22px;
-  padding: 14px 14px 10px;
+  padding: 14px 14px 12px;
   border: 1px solid var(--line);
-  background: rgba(231, 216, 186, 0.28);
+  background: #0f1410;
+  color: #e8efe9;
 }
 
 .token-chart-meta {
@@ -525,58 +526,142 @@
 
 .token-chart-meta [data-chart-price] {
   font: 22px var(--serif);
-  color: var(--ink);
+  color: #f4f7f4;
 }
 
 .token-chart-meta [data-chart-change] {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: .06em;
 }
 
-.token-chart-meta [data-chart-change].up { color: #1a6b3c; }
-.token-chart-meta [data-chart-change].down { color: #8a2b2b; }
+.token-chart-meta [data-chart-change].up,
+.token-chart.up [data-chart-price] { color: #22c55e; }
+.token-chart-meta [data-chart-change].down,
+.token-chart.down [data-chart-price] { color: #ef4444; }
 
 .token-chart-svg {
   display: block;
   width: 100%;
-  height: 140px;
+  height: 160px;
   overflow: visible;
 }
 
 .token-chart-svg .chart-grid {
-  stroke: var(--line);
+  stroke: rgba(255, 255, 255, 0.08);
   stroke-width: 1;
   stroke-dasharray: 3 4;
 }
 
-.token-chart-svg .chart-area {
-  fill: rgba(23, 23, 23, 0.08);
-}
+.token-chart-svg .chart-area.up { fill: rgba(34, 197, 94, 0.16); }
+.token-chart-svg .chart-area.down { fill: rgba(239, 68, 68, 0.16); }
 
 .token-chart-svg .chart-line {
   fill: none;
-  stroke: var(--ink);
-  stroke-width: 2.2;
+  stroke-width: 2.4;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
+.token-chart-svg .chart-line.up { stroke: #22c55e; }
+.token-chart-svg .chart-line.down { stroke: #ef4444; }
+
 .token-chart-svg .chart-buy {
-  fill: #1a6b3c;
+  fill: #22c55e;
+  stroke: #0f1410;
+  stroke-width: 1;
 }
 
 .token-chart-svg .chart-sell {
-  fill: #8a2b2b;
+  fill: #ef4444;
+  stroke: #0f1410;
+  stroke-width: 1;
 }
 
 .token-chart-axis {
   display: flex;
   justify-content: space-between;
   margin-top: 6px;
-  color: var(--muted);
+  color: rgba(232, 239, 233, 0.55);
   font-size: 10px;
   letter-spacing: .04em;
+}
+
+.token-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.token-stats div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.token-stats span {
+  color: rgba(232, 239, 233, 0.5);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.token-stats strong {
+  color: #f4f7f4;
+  font: 12px/1.2 monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-stats strong.stat-buy { color: #22c55e; }
+.token-stats strong.stat-sell { color: #ef4444; }
+
+.market-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.market-identity:hover strong {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.market-mini-stats {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px !important;
+}
+
+.market-mini-stats .stat-buy { color: #1a6b3c; }
+.market-mini-stats .stat-sell { color: #8a2b2b; }
+
+.market-identity > span {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--ink);
+  font: 18px var(--serif);
+  flex: 0 0 auto;
+}
+
+@media (max-width: 760px) {
+  .token-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .trade-switch {
