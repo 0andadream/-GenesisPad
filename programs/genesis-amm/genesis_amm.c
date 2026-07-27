@@ -90,7 +90,10 @@ static void require_idx(ushort idx) {
 
 static tn_pubkey_t const *key_at(ushort idx) {
   require_idx(idx);
-  return &tsdk_get_txn()->input_pubkeys[idx];
+  /* Account 0 = fee payer, 1 = program, 2+ = remaining accounts.
+     Must use tsdk_txn_get_acct_addrs (starts at fee_payer_pubkey), NOT
+     txn->input_pubkeys which is only the trailing RW/RO list (off-by-two). */
+  return &tsdk_txn_get_acct_addrs(tsdk_get_txn())[idx];
 }
 
 static int key_eq(tn_pubkey_t const *a, tn_pubkey_t const *b) {

@@ -233,7 +233,7 @@ async function submitTransaction(rawTransaction) {
         4: "This AMM pool is not initialized yet.",
         5: "Invalid account index in the AMM transaction.",
         6: "Mint ordering is invalid for this pool.",
-        7: "Wallet is not authorized for this AMM action.",
+        7: "Wallet is not authorized for this AMM action (or pool authority is invalid — hard-refresh and create a new pool).",
         8: "The AMM pool account could not be created. Refresh and try again.",
         12: "The AMM pool account could not be resized.",
         13: "The AMM pool account could not be made writable.",
