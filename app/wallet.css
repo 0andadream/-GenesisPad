@@ -660,9 +660,8 @@
   white-space: nowrap;
 }
 
-.token-stats strong.stat-buy { color: #14f195; }
-.token-stats strong.stat-sell { color: #f6465d; }
-.token-stats strong.stat-sell { color: #ef5350; }
+.token-stats strong.stat-buy { color: #22c55e; }
+.token-stats strong.stat-sell { color: #ef4444; }
 
 .market-identity {
   display: flex;
