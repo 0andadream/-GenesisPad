@@ -106,27 +106,13 @@
         <h2 id="trade-title" data-trade-title>Trade token</h2>
         <div class="token-chart" data-token-chart>
           <div class="token-chart-meta">
-            <div class="token-chart-meta-left">
-              <span class="token-chart-pair" data-chart-pair>—</span>
-              <span data-chart-price>—</span>
-              <span data-chart-change></span>
-            </div>
-            <div class="token-chart-meta-right">
-              <span data-chart-ohlc>O — H — L — C —</span>
-              <span data-chart-trades>No trades yet</span>
-            </div>
+            <span data-chart-price>—</span>
+            <span data-chart-change></span>
           </div>
-          <div class="chart-intervals" data-chart-intervals role="tablist" aria-label="Candle interval">
-            <button type="button" class="selected" data-interval="60000">1m</button>
-            <button type="button" data-interval="300000">5m</button>
-            <button type="button" data-interval="900000">15m</button>
-            <button type="button" data-interval="3600000">1H</button>
-            <button type="button" data-interval="14400000">4H</button>
-            <button type="button" data-interval="86400000">1D</button>
-          </div>
-          <div class="token-chart-stage">
-            <svg class="token-chart-svg" data-chart-svg viewBox="0 0 640 320" preserveAspectRatio="none" aria-label="Token candlestick chart"></svg>
-            <div class="token-chart-hover" data-chart-hover hidden></div>
+          <svg class="token-chart-svg" data-chart-svg viewBox="0 0 400 160" preserveAspectRatio="none" aria-label="Token price chart"></svg>
+          <div class="token-chart-axis">
+            <span data-chart-range>Price · THRU per token</span>
+            <span data-chart-trades>No trades yet</span>
           </div>
           <div class="token-stats" data-token-stats>
             <div><span>Buys</span><strong data-stat-buys>0</strong></div>

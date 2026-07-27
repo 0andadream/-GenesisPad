@@ -683,265 +683,57 @@ function ensureChartSeed(market) {
   }
 }
 
-/** Active candle interval in ms. Default 1m (pump.fun-style live feel). */
-let chartIntervalMs = 60_000;
-
-const CHART_INTERVALS = [
-  { ms: 60_000, label: "1m" },
-  { ms: 300_000, label: "5m" },
-  { ms: 900_000, label: "15m" },
-  { ms: 3_600_000, label: "1H" },
-  { ms: 14_400_000, label: "4H" },
-  { ms: 86_400_000, label: "1D" },
-];
-
-function intervalLabel(ms = chartIntervalMs) {
-  return CHART_INTERVALS.find((i) => i.ms === ms)?.label || `${Math.round(ms / 60000)}m`;
-}
-
 /**
- * Deterministic micro-range around last price for quiet buckets.
- * Looks like sideways consolidation (not a blank gap) until the next trade.
+ * Original green/red line + area price chart (trade prints connected in order).
+ * Quiet time extends a flat tail to "now" so the series doesn't leave a blank edge.
  */
-function consolidatingOHLC(basePrice, bucketT, seriesIndex) {
-  const base = basePrice > 0n ? basePrice : 1n;
-  // Stable pseudo-noise from bucket time (re-renders do not jitter).
-  const seed = Number((BigInt(bucketT) ^ (BigInt(seriesIndex) * 2654435761n)) % 1009n);
-  // Tight range: ~0.4%–1.6% of price (alphanet-friendly min 1 unit).
-  const rangeBps = 4n + BigInt(seed % 13); // 4–16 bps
-  let half = (base * rangeBps) / 10000n;
-  if (half < 1n) half = 1n;
-  // Soft sine-ish path so consecutive quiet bars drift sideways, not randomly jump.
-  const phase = (seed + seriesIndex * 7) % 360;
-  const wave = Math.sin((phase * Math.PI) / 180); // -1..1
-  const drift = BigInt(Math.round(Number(half) * wave * 0.55));
-  const mid = base + drift > 0n ? base + drift : 1n;
-  const body = half / 3n || 1n;
-  const bullish = ((seed + seriesIndex) % 2) === 0;
-  const open = bullish ? (mid > body ? mid - body : 1n) : mid + body;
-  const close = bullish ? mid + body : (mid > body ? mid - body : 1n);
-  const high = (open > close ? open : close) + (half / 2n || 1n);
-  const lowRaw = (open < close ? open : close) - (half / 2n || 1n);
-  const low = lowRaw > 0n ? lowRaw : 1n;
-  return { open, high, low, close };
-}
-
-/**
- * Build fixed-interval OHLC candles (true open from first print in the bucket).
- * Trailing window always ends at "now". Quiet time after the last trade is filled
- * with consolidating micro-candles (sideways range) — not blank empty space.
- */
-function buildCandles(points, intervalMs = chartIntervalMs, maxCandles = 48) {
-  const ticks = points
-    .map((p) => ({
-      t: Number(p.t) || 0,
-      price: BigInt(p.price || "0"),
-      side: p.side || "seed",
-      thru: BigInt(p.thru || "0"),
-    }))
-    .filter((p) => p.price > 0n && p.t > 0)
-    .sort((a, b) => a.t - b.t);
-  if (!ticks.length) return [];
-
-  const bucketStart = (t) => Math.floor(t / intervalMs) * intervalMs;
-  const nowBucket = bucketStart(Date.now());
-  const firstTradeBucket = bucketStart(ticks[0].t);
-  const lastTradeBucket = bucketStart(ticks[ticks.length - 1].t);
-  // Always carry the series through wall-clock now so quiet time consolidates.
-  const endBucket = Math.max(lastTradeBucket, nowBucket);
-
-  // Aggregate true OHLC per wall-clock bucket.
-  const tradeMap = new Map();
-  for (const tick of ticks) {
-    const key = bucketStart(tick.t);
-    const existing = tradeMap.get(key);
-    const isReal = tick.side === "buy" || tick.side === "sell";
-    if (!existing) {
-      tradeMap.set(key, {
-        t: key,
-        open: tick.price,
-        high: tick.price,
-        low: tick.price,
-        close: tick.price,
-        volume: isReal ? tick.thru : 0n,
-        buys: tick.side === "buy" ? 1 : 0,
-        sells: tick.side === "sell" ? 1 : 0,
-        hasTrades: isReal,
-        hasPrint: true,
-      });
-    } else {
-      if (tick.price > existing.high) existing.high = tick.price;
-      if (tick.price < existing.low) existing.low = tick.price;
-      existing.close = tick.price;
-      if (isReal) {
-        existing.volume += tick.thru;
-        existing.hasTrades = true;
-        if (tick.side === "buy") existing.buys += 1;
-        if (tick.side === "sell") existing.sells += 1;
-      }
-    }
-  }
-
-  // Trailing window ending at now (always show live right edge).
-  let windowEnd = endBucket;
-  let windowStart = firstTradeBucket;
-  if (Math.floor((windowEnd - windowStart) / intervalMs) + 1 > maxCandles) {
-    windowStart = windowEnd - (maxCandles - 1) * intervalMs;
-  }
-  // Prefer keeping recent real prints in view when the full span is huge.
-  if (lastTradeBucket < windowStart && lastTradeBucket >= firstTradeBucket) {
-    // Last trade fell off the left — slide so last trade sits ~1/3 from left.
-    const keepFrom = lastTradeBucket - Math.floor(maxCandles / 3) * intervalMs;
-    windowStart = Math.max(firstTradeBucket, keepFrom);
-    if (Math.floor((windowEnd - windowStart) / intervalMs) + 1 > maxCandles) {
-      windowStart = windowEnd - (maxCandles - 1) * intervalMs;
-    }
-  }
-
-  const candles = [];
-  let prevClose = null;
-  for (const tick of ticks) {
-    if (bucketStart(tick.t) < windowStart) prevClose = tick.price;
-    else break;
-  }
-  if (prevClose == null) prevClose = ticks[0].price;
-
-  let quietIndex = 0;
-  // Anchor consolidation to last real print so price doesn't invent a trend.
-  let lastRealClose = prevClose;
-  for (let t = windowStart; t <= windowEnd; t += intervalMs) {
-    const traded = tradeMap.get(t);
-    if (traded) {
-      // True open from first print in the bucket (pump.fun / exchange style).
-      candles.push({
-        t,
-        open: traded.open,
-        high: traded.high,
-        low: traded.low,
-        close: traded.close,
-        volume: traded.volume,
-        buys: traded.buys,
-        sells: traded.sells,
-        hasTrades: traded.hasTrades,
-        consolidating: false,
-      });
-      prevClose = traded.close;
-      lastRealClose = traded.close;
-      quietIndex = 0;
-    } else if (lastRealClose != null) {
-      // No prints this interval → consolidating range around last real price.
-      const ohlc = consolidatingOHLC(lastRealClose, t, quietIndex);
-      quietIndex += 1;
-      candles.push({
-        t,
-        open: ohlc.open,
-        high: ohlc.high,
-        low: ohlc.low,
-        close: ohlc.close,
-        volume: 0n,
-        buys: 0,
-        sells: 0,
-        hasTrades: false,
-        consolidating: true,
-      });
-      prevClose = ohlc.close;
-    }
-  }
-
-  // Drop pure leading consolidation before the first real print in-window.
-  while (
-    candles.length > 2
-    && candles[0].consolidating
-    && !candles[0].hasTrades
-    && candles.some((c) => c.hasTrades)
-  ) {
-    candles.shift();
-  }
-
-  if (candles.length === 1) {
-    const c = candles[0];
-    const ohlc = consolidatingOHLC(c.open, c.t - intervalMs, 0);
-    candles.unshift({
-      t: c.t - intervalMs,
-      open: ohlc.open,
-      high: ohlc.high,
-      low: ohlc.low,
-      close: ohlc.close,
-      volume: 0n,
-      buys: 0,
-      sells: 0,
-      hasTrades: false,
-      consolidating: true,
-    });
-  }
-  return candles;
-}
-
-function formatChartTime(ts, intervalMs = chartIntervalMs) {
-  try {
-    const d = new Date(ts);
-    if (intervalMs >= 86_400_000) {
-      return d.toLocaleDateString([], { month: "short", day: "numeric" });
-    }
-    if (intervalMs >= 3_600_000) {
-      return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-    }
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  } catch {
-    return "";
-  }
-}
-
-function syncIntervalButtons() {
-  document.querySelectorAll("[data-interval]").forEach((btn) => {
-    btn.classList.toggle("selected", Number(btn.dataset.interval) === chartIntervalMs);
-  });
-}
-
 function renderTokenChart(market) {
   const root = document.querySelector("[data-token-chart]");
   const svg = document.querySelector("[data-chart-svg]");
   const priceEl = document.querySelector("[data-chart-price]");
   const changeEl = document.querySelector("[data-chart-change]");
   const tradesEl = document.querySelector("[data-chart-trades]");
-  const pairEl = document.querySelector("[data-chart-pair]");
-  const ohlcEl = document.querySelector("[data-chart-ohlc]");
-  const hoverEl = document.querySelector("[data-chart-hover]");
+  const rangeEl = document.querySelector("[data-chart-range]");
   if (!svg || !market) return;
 
-  syncIntervalButtons();
-
   let m = ensureChartSeed(market);
-  const points = readChart(m);
+  const points = readChart(m).slice();
   const stats = readTradeStats(m);
-  const candles = buildCandles(points, chartIntervalMs, 48);
-  // Quoted last price = last real trade (consolidation does not invent a new print).
-  const lastTradeCandle = [...candles].reverse().find((c) => c.hasTrades);
-  const last = lastTradeCandle
-    ? lastTradeCandle.close
-    : (candles.length ? candles[candles.length - 1].close : curveSpotPriceThruPerToken(m));
-  // Session change vs first print in window; direction vs prior real/close.
-  const first = candles.length ? candles[0].open : last;
-  const prevClose = lastTradeCandle
-    ? (candles.slice(0, candles.indexOf(lastTradeCandle)).reverse().find((c) => c.hasTrades)?.close ?? first)
-    : (candles.length > 1 ? candles[candles.length - 2].close : first);
-  const up = last >= prevClose;
-  const sessionUp = last >= first;
+
+  // Hold last price out to now when flow is quiet (flat consolidation tail).
+  if (points.length) {
+    const lastPt = points[points.length - 1];
+    const now = Date.now();
+    if (now - (Number(lastPt.t) || 0) > 5_000) {
+      points.push({
+        t: now,
+        price: lastPt.price,
+        side: "hold",
+        thru: "0",
+        tokens: "0",
+      });
+    }
+  }
+
+  const prices = points.map((p) => BigInt(p.price || "0"));
+  const last = prices.length ? prices[prices.length - 1] : curveSpotPriceThruPerToken(m);
+  const first = prices.length ? prices[0] : last;
+  const up = last >= first;
+  const dir = up ? "up" : "down";
 
   if (root) {
     root.classList.toggle("up", up);
     root.classList.toggle("down", !up);
   }
-  if (pairEl) pairEl.textContent = `${market.ticker || "TOKEN"}/THRU · ${intervalLabel()}`;
   if (priceEl) priceEl.textContent = formatSpotPrice(last);
   if (changeEl) {
     if (first > 0n && last !== first) {
-      const delta = sessionUp ? last - first : first - last;
+      const delta = up ? last - first : first - last;
       const bps = (delta * 10000n) / first;
       const pct = (Number(bps) / 100).toFixed(2);
-      changeEl.textContent = `${sessionUp ? "+" : "−"}${pct}%`;
-      changeEl.classList.toggle("up", sessionUp);
-      changeEl.classList.toggle("down", !sessionUp);
+      changeEl.textContent = `${up ? "+" : "−"}${pct}%`;
+      changeEl.classList.toggle("up", up);
+      changeEl.classList.toggle("down", !up);
     } else {
       changeEl.textContent = "0.00%";
       changeEl.classList.remove("up", "down");
@@ -949,28 +741,11 @@ function renderTokenChart(market) {
   }
   if (tradesEl) {
     const realTrades = stats.buys + stats.sells;
-    const quietTail = candles.length
-      && candles[candles.length - 1]?.consolidating
-      && !candles[candles.length - 1]?.hasTrades;
-    if (realTrades) {
-      tradesEl.textContent = quietTail
-        ? `${realTrades} txns · consolidating · ${intervalLabel()}`
-        : `${realTrades} txns · ${stats.buys} buys · ${stats.sells} sells · ${intervalLabel()}`;
-    } else {
-      tradesEl.textContent = quietTail
-        ? `${intervalLabel()} · consolidating`
-        : `${intervalLabel()} · waiting for trades`;
-    }
+    tradesEl.textContent = realTrades
+      ? `${realTrades} trade${realTrades === 1 ? "" : "s"} · ${stats.buys}B / ${stats.sells}S`
+      : "No trades yet";
   }
-  if (ohlcEl && candles.length) {
-    const c = candles[candles.length - 1];
-    const bullish = c.close >= c.open;
-    ohlcEl.innerHTML =
-      `O <span>${formatUnits(c.open, NATIVE_THRU_DECIMALS, 8)}</span> ` +
-      `H <span>${formatUnits(c.high, NATIVE_THRU_DECIMALS, 8)}</span> ` +
-      `L <span>${formatUnits(c.low, NATIVE_THRU_DECIMALS, 8)}</span> ` +
-      `C <span class="${bullish ? "up" : "down"}">${formatUnits(c.close, NATIVE_THRU_DECIMALS, 8)}</span>`;
-  }
+  if (rangeEl) rangeEl.textContent = "Price · THRU per token";
 
   const setStat = (sel, text, cls) => {
     const el = document.querySelector(sel);
@@ -994,214 +769,61 @@ function renderTokenChart(market) {
     setStat("[data-stat-progress]", "—");
   }
 
-  // pump.fun / DexScreener layout: price pane + volume + last-price line.
-  const W = 640;
-  const H = 320;
-  const padL = 8;
-  const padR = 72;
-  const padT = 12;
-  const padB = 24;
-  const volH = 52;
-  const gap = 8;
-  const priceBottom = H - padB - volH - gap;
-  const priceTop = padT;
-  const priceH = priceBottom - priceTop;
-  const volTop = priceBottom + gap;
-  const plotW = W - padL - padR;
+  const W = 400;
+  const H = 160;
+  const padX = 8;
+  const padY = 14;
+  const innerW = W - padX * 2;
+  const innerH = H - padY * 2;
 
-  // Include consolidating micro-range so quiet periods stay in view (not a blank strip).
-  const ranged = candles.filter(
-    (c) => c.hasTrades || c.consolidating || c.high !== c.low || c.open !== c.close,
-  );
-  const scaleSrc = ranged.length ? ranged : candles;
-  let minP = scaleSrc[0]?.low ?? 0n;
-  let maxP = scaleSrc[0]?.high ?? 1n;
-  let maxVol = 0n;
-  for (const c of scaleSrc) {
-    if (c.low < minP) minP = c.low;
-    if (c.high > maxP) maxP = c.high;
+  let minP = prices[0] || 0n;
+  let maxP = prices[0] || 1n;
+  for (const p of prices) {
+    if (p < minP) minP = p;
+    if (p > maxP) maxP = p;
   }
-  for (const c of candles) {
-    if (c.volume > maxVol) maxVol = c.volume;
-  }
-  if (maxP <= minP) {
-    const bump = minP > 0n ? minP / 20n || 1n : 1n;
-    minP = minP > bump ? minP - bump : 0n;
-    maxP = maxP + bump;
-  }
-  // Minimum vertical span (~8%) so tiny alphanet moves still read as candles.
-  let span = maxP - minP;
-  const mid = minP + span / 2n;
-  const minSpan = mid / 12n || 1n;
-  if (span < minSpan) {
-    minP = mid > minSpan / 2n ? mid - minSpan / 2n : 0n;
-    maxP = mid + minSpan / 2n;
-    span = maxP - minP;
-  }
-  const padRange = span / 8n || 1n;
-  minP = minP > padRange ? minP - padRange : 0n;
-  maxP += padRange;
-  span = maxP - minP;
-  if (maxVol === 0n) maxVol = 1n;
+  if (maxP === minP) maxP = minP + 1n;
+  // Soft pad so tiny moves still read.
+  const pad = (maxP - minP) / 10n || 1n;
+  minP = minP > pad ? minP - pad : 0n;
+  maxP += pad;
+  const span = maxP - minP || 1n;
 
-  const priceToY = (price) => {
-    const yRatio = Number(((price - minP) * 10000n) / span) / 10000;
-    return priceTop + priceH * (1 - Math.min(1, Math.max(0, yRatio)));
-  };
-  const volToH = (vol) => {
-    if (vol <= 0n) return 0;
-    const ratio = Number((vol * 10000n) / maxVol) / 10000;
-    return Math.max(volH * ratio * 0.9, 4);
-  };
+  const n = Math.max(points.length, 2);
+  const coords = points.map((p, i) => {
+    const x = padX + (innerW * i) / Math.max(n - 1, 1);
+    const yRatio = Number(((BigInt(p.price) - minP) * 10000n) / span) / 10000;
+    const y = padY + innerH * (1 - Math.min(1, Math.max(0, yRatio)));
+    return { x, y, side: p.side };
+  });
 
-  const count = Math.max(candles.length, 1);
-  const slot = plotW / count;
-  // pump.fun: chunky bodies, tight gaps, readable even with few bars.
-  const bodyW = Math.max(Math.min(slot * 0.72, 18), count <= 8 ? 8 : 4);
-  const wickW = Math.max(1.25, Math.min(bodyW * 0.18, 2.5));
-
-  const gridLines = [];
-  const priceLabels = [];
-  const steps = 4;
-  for (let i = 0; i <= steps; i += 1) {
-    const price = minP + (span * BigInt(i)) / BigInt(steps);
-    const y = priceToY(price);
-    gridLines.push(
-      `<line class="chart-grid" x1="${padL}" y1="${y.toFixed(1)}" x2="${padL + plotW}" y2="${y.toFixed(1)}"></line>`,
-    );
-    priceLabels.push(
-      `<text class="chart-axis-label" x="${W - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${formatUnits(price, NATIVE_THRU_DECIMALS, 8)}</text>`,
-    );
+  if (coords.length === 1) {
+    coords.push({ x: W - padX, y: coords[0].y, side: coords[0].side });
   }
 
-  // Live last-price guide (horizontal).
-  const lastY = priceToY(last);
-  const lastLineCls = up ? "chart-last-up" : "chart-last-down";
-  const lastPriceLabel = formatUnits(last, NATIVE_THRU_DECIMALS, 8);
+  const lineD = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
+  const areaD =
+    `${lineD} L${coords[coords.length - 1].x.toFixed(1)},${(H - padY).toFixed(1)} ` +
+    `L${coords[0].x.toFixed(1)},${(H - padY).toFixed(1)} Z`;
 
-  const timeLabels = [];
-  const labelCount = Math.min(6, count);
-  for (let i = 0; i < labelCount; i += 1) {
-    const idx = labelCount === 1 ? 0 : Math.round((i * (count - 1)) / (labelCount - 1));
-    const c = candles[idx];
-    if (!c) continue;
-    const cx = padL + slot * idx + slot / 2;
-    timeLabels.push(
-      `<text class="chart-axis-label" x="${cx.toFixed(1)}" y="${H - 8}" text-anchor="middle">${formatChartTime(c.t, chartIntervalMs)}</text>`,
-    );
-  }
-
-  const candleSvg = candles.map((c, i) => {
-    const cx = padL + slot * i + slot / 2;
-    const yOpen = priceToY(c.open);
-    const yClose = priceToY(c.close);
-    const yHigh = priceToY(c.high);
-    const yLow = priceToY(c.low);
-    const bullish = c.close >= c.open;
-    const cls = c.consolidating
-      ? (bullish ? "candle-cons-up" : "candle-cons-down")
-      : (bullish ? "candle-up" : "candle-down");
-    const flat = c.close === c.open;
-    const bodyTop = Math.min(yOpen, yClose);
-    const bodyBot = Math.max(yOpen, yClose);
-    // Consolidation still paints a small body so the series never goes blank.
-    const bodyH = flat ? 2.5 : Math.max(bodyBot - bodyTop, c.consolidating ? 3 : 2.5);
-    const bodyY = flat ? bodyTop - 1.25 : bodyTop;
-    const vH = volToH(c.volume);
-    const vY = volTop + volH - vH;
-    // Tiny residual volume stub for consolidating bars so the vol pane stays continuous.
-    const consVolH = c.consolidating && vH <= 0 ? 2 : 0;
-    const volBarH = Math.max(vH, consVolH);
-    const volBarY = volTop + volH - volBarH;
-    return `
-      <g class="candle ${cls}" data-candle-index="${i}">
-        <line class="candle-wick" x1="${cx.toFixed(2)}" y1="${yHigh.toFixed(2)}" x2="${cx.toFixed(2)}" y2="${yLow.toFixed(2)}" stroke-width="${wickW}"></line>
-        <rect class="candle-body" x="${(cx - bodyW / 2).toFixed(2)}" y="${bodyY.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${bodyH.toFixed(2)}" rx="0.5"></rect>
-        <rect class="vol-bar" x="${(cx - bodyW / 2).toFixed(2)}" y="${volBarY.toFixed(2)}" width="${bodyW.toFixed(2)}" height="${Math.max(volBarH, 0).toFixed(2)}"></rect>
-        <rect class="candle-hit" x="${(padL + slot * i).toFixed(2)}" y="${priceTop}" width="${Math.max(slot, 1).toFixed(2)}" height="${(priceH + gap + volH).toFixed(2)}" fill="transparent"></rect>
-      </g>`;
-  }).join("");
-
-  const sepY = priceBottom + gap / 2;
+  const dots = coords
+    .filter((c) => c.side === "buy" || c.side === "sell")
+    .map((c) =>
+      `<circle class="chart-${c.side}" cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.5"></circle>`,
+    )
+    .join("");
 
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.onmousemove = null;
+  svg.onmouseleave = null;
   svg.innerHTML = `
-    <rect class="chart-bg" x="0" y="0" width="${W}" height="${H}"></rect>
-    ${gridLines.join("")}
-    <line class="chart-sep" x1="${padL}" y1="${sepY.toFixed(1)}" x2="${(padL + plotW).toFixed(1)}" y2="${sepY.toFixed(1)}"></line>
-    <text class="chart-vol-label" x="${padL + 2}" y="${(volTop + 10).toFixed(1)}">Vol</text>
-    ${candleSvg}
-    <line class="chart-last ${lastLineCls}" x1="${padL}" y1="${lastY.toFixed(2)}" x2="${(padL + plotW).toFixed(1)}" y2="${lastY.toFixed(2)}"></line>
-    <rect class="chart-last-tag ${lastLineCls}" x="${(padL + plotW + 2).toFixed(1)}" y="${(lastY - 8).toFixed(1)}" width="${Math.max(padR - 8, 40)}" height="16" rx="2"></rect>
-    <text class="chart-last-text" x="${(W - 6).toFixed(1)}" y="${(lastY + 3.5).toFixed(1)}" text-anchor="end">${lastPriceLabel}</text>
-    ${priceLabels.join("")}
-    ${timeLabels.join("")}
-    <line class="chart-cross-x" data-cross-x hidden x1="${padL}" y1="0" x2="${padL + plotW}" y2="0"></line>
-    <line class="chart-cross-y" data-cross-y hidden x1="0" y1="${priceTop}" x2="0" y2="${priceBottom}"></line>
+    <line class="chart-grid" x1="${padX}" y1="${padY}" x2="${W - padX}" y2="${padY}"></line>
+    <line class="chart-grid" x1="${padX}" y1="${H / 2}" x2="${W - padX}" y2="${H / 2}"></line>
+    <line class="chart-grid" x1="${padX}" y1="${H - padY}" x2="${W - padX}" y2="${H - padY}"></line>
+    <path class="chart-area ${dir}" d="${areaD}"></path>
+    <path class="chart-line ${dir}" d="${lineD}"></path>
+    ${dots}
   `;
-
-  const showHover = (index, clientX, clientY) => {
-    const c = candles[index];
-    if (!c || !hoverEl) return;
-    const bullish = c.close >= c.open;
-    hoverEl.hidden = false;
-    hoverEl.innerHTML = `
-      <div class="hover-time">${intervalLabel()} · ${formatChartTime(c.t, chartIntervalMs)}</div>
-      <div><i>O</i> ${formatUnits(c.open, NATIVE_THRU_DECIMALS, 9)}</div>
-      <div><i>H</i> ${formatUnits(c.high, NATIVE_THRU_DECIMALS, 9)}</div>
-      <div><i>L</i> ${formatUnits(c.low, NATIVE_THRU_DECIMALS, 9)}</div>
-      <div><i>C</i> <b class="${bullish ? "up" : "down"}">${formatUnits(c.close, NATIVE_THRU_DECIMALS, 9)}</b></div>
-      <div><i>Vol</i> ${formatUnits(c.volume, NATIVE_THRU_DECIMALS, 6)} THRU</div>
-      ${c.hasTrades
-        ? ""
-        : c.consolidating
-          ? "<div class='hover-empty'>Consolidating · no trades</div>"
-          : "<div class='hover-empty'>No trades in interval</div>"}
-    `;
-    if (ohlcEl) {
-      ohlcEl.innerHTML =
-        `O <span>${formatUnits(c.open, NATIVE_THRU_DECIMALS, 8)}</span> ` +
-        `H <span>${formatUnits(c.high, NATIVE_THRU_DECIMALS, 8)}</span> ` +
-        `L <span>${formatUnits(c.low, NATIVE_THRU_DECIMALS, 8)}</span> ` +
-        `C <span class="${bullish ? "up" : "down"}">${formatUnits(c.close, NATIVE_THRU_DECIMALS, 8)}</span>`;
-    }
-    const stage = root?.querySelector(".token-chart-stage");
-    if (stage) {
-      const rect = stage.getBoundingClientRect();
-      const left = Math.min(Math.max(clientX - rect.left + 12, 8), rect.width - 160);
-      const top = Math.min(Math.max(clientY - rect.top + 12, 8), rect.height - 120);
-      hoverEl.style.left = `${left}px`;
-      hoverEl.style.top = `${top}px`;
-    }
-    const crossX = svg.querySelector("[data-cross-x]");
-    const crossY = svg.querySelector("[data-cross-y]");
-    const cx = padL + slot * index + slot / 2;
-    const cy = priceToY(c.close);
-    if (crossX) {
-      crossX.removeAttribute("hidden");
-      crossX.setAttribute("y1", String(cy));
-      crossX.setAttribute("y2", String(cy));
-    }
-    if (crossY) {
-      crossY.removeAttribute("hidden");
-      crossY.setAttribute("x1", String(cx));
-      crossY.setAttribute("x2", String(cx));
-    }
-  };
-
-  const hideHover = () => {
-    if (hoverEl) hoverEl.hidden = true;
-    svg.querySelector("[data-cross-x]")?.setAttribute("hidden", "");
-    svg.querySelector("[data-cross-y]")?.setAttribute("hidden", "");
-  };
-
-  svg.onmousemove = (event) => {
-    const rect = svg.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) / rect.width) * W;
-    const idx = Math.min(count - 1, Math.max(0, Math.floor((x - padL) / slot)));
-    showHover(idx, event.clientX, event.clientY);
-  };
-  svg.onmouseleave = hideHover;
 }
 
 function quoteCurveBuy(market, thruIn) {
@@ -3064,15 +2686,6 @@ document.querySelector("[data-trade-amount]")?.addEventListener("input", (event)
   }
 });
 document.querySelector("[data-trade-submit]")?.addEventListener("click", executeTrade);
-document.querySelectorAll("[data-interval]").forEach((button) => {
-  button.addEventListener("click", () => {
-    const ms = Number(button.dataset.interval);
-    if (!Number.isFinite(ms) || ms <= 0) return;
-    chartIntervalMs = ms;
-    syncIntervalButtons();
-    if (activeTrade) renderTokenChart(activeTrade);
-  });
-});
 document.querySelectorAll("[data-liquidity-close]").forEach((button) => {
   button.addEventListener("click", closeLiquidity);
 });

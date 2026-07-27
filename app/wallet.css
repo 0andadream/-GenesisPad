@@ -512,262 +512,83 @@
 
 .token-chart {
   margin: 0 0 22px;
-  padding: 12px 12px 10px;
-  border: 1px solid #1e2329;
-  background: #0b0e11;
-  color: #eaecef;
+  padding: 14px 14px 12px;
+  border: 1px solid var(--line, rgba(23, 23, 23, 0.2));
+  background: #0f1410;
+  color: #e8efe9;
   border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .token-chart-meta {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: baseline;
   gap: 12px;
   margin-bottom: 8px;
 }
 
-.token-chart-meta-left {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px 12px;
-}
-
-.token-chart-pair {
-  color: #848e9c;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-
 .token-chart-meta [data-chart-price] {
-  font: 700 20px/1.1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  color: #eaecef;
+  font: 22px var(--serif, Georgia, serif);
+  color: #f4f7f4;
 }
 
 .token-chart-meta [data-chart-change] {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
+  letter-spacing: .06em;
 }
 
 .token-chart-meta [data-chart-change].up,
-.token-chart.up [data-chart-price] { color: #14f195; }
+.token-chart.up [data-chart-price] { color: #22c55e; }
 .token-chart-meta [data-chart-change].down,
-.token-chart.down [data-chart-price] { color: #f6465d; }
-
-.token-chart-meta-right [data-chart-ohlc] .up { color: #14f195; }
-.token-chart-meta-right [data-chart-ohlc] .down { color: #f6465d; }
-
-.token-chart-meta-right {
-  display: grid;
-  gap: 4px;
-  justify-items: end;
-  color: #848e9c;
-  font-size: 10px;
-}
-
-.chart-intervals {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 0 0 8px;
-}
-
-.chart-intervals button {
-  min-width: 40px;
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid #2b3139;
-  background: #12161c;
-  color: #848e9c;
-  font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  letter-spacing: .04em;
-  cursor: pointer;
-}
-
-.chart-intervals button:hover {
-  color: #eaecef;
-  border-color: #3a4149;
-}
-
-.chart-intervals button.selected {
-  color: #0b0e11;
-  background: #f0b90b;
-  border-color: #f0b90b;
-}
-
-.token-chart-meta-right [data-chart-ohlc] span { color: #eaecef; }
-
-.token-chart-stage {
-  position: relative;
-  border: 1px solid #1e2329;
-  background: #0b0e11;
-  overflow: hidden;
-}
+.token-chart.down [data-chart-price] { color: #ef4444; }
 
 .token-chart-svg {
   display: block;
   width: 100%;
-  height: 320px;
-  cursor: crosshair;
-}
-
-.token-chart-svg .chart-bg {
-  fill: #0b0e11;
+  height: 160px;
+  overflow: visible;
 }
 
 .token-chart-svg .chart-grid {
-  stroke: rgba(132, 142, 156, 0.1);
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+
+.token-chart-svg .chart-area.up { fill: rgba(34, 197, 94, 0.16); }
+.token-chart-svg .chart-area.down { fill: rgba(239, 68, 68, 0.16); }
+
+.token-chart-svg .chart-line {
+  fill: none;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.token-chart-svg .chart-line.up { stroke: #22c55e; }
+.token-chart-svg .chart-line.down { stroke: #ef4444; }
+
+.token-chart-svg .chart-buy {
+  fill: #22c55e;
+  stroke: #0f1410;
   stroke-width: 1;
 }
 
-.token-chart-svg .chart-sep {
-  stroke: rgba(132, 142, 156, 0.22);
+.token-chart-svg .chart-sell {
+  fill: #ef4444;
+  stroke: #0f1410;
   stroke-width: 1;
 }
 
-.token-chart-svg .chart-axis-label {
-  fill: #848e9c;
-  font-size: 9px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-/* pump.fun-style solid green / red candles */
-.token-chart-svg .candle-up .candle-wick {
-  stroke: #14f195;
-  stroke-linecap: round;
-}
-.token-chart-svg .candle-up .vol-bar {
-  fill: #14f195;
-  opacity: 0.45;
-}
-.token-chart-svg .candle-up .candle-body {
-  fill: #14f195;
-  stroke: #14f195;
-}
-
-.token-chart-svg .candle-down .candle-wick {
-  stroke: #f6465d;
-  stroke-linecap: round;
-}
-.token-chart-svg .candle-down .vol-bar {
-  fill: #f6465d;
-  opacity: 0.45;
-}
-.token-chart-svg .candle-down .candle-body {
-  fill: #f6465d;
-  stroke: #f6465d;
-}
-
-.token-chart-svg .vol-bar {
-  opacity: 0.45;
-}
-
-/* Quiet periods: muted sideways candles (consolidation), not blank */
-.token-chart-svg .candle-cons-up .candle-wick {
-  stroke: #8b949e;
-  stroke-linecap: round;
-}
-.token-chart-svg .candle-cons-up .candle-body {
-  fill: #3d444d;
-  stroke: #8b949e;
-}
-.token-chart-svg .candle-cons-up .vol-bar {
-  fill: #3d444d;
-  opacity: 0.55;
-}
-.token-chart-svg .candle-cons-down .candle-wick {
-  stroke: #6e7681;
-  stroke-linecap: round;
-}
-.token-chart-svg .candle-cons-down .candle-body {
-  fill: #2d333b;
-  stroke: #6e7681;
-}
-.token-chart-svg .candle-cons-down .vol-bar {
-  fill: #2d333b;
-  opacity: 0.55;
-}
-
-.token-chart-svg .candle-empty .candle-body,
-.token-chart-svg .candle-empty .candle-wick {
-  opacity: 0.35;
-}
-
-.token-chart-svg .chart-last {
-  stroke-width: 1;
-  stroke-dasharray: 4 3;
-  pointer-events: none;
-}
-.token-chart-svg .chart-last.chart-last-up { stroke: rgba(20, 241, 149, 0.55); }
-.token-chart-svg .chart-last.chart-last-down { stroke: rgba(246, 70, 93, 0.55); }
-
-.token-chart-svg .chart-last-tag {
-  pointer-events: none;
-}
-.token-chart-svg .chart-last-tag.chart-last-up { fill: #14f195; }
-.token-chart-svg .chart-last-tag.chart-last-down { fill: #f6465d; }
-
-.token-chart-svg .chart-last-text {
-  fill: #0b0e11;
-  font-size: 9px;
-  font-weight: 700;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  pointer-events: none;
-}
-
-.token-chart-svg .chart-vol-label {
-  fill: #5e6673;
-  font-size: 9px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-.token-chart-hover .hover-empty {
-  margin-top: 4px;
-  color: #5e6673;
+.token-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  color: rgba(232, 239, 233, 0.55);
   font-size: 10px;
+  letter-spacing: .04em;
 }
-
-.token-chart-svg .chart-cross-x,
-.token-chart-svg .chart-cross-y {
-  stroke: rgba(234, 236, 239, 0.35);
-  stroke-width: 1;
-  stroke-dasharray: 3 3;
-  pointer-events: none;
-}
-
-.token-chart-hover {
-  position: absolute;
-  z-index: 3;
-  min-width: 132px;
-  padding: 8px 10px;
-  border: 1px solid #2b3139;
-  background: rgba(16, 20, 25, 0.94);
-  color: #eaecef;
-  font-size: 11px;
-  line-height: 1.45;
-  pointer-events: none;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-}
-
-.token-chart-hover .hover-time {
-  margin-bottom: 4px;
-  color: #848e9c;
-  font-size: 10px;
-}
-
-.token-chart-hover i {
-  display: inline-block;
-  width: 22px;
-  color: #848e9c;
-  font-style: normal;
-}
-
-.token-chart-hover .up { color: #14f195; }
-.token-chart-hover .down { color: #f6465d; }
 
 .registry-live {
   display: inline-flex;
@@ -814,7 +635,7 @@
   gap: 8px;
   margin-top: 10px;
   padding-top: 10px;
-  border-top: 1px solid #1e2329;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .token-stats div {
@@ -824,7 +645,7 @@
 }
 
 .token-stats span {
-  color: #848e9c;
+  color: rgba(232, 239, 233, 0.55);
   font-size: 9px;
   font-weight: 700;
   letter-spacing: .08em;
