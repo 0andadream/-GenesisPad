@@ -42,7 +42,8 @@ const client = createThruClient({
 });
 const FAUCET_VAULT = "taxoImN8fTEOxXYnvgC6JZ0lN0n0qvZERwz_vlOjX3MkIn";
 const CHAIN_ID = 1;
-const FAUCET_AMOUNT = 10000n;
+// Native THRU has 9 decimals. Claim 10,000 whole THRU per faucet pull (not 10,000 base units).
+const FAUCET_AMOUNT = 10_000n * (10n ** 9n);
 const TOKEN_PROGRAM = "taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKqq";
 const WTHRU_PROGRAM = "taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcH";
 const WTHRU_MINT = "tacdgTUGud8OgzN5HnVVv4u3x82UBe8ciZAtjOLJZE_SNg";
