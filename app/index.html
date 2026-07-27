@@ -23,7 +23,7 @@
       <section class="app-intro">
         <p class="eyebrow">The Genesis launchpad</p>
         <h1>Markets begin<br /><em>with an idea.</em></h1>
-        <p>Launch pump-style tokens on a bonding curve, trade from the first block, and graduate into an AMM pool when the market fills — inspired by <a href="https://pump.fun/" target="_blank" rel="noreferrer">pump.fun</a>.</p>
+        <p>Launch tokens on a bonding curve, trade from the first block, and graduate into an AMM pool when the market fills.</p>
       </section>
 
       <section class="command-bar" aria-label="Launchpad controls">
@@ -34,7 +34,7 @@
       <section class="graduated" aria-labelledby="graduated-title">
         <div class="section-heading">
           <div><p class="eyebrow">Archive 000</p><h2 id="graduated-title">Graduated</h2></div>
-          <p>Bonding curves that hit the graduation target and seed (or queue) the AMM — like pump.fun.</p>
+          <p>Markets that hit the graduation target and seed (or queue) the AMM.</p>
         </div>
         <div data-graduated-list>
           <div class="empty-ledger">
@@ -85,16 +85,7 @@
           <label>Decimals<input data-token-decimals type="number" value="6" min="0" max="9" /></label>
           <label>Initial supply<input data-token-supply type="number" min="0" step="1" value="1000000" /></label>
         </div>
-        <label class="confirm-backup pump-toggle">
-          <input type="checkbox" data-token-pump checked />
-          Pump-style bonding curve (recommended)
-        </label>
-        <small>
-          Like <a href="https://pump.fun/" target="_blank" rel="noreferrer">pump.fun</a>:
-          80% of supply goes on a bonding curve. Anyone can buy/sell with THRU.
-          When <strong>0.002 THRU</strong> is raised, the market graduates and we try to seed the AMM from the curve vault.
-        </small>
-        <label>Direct AMM seed in THRU <span>(only if pump mode is off)</span><input data-token-liquidity type="number" min="0" step="0.000000001" placeholder="leave blank for pump mode" /></label>
+        <small>80% of supply starts on a bonding curve. Trade with THRU until graduation, then the AMM can be seeded from the curve vault.</small>
         <small>Curve trade fee: 1%. After graduation, AMM swap fee is 0.21% creator / 0.09% Genesis.</small>
         <label>Description<textarea data-token-description placeholder="Describe the token and its purpose"></textarea></label>
         <small data-create-status>Your Thru key is generated or imported locally. Genesis never sends it to a server or stores it after this tab closes.</small>

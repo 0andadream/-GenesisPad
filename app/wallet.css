@@ -451,22 +451,6 @@
   background: var(--ink);
 }
 
-.pump-toggle {
-  display: flex !important;
-  align-items: center;
-  gap: 10px;
-  margin: 8px 0 4px;
-  text-transform: none !important;
-  letter-spacing: 0 !important;
-  font-size: 13px !important;
-  color: var(--ink) !important;
-  font-weight: 600 !important;
-}
-
-.pump-toggle input {
-  width: auto;
-}
-
 .market-identity small,
 .liquidity-state {
   color: var(--muted);

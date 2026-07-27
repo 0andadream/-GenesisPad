@@ -64,7 +64,7 @@ const EOA_PROGRAM = new Uint8Array(32);
 const EOA_CREATE_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => (index === 31 ? 3 : 0));
 const FAUCET_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 250 : 0);
 const AMM_MINIMUM_LIQUIDITY = 1000n;
-// Pump.fun-style bonding curve (alphanet scale).
+// Bonding curve (alphanet scale).
 // Virtual THRU sets the starting price; 80% of supply sits on the curve.
 const CURVE_VIRTUAL_THRU = 50_000_000n; // 0.05 THRU virtual reserve
 const CURVE_TOKEN_BPS = 8000n; // 80% of minted supply on the curve
@@ -493,7 +493,7 @@ function assertInitialLiquidityAmounts(amountOne, amountTwo) {
   }
 }
 
-/* ─── Pump-style bonding curve ─────────────────────────────────────────── */
+/* ─── Bonding curve ────────────────────────────────────────────────────── */
 
 function isBondingMarket(market) {
   return Boolean(market?.curve) && market.phase !== "amm" && !market.graduated;
@@ -1135,9 +1135,6 @@ async function createToken() {
   const description = document.querySelector("[data-token-description]").value.trim();
   const decimals = Number(document.querySelector("[data-token-decimals]").value);
   const supplyText = document.querySelector("[data-token-supply]").value.trim();
-  const liquidityText = document.querySelector("[data-token-liquidity]")?.value.trim() || "";
-  const pumpMode = document.querySelector("[data-token-pump]")?.checked !== false;
-
   createStatus.textContent = "Validating market details…";
 
   if (!name || !ticker) {
@@ -1153,25 +1150,8 @@ async function createToken() {
     return;
   }
   const supply = supplyText ? BigInt(supplyText) : 0n;
-  let liquidityThru;
-  try {
-    liquidityThru = liquidityText ? parseUnits(liquidityText, NATIVE_THRU_DECIMALS) : 0n;
-  } catch (reason) {
-    createStatus.textContent = reason.message;
-    return;
-  }
-  const liquidityTokens = liquidityThru * PRICE_TOKENS_PER_THRU *
-    (10n ** BigInt(decimals)) / (10n ** BigInt(NATIVE_THRU_DECIMALS));
-  if (liquidityThru > 0n) {
-    try {
-      assertInitialLiquidityAmounts(liquidityTokens, liquidityThru);
-    } catch (reason) {
-      createStatus.textContent = reason.message;
-      return;
-    }
-  }
-  if (liquidityTokens > supply * (10n ** BigInt(decimals))) {
-    createStatus.textContent = `Initial supply must cover ${formatUnits(liquidityTokens, decimals)} ${ticker} for liquidity.`;
+  if (supply <= 0n) {
+    createStatus.textContent = "Initial supply must be greater than zero for a bonding-curve launch.";
     return;
   }
 
@@ -1179,18 +1159,12 @@ async function createToken() {
   try {
     createStatus.textContent = "Preparing your Thru account…";
     await ensureAccountExists((message) => { createStatus.textContent = message; });
-    const wantDirectAmm = !pumpMode && liquidityThru > 0n;
-    const ammProgramAvailable = wantDirectAmm &&
-      (await getAccountSnapshot(GENESIS_AMM_PROGRAM)).exists;
     const nativeBalance = await getAccountSnapshot();
-    const curveGasNeed = pumpMode ? CURVE_GAS_FUND + 2n : 0n;
-    const needBalance = (wantDirectAmm ? liquidityThru + 1n : 0n) + curveGasNeed;
+    const needBalance = CURVE_GAS_FUND + 2n;
     if (nativeBalance.balance < needBalance) {
       throw new Error(
         `Insufficient balance: you have ${formatUnits(nativeBalance.balance, NATIVE_THRU_DECIMALS, 9)} THRU. ` +
-        (pumpMode
-          ? "Claim faucet THRU to fund the bonding-curve gas dust."
-          : "Lower the optional liquidity amount or leave it blank."),
+        "Claim faucet THRU to fund the bonding-curve gas dust.",
       );
     }
 
@@ -1248,31 +1222,13 @@ async function createToken() {
       });
     }
 
-    let poolMetadata = {};
-    let liquidityPendingReason = "";
-    let bondingMeta = {};
-    if (pumpMode && supply > 0n) {
-      bondingMeta = await createBondingCurve({
-        mint,
-        creatorTokenAccount: tokenAccount,
-        decimals,
-        supplyWhole: supply,
-        setStatus: (message) => { createStatus.textContent = message; },
-      });
-    } else if (liquidityThru > 0n) {
-      if (!ammProgramAvailable) {
-        liquidityPendingReason = "The Thru Alphanet AMM program is not deployed yet. No liquidity funds were moved.";
-      } else {
-        poolMetadata = await seedPool({
-          mint,
-          tokenAccount,
-          decimals,
-          thruAmount: liquidityThru,
-          tokenAmount: liquidityTokens,
-          setStatus: (message) => { createStatus.textContent = message; },
-        });
-      }
-    }
+    const bondingMeta = await createBondingCurve({
+      mint,
+      creatorTokenAccount: tokenAccount,
+      decimals,
+      supplyWhole: supply,
+      setStatus: (message) => { createStatus.textContent = message; },
+    });
 
     const market = {
       name,
@@ -1284,32 +1240,26 @@ async function createToken() {
       tokenAccount: tokenAccount.address,
       creator: connectedAccount.address,
       createdAt: Date.now(),
-      mode: pumpMode ? "pump" : "amm",
-      phase: bondingMeta.phase || (liquidityThru > 0n && !liquidityPendingReason ? "amm" : "awaiting"),
+      mode: "curve",
+      phase: bondingMeta.phase || "bonding",
       graduated: false,
-      liquidity: Boolean(poolMetadata.poolAddress) || (liquidityThru > 0n && !liquidityPendingReason),
-      liquidityRequested: liquidityThru > 0n,
-      liquidityPendingReason,
+      liquidity: false,
+      liquidityRequested: false,
+      liquidityPendingReason: "",
       priceTokensPerThru: PRICE_TOKENS_PER_THRU.toString(),
       creatorFeeBps: CREATOR_FEE_BPS,
       protocolFeeBps: PROTOCOL_FEE_BPS,
       protocolTreasury: GENESIS_TREASURY,
       graduationTargetThru: GRADUATION_REAL_THRU.toString(),
       ...bondingMeta,
-      ...poolMetadata,
     };
     const markets = readMarkets();
     markets.unshift(market);
     saveMarkets(markets);
     renderMarkets();
-    createStatus.textContent = market.curve
-      ? `${ticker} launched on a bonding curve (pump-style). Buy/sell until ` +
-        `${formatUnits(GRADUATION_REAL_THRU, NATIVE_THRU_DECIMALS, 9)} THRU is raised, then it graduates. Mint: ${mint.address}`
-      : liquidityPendingReason
-      ? `${ticker} mint is live. ${liquidityPendingReason} Mint: ${mint.address}`
-      : liquidityThru > 0n
-      ? `${ticker} is live and tradeable at launch. Creator LP: ${poolMetadata.creatorLpAccount}`
-      : `${ticker} is live on Thru. Mint: ${mint.address}`;
+    createStatus.textContent =
+      `${ticker} launched on a bonding curve. Buy/sell until ` +
+      `${formatUnits(GRADUATION_REAL_THRU, NATIVE_THRU_DECIMALS, 9)} THRU is raised, then it graduates. Mint: ${mint.address}`;
     createButton.textContent = "Token created on Thru";
   } catch (reason) {
     createStatus.textContent = reason instanceof Error ? reason.message : "Token creation failed.";
@@ -1384,7 +1334,7 @@ function renderMarkets() {
       <div class="token-empty">
         <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
         <h3>The registry is quiet.</h3>
-        <p>Launch a pump-style token to open a bonding curve. Buys and sells run until graduation.</p>
+        <p>Launch a token to open a bonding curve. Buys and sells run until graduation.</p>
         <a href="#create">Create the first market</a>
       </div>`;
     return;
@@ -1654,7 +1604,7 @@ function openTrade(index, side) {
     document.querySelector("[data-trade-status]").textContent =
       `Bonding curve · ${progress.toFixed(1)}% to graduation ` +
       `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU raised). ` +
-      "Like pump.fun: trade the curve until the target, then liquidity seeds the AMM.";
+      "Trade the curve until the target, then liquidity seeds the AMM.";
   } else if (activeTrade.liquidity) {
     document.querySelector("[data-trade-status]").textContent = "Quote updates from the Thru AMM pool.";
   } else if (activeTrade.graduated) {
@@ -1910,7 +1860,7 @@ async function executeTrade() {
     status.textContent = "Preparing your Thru account…";
     await ensureAccountExists((message) => { status.textContent = message; });
 
-    // Pump-style bonding curve path (default for new launches).
+    // Bonding-curve path (default for new launches).
     if (isBondingMarket(activeTrade)) {
       await executeCurveTrade(amount, status);
       return;
