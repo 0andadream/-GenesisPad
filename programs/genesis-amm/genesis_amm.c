@@ -1,5 +1,4 @@
 #include <thru-sdk/c/tn_sdk.h>
-#include <thru-sdk/c/tn_sdk_sha256.h>
 #include <thru-sdk/c/tn_sdk_syscall.h>
 
 #include "genesis_amm_math.h"
@@ -20,21 +19,15 @@
 #define ERR_REENTRANT 20UL
 #define ERR_OVERFLOW 21UL
 #define ERR_POOL_ACCOUNT_SYSCALL 23UL
+#define ERR_LP_MINT_MISSING 24UL
+#define ERR_VAULT_MISSING 25UL
 
 #define POOL_DATA_SIZE 203UL
 #define TOKEN_ACCOUNT_SIZE 73UL
 #define TOKEN_MINT_SIZE 115UL
 #define TOKEN_ACCOUNT_AMOUNT_OFFSET 64UL
 #define TOKEN_MINT_SUPPLY_OFFSET 1UL
-/* Alphanet creation proofs are ~100 bytes. Keep the CPI scratch buffer small so
-   the ThruVM stack cannot fault mid-init (VM -767 with a garbage program code). */
-#define MAX_STATE_PROOF_SIZE 512UL
-#define CPI_MINT_FIXED_SIZE 142UL
-#define CPI_ACCOUNT_FIXED_SIZE 39UL
-#define CPI_BUF_SIZE (CPI_MINT_FIXED_SIZE + MAX_STATE_PROOF_SIZE)
-
-/* Reentrancy is rejected at the entrypoint, so a single static CPI buffer is safe. */
-static uchar g_cpi_buf[CPI_BUF_SIZE];
+#define MAX_STATE_PROOF_SIZE 6144UL
 
 typedef struct __attribute__((packed)) {
   uchar is_initialized;
@@ -129,12 +122,7 @@ static void cpi(ushort token_program, uchar const *data, ulong size,
                 tsdk_invoke_auth_t const *auth) {
   ulong invoke_error = 0;
   ulong result = tsys_invoke(data, size, token_program, auth, &invoke_error);
-  if (result != 0) {
-    tsdk_revert(result);
-  }
-  if (invoke_error != 0) {
-    tsdk_revert(invoke_error);
-  }
+  TSDK_ASSERT_OR_REVERT(result == 0 && invoke_error == 0, ERR_TOKEN_CPI);
 }
 
 static void token_transfer(ushort token_program, ushort source,
@@ -304,46 +292,10 @@ static void handle_swap(uchar const *data, ulong size) {
                  quote.amount_out, auth);
 }
 
-static void token_initialize_mint(
-  ushort token_program, ushort mint, ushort pool, uchar const seed[32],
-  uchar const *proof, ulong proof_size
-) {
-  TSDK_ASSERT_OR_REVERT(proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
-  ulong ix_size = CPI_MINT_FIXED_SIZE + proof_size;
-  TSDK_ASSERT_OR_REVERT(ix_size <= CPI_BUF_SIZE, ERR_BAD_SIZE);
-  memset(g_cpi_buf, 0, ix_size);
-  g_cpi_buf[0] = 0U;
-  TSDK_STORE(ushort, g_cpi_buf + 1, mint);
-  g_cpi_buf[3] = 6U;
-  memcpy(g_cpi_buf + 4, key_at(pool), 32);
-  memcpy(g_cpi_buf + 36, key_at(pool), 32);
-  /* freeze authority remains the zero pubkey; has_freeze_authority is zero */
-  g_cpi_buf[101] = 6U;
-  memcpy(g_cpi_buf + 102, "GEN-LP", 6);
-  memcpy(g_cpi_buf + 110, seed, 32);
-  memcpy(g_cpi_buf + CPI_MINT_FIXED_SIZE, proof, proof_size);
-  cpi(token_program, g_cpi_buf, ix_size, NULL);
-}
-
-static void token_initialize_account(
-  ushort token_program, ushort account, ushort mint, ushort pool,
-  uchar const seed[32], uchar const *proof, ulong proof_size
-) {
-  TSDK_ASSERT_OR_REVERT(proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
-  ulong ix_size = CPI_ACCOUNT_FIXED_SIZE + proof_size;
-  TSDK_ASSERT_OR_REVERT(ix_size <= CPI_BUF_SIZE, ERR_BAD_SIZE);
-  memset(g_cpi_buf, 0, ix_size);
-  g_cpi_buf[0] = 1U;
-  TSDK_STORE(ushort, g_cpi_buf + 1, account);
-  TSDK_STORE(ushort, g_cpi_buf + 3, mint);
-  TSDK_STORE(ushort, g_cpi_buf + 5, pool);
-  memcpy(g_cpi_buf + 7, seed, 32);
-  memcpy(g_cpi_buf + CPI_ACCOUNT_FIXED_SIZE, proof, proof_size);
-  cpi(token_program, g_cpi_buf, ix_size, NULL);
-}
-
 static void handle_init(uchar const *data, ulong size) {
-  /* Eight account indices, fee, LP seed, four proof sizes, then proofs. */
+  /* Eight account indices, fee, pool seed, four proof sizes, then proofs.
+     LP mint and vault accounts are created by the website via the token
+     program; this instruction only creates/resizes the pool metadata. */
   TSDK_ASSERT_OR_REVERT(size >= 82UL, ERR_BAD_SIZE);
   ushort payer = load_u16(data);
   ushort pool_idx = load_u16(data + 2);
@@ -365,6 +317,10 @@ static void handle_init(uchar const *data, ulong size) {
   total += one_proof_size;
   total += two_proof_size;
   TSDK_ASSERT_OR_REVERT(total == size, ERR_BAD_SIZE);
+  TSDK_ASSERT_OR_REVERT(pool_proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
+  TSDK_ASSERT_OR_REVERT(lp_proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
+  TSDK_ASSERT_OR_REVERT(one_proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
+  TSDK_ASSERT_OR_REVERT(two_proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
 
   require_idx(payer);
   require_idx(pool_idx);
@@ -383,10 +339,32 @@ static void handle_init(uchar const *data, ulong size) {
   );
 
   uchar const *pool_proof = data + 82;
-  uchar const *lp_proof = pool_proof + pool_proof_size;
-  uchar const *one_proof = lp_proof + lp_proof_size;
-  uchar const *two_proof = one_proof + one_proof_size;
 
+  /* LP mint and vaults must already exist (created client-side via token program). */
+  TSDK_ASSERT_OR_REVERT(tsdk_account_exists(lp_mint), ERR_LP_MINT_MISSING);
+  TSDK_ASSERT_OR_REVERT(tsdk_account_exists(vault_one), ERR_VAULT_MISSING);
+  TSDK_ASSERT_OR_REVERT(tsdk_account_exists(vault_two), ERR_VAULT_MISSING);
+  require_token_owner(lp_mint, token_program, ERR_LP_MINT_MISMATCH);
+  require_token_owner(vault_one, token_program, ERR_VAULT_MISMATCH);
+  require_token_owner(vault_two, token_program, ERR_VAULT_MISMATCH);
+  {
+    tsdk_account_meta_t const *lp_meta = tsdk_get_account_meta(lp_mint);
+    TSDK_ASSERT_OR_REVERT(
+      lp_meta && lp_meta->data_sz == TOKEN_MINT_SIZE, ERR_LP_MINT_MISMATCH
+    );
+  }
+  {
+    tsdk_account_meta_t const *v1 = tsdk_get_account_meta(vault_one);
+    tsdk_account_meta_t const *v2 = tsdk_get_account_meta(vault_two);
+    TSDK_ASSERT_OR_REVERT(
+      v1 && v1->data_sz == TOKEN_ACCOUNT_SIZE, ERR_VAULT_MISMATCH
+    );
+    TSDK_ASSERT_OR_REVERT(
+      v2 && v2->data_sz == TOKEN_ACCOUNT_SIZE, ERR_VAULT_MISMATCH
+    );
+  }
+
+  /* Match Thru's counter example: create → writable → resize → write in one tx. */
   if (!tsdk_account_exists(pool_idx)) {
     ulong create_rc = tsys_account_create(
       pool_idx, pool_seed, pool_proof, pool_proof_size
@@ -394,15 +372,16 @@ static void handle_init(uchar const *data, ulong size) {
     if (create_rc != 0) {
       tsdk_revert(create_rc);
     }
-    return;
+  } else {
+    TSDK_ASSERT_OR_REVERT(
+      tsdk_is_account_owned_by_current_program(pool_idx), ERR_ALREADY_INITIALIZED
+    );
+    tsdk_account_meta_t const *pool_meta = tsdk_get_account_meta(pool_idx);
+    TSDK_ASSERT_OR_REVERT(
+      pool_meta && pool_meta->data_sz == 0, ERR_ALREADY_INITIALIZED
+    );
   }
-  TSDK_ASSERT_OR_REVERT(
-    tsdk_is_account_owned_by_current_program(pool_idx), ERR_ALREADY_INITIALIZED
-  );
-  tsdk_account_meta_t const *pool_meta = tsdk_get_account_meta(pool_idx);
-  TSDK_ASSERT_OR_REVERT(
-    pool_meta && pool_meta->data_sz == 0, ERR_ALREADY_INITIALIZED
-  );
+
   {
     ulong writable_rc = tsys_set_account_data_writable(pool_idx);
     if (writable_rc != 0) {
@@ -414,28 +393,8 @@ static void handle_init(uchar const *data, ulong size) {
     }
   }
 
-  uchar lp_seed_input[39];
-  uchar lp_seed[32];
-  memcpy(lp_seed_input, key_at(pool_idx), 32);
-  memcpy(lp_seed_input + 32, "lp_mint", 7);
-  tsdk_sha256_hash(lp_seed_input, sizeof(lp_seed_input), lp_seed);
-  token_initialize_mint(
-    token_program, lp_mint, pool_idx, lp_seed, lp_proof, lp_proof_size
-  );
-  uchar vault_one_seed[32] = {0};
-  uchar vault_two_seed[32] = {0};
-  vault_one_seed[0] = 1U;
-  vault_two_seed[0] = 2U;
-  token_initialize_account(
-    token_program, vault_one, mint_one, pool_idx,
-    vault_one_seed, one_proof, one_proof_size
-  );
-  token_initialize_account(
-    token_program, vault_two, mint_two, pool_idx,
-    vault_two_seed, two_proof, two_proof_size
-  );
-
   pool_t *pool = (pool_t *)tsdk_get_account_data_ptr(pool_idx);
+  TSDK_ASSERT_OR_REVERT(pool != NULL, ERR_ACCOUNT_WRITABLE);
   memset(pool, 0, sizeof(*pool));
   pool->is_initialized = 1U;
   pool->swap_fee_bps = fee_bps;

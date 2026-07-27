@@ -9,6 +9,7 @@ import {
   parseTokenAccountData,
 } from "@thru/programs/token";
 import {
+  AMM_LP_DECIMALS,
   createAddLiquidityInstruction,
   createInitPoolInstruction,
   createSwapInstruction,
@@ -254,9 +255,13 @@ async function submitTransaction(rawTransaction) {
       let explanation;
       if (result.vmError === -766) {
         explanation = "The requested program account is not deployed on this Thru network.";
+      } else if (userCode === 24) {
+        explanation = "LP mint is missing. Refresh and try creating the pool again.";
+      } else if (userCode === 25) {
+        explanation = "Pool vault accounts are missing. Refresh and try again.";
       } else if (result.vmError === -767 && userCode != null && Math.abs(userCode) > 1000) {
         explanation =
-          "Thru VM faulted while initializing the AMM pool (likely a program memory issue). The Genesis AMM has been patched — hard-refresh and try again.";
+          "Thru VM faulted while initializing the AMM pool. Hard-refresh and try a new token launch.";
       } else if (userCode != null && ammErrors[userCode]) {
         explanation = ammErrors[userCode];
       } else if (userCode != null && syscallErrors[userCode]) {
@@ -422,6 +427,19 @@ async function wrapThru(amount, destination) {
   });
 }
 
+function lpMintRawSeed() {
+  // Token mints are derived as PDA(token, hash(creator, seed)). Use a fixed
+  // 32-byte seed so the website and token program agree.
+  const seed = new Uint8Array(32);
+  const label = new TextEncoder().encode("lp_mint");
+  seed.set(label);
+  return seed;
+}
+
+function bytesToHexSeed(bytes) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function derivePool(mintAddress) {
   const pool = deriveAmmPoolAddresses(client, {
     ammProgramAddress: GENESIS_AMM_PROGRAM,
@@ -429,18 +447,52 @@ function derivePool(mintAddress) {
     mintBAddress: WTHRU_MINT,
     swapFeeBps: CREATOR_FEE_BPS,
   });
-  const lpMint = client.helpers.deriveProgramAddress({
-    programAddress: TOKEN_PROGRAM,
-    seed: pool.lpMintSeed,
-    ephemeral: false,
-  });
+  const lpRawSeed = lpMintRawSeed();
+  // Creator/mint authority is the pool PDA; token program hashes creator+seed.
+  const lpMint = deriveMintAddress(
+    client, pool.poolAddress, bytesToHexSeed(lpRawSeed), TOKEN_PROGRAM,
+  );
   const vaultOne = deriveTokenAccountAddress(
     client, pool.poolAddress, pool.mintOneAddress, TOKEN_PROGRAM, pool.vaultOneSeed,
   );
   const vaultTwo = deriveTokenAccountAddress(
     client, pool.poolAddress, pool.mintTwoAddress, TOKEN_PROGRAM, pool.vaultTwoSeed,
   );
-  return { ...pool, lpMint, vaultOne, vaultTwo };
+  return { ...pool, lpMint, lpRawSeed, vaultOne, vaultTwo };
+}
+
+async function ensureLpMint(pool, setStatus) {
+  if ((await getAccountSnapshot(pool.lpMint.address)).exists) return pool.lpMint;
+  setStatus("Creating the LP mint…");
+  const proof = await client.proofs.generate({
+    address: pool.lpMint.address, proofType: 1,
+  });
+  await submitTokenInstruction({
+    accounts: { readWrite: [pool.lpMint.address] },
+    instructionData: createInitializeMintInstruction({
+      mintAccountBytes: pool.lpMint.bytes,
+      decimals: AMM_LP_DECIMALS,
+      mintAuthorityBytes: pool.poolBytes,
+      freezeAuthorityBytes: null,
+      ticker: "GEN-LP",
+      seedHex: bytesToHexSeed(pool.lpRawSeed),
+      stateProof: proof.proof,
+      creatorBytes: pool.poolBytes,
+    }),
+  });
+  await waitForAccount(pool.lpMint.address, "LP mint");
+  return pool.lpMint;
+}
+
+async function ensurePoolVaults(pool, setStatus) {
+  setStatus("Creating pool vault accounts…");
+  const vaultOne = await ensureTokenAccount(
+    pool.poolAddress, pool.mintOneAddress, pool.vaultOneSeed,
+  );
+  const vaultTwo = await ensureTokenAccount(
+    pool.poolAddress, pool.mintTwoAddress, pool.vaultTwoSeed,
+  );
+  return { vaultOne, vaultTwo };
 }
 
 async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount, setStatus }) {
@@ -449,27 +501,27 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
   setStatus(`Wrapping ${formatUnits(thruAmount, NATIVE_THRU_DECIMALS, 9)} THRU…`);
   await wrapThru(thruAmount, creatorWthru);
 
-  if (!(await getAccountSnapshot(pool.poolAddress)).exists) {
-    setStatus("Creating the AMM pool account…");
-    const poolProof = await client.proofs.generate({
-      address: pool.poolAddress, proofType: 1,
-    });
-    const proofSlot = poolProof.slot;
-    const [lpProof, vaultOneProof, vaultTwoProof] = await Promise.all([
-      client.proofs.generate({
-        address: pool.lpMint.address, proofType: 1, targetSlot: proofSlot,
-      }),
-      client.proofs.generate({
-        address: pool.vaultOne.address, proofType: 1, targetSlot: proofSlot,
-      }),
-      client.proofs.generate({
-        address: pool.vaultTwo.address, proofType: 1, targetSlot: proofSlot,
-      }),
-    ]);
-    const proofSlots = [poolProof.slot, lpProof.slot, vaultOneProof.slot, vaultTwoProof.slot];
-    if (proofSlots.some((slot) => slot !== proofSlots[0])) {
-      throw new Error("Thru returned creation proofs from different slots. Please try again.");
+  // Create LP mint + vaults first (token program). Pool PDA is only a pubkey here.
+  await ensureLpMint(pool, setStatus);
+  await ensurePoolVaults(pool, setStatus);
+
+  const poolSnap = await getAccountSnapshot(pool.poolAddress);
+  let poolReady = false;
+  if (poolSnap.exists) {
+    try {
+      const meta = await client.accounts.get(pool.poolAddress, { view: AccountView.META_ONLY });
+      poolReady = Number(meta.meta?.dataSize ?? 0) >= 203;
+    } catch {
+      poolReady = false;
     }
+  }
+
+  if (!poolReady) {
+    setStatus("Initializing the 0.21% creator-fee AMM pool…");
+    const needsCreate = !poolSnap.exists;
+    const poolProof = needsCreate
+      ? await client.proofs.generate({ address: pool.poolAddress, proofType: 1 })
+      : { proof: new Uint8Array(), slot: await currentSlot() };
     await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
       accounts: {
         readWrite: [
@@ -489,55 +541,13 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
         swapFeeBps: CREATOR_FEE_BPS,
         lpMintSeed: pool.poolSeed,
         poolStateProof: poolProof.proof,
-        lpMintStateProof: lpProof.proof,
-        vaultOneStateProof: vaultOneProof.proof,
-        vaultTwoStateProof: vaultTwoProof.proof,
+        lpMintStateProof: new Uint8Array(),
+        vaultOneStateProof: new Uint8Array(),
+        vaultTwoStateProof: new Uint8Array(),
       }),
       startSlot: poolProof.slot,
     });
     await waitForAccount(pool.poolAddress, "AMM pool");
-  }
-
-  const poolAccount = await client.accounts.get(pool.poolAddress, { view: AccountView.META_ONLY });
-  if (Number(poolAccount.meta?.dataSize ?? 0) === 0) {
-    setStatus("Initializing the 0.21% creator-fee AMM pool…");
-    const lpProof = await client.proofs.generate({
-      address: pool.lpMint.address, proofType: 1,
-    });
-    const proofSlot = lpProof.slot;
-    const [vaultOneProof, vaultTwoProof] = await Promise.all([
-      client.proofs.generate({
-        address: pool.vaultOne.address, proofType: 1, targetSlot: proofSlot,
-      }),
-      client.proofs.generate({
-        address: pool.vaultTwo.address, proofType: 1, targetSlot: proofSlot,
-      }),
-    ]);
-    await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
-      accounts: {
-        readWrite: [
-          pool.poolAddress, pool.lpMint.address, pool.vaultOne.address, pool.vaultTwo.address,
-        ],
-        readOnly: [pool.mintOneAddress, pool.mintTwoAddress, TOKEN_PROGRAM],
-      },
-      instructionData: createInitPoolInstruction({
-        payerAccountBytes: connectedAccount.publicKey,
-        poolAccountBytes: pool.poolBytes,
-        lpMintAccountBytes: pool.lpMint.bytes,
-        vaultOneAccountBytes: pool.vaultOne.bytes,
-        vaultTwoAccountBytes: pool.vaultTwo.bytes,
-        mintOneAccountBytes: pool.mintOneBytes,
-        mintTwoAccountBytes: pool.mintTwoBytes,
-        tokenProgramAccountBytes: Pubkey.from(TOKEN_PROGRAM).toBytes(),
-        swapFeeBps: CREATOR_FEE_BPS,
-        lpMintSeed: pool.poolSeed,
-        poolStateProof: new Uint8Array(),
-        lpMintStateProof: lpProof.proof,
-        vaultOneStateProof: vaultOneProof.proof,
-        vaultTwoStateProof: vaultTwoProof.proof,
-      }),
-      startSlot: proofSlot,
-    });
   }
 
   setStatus("Depositing the opening liquidity…");
