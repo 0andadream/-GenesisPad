@@ -42,8 +42,9 @@ const client = createThruClient({
 });
 const FAUCET_VAULT = "taxoImN8fTEOxXYnvgC6JZ0lN0n0qvZERwz_vlOjX3MkIn";
 const CHAIN_ID = 1;
-// Native THRU has 9 decimals. Claim 10,000 whole THRU per faucet pull (not 10,000 base units).
-const FAUCET_AMOUNT = 10_000n * (10n ** 9n);
+// Alphanet faucet program max is 10_000 base units per withdraw (0.00001 THRU).
+const FAUCET_AMOUNT = 10_000n;
+const FAUCET_CLAIMS_PER_CLICK = 25;
 const TOKEN_PROGRAM = "taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKqq";
 const WTHRU_PROGRAM = "taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcH";
 const WTHRU_MINT = "tacdgTUGud8OgzN5HnVVv4u3x82UBe8ciZAtjOLJZE_SNg";
@@ -222,7 +223,7 @@ async function buildAndSign(options) {
   return rawTransaction;
 }
 
-async function submitTransaction(rawTransaction) {
+async function submitTransaction(rawTransaction, { programLabel = "Transaction" } = {}) {
   for await (const update of client.transactions.sendAndTrack(rawTransaction, { timeoutMs: 60000 })) {
     const result = update.executionResult;
     if (result?.vmError) {
@@ -244,6 +245,8 @@ async function submitTransaction(rawTransaction) {
         17: "The supplied liquidity amounts are outside the pool bounds.",
         22: "The AMM derived a different pool address than the website.",
         23: "Thru rejected the AMM pool account creation proof.",
+        24: "LP mint is missing. Refresh and try creating the pool again.",
+        25: "Pool vault accounts are missing. Refresh and try again.",
       };
       const syscallErrors = {
         [-8]: "Invalid account index for a Thru syscall.",
@@ -258,20 +261,15 @@ async function submitTransaction(rawTransaction) {
       let explanation;
       if (result.vmError === -766) {
         explanation = "The requested program account is not deployed on this Thru network.";
-      } else if (userCode === 24) {
-        explanation = "LP mint is missing. Refresh and try creating the pool again.";
-      } else if (userCode === 25) {
-        explanation = "Pool vault accounts are missing. Refresh and try again.";
       } else if (result.vmError === -767 && userCode != null && Math.abs(userCode) > 1000) {
-        explanation =
-          "Thru VM faulted while initializing the AMM pool. Hard-refresh and try a new token launch.";
-      } else if (userCode != null && ammErrors[userCode]) {
+        explanation = `${programLabel} faulted in the Thru VM. Hard-refresh and try again.`;
+      } else if (programLabel === "AMM" && userCode != null && ammErrors[userCode]) {
         explanation = ammErrors[userCode];
       } else if (userCode != null && syscallErrors[userCode]) {
         explanation = syscallErrors[userCode];
       } else {
         explanation =
-          `Thru rejected the transaction (VM ${result.vmError}, program code ${result.userErrorCode ?? "unknown"}).`;
+          `${programLabel} rejected (VM ${result.vmError}, code ${result.userErrorCode ?? "unknown"}).`;
       }
       throw new Error(explanation);
     }
@@ -283,11 +281,11 @@ async function submitTransaction(rawTransaction) {
   }
 }
 
-async function submitWithNonce(startNonce, builder) {
+async function submitWithNonce(startNonce, builder, options = {}) {
   let nonce = startNonce < 0n ? 0n : startNonce;
   for (let attempt = 0; attempt < 15; attempt += 1) {
     try {
-      await submitTransaction(await builder(nonce));
+      await submitTransaction(await builder(nonce), options);
       return;
     } catch (reason) {
       const message = String(reason?.message || reason);
@@ -342,15 +340,17 @@ async function submitTokenInstruction({ accounts, instructionData }) {
       fee: 0n, nonce, startSlot: slot, expiryAfter: 100,
       computeUnits: 300000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
     },
-  }));
+  }), { programLabel: "Token program" });
 }
 
 async function submitProgramInstruction(
   program,
-  { accounts, instructionData, fee = 0n, startSlot: anchoredStartSlot },
+  { accounts, instructionData, fee = 0n, startSlot: anchoredStartSlot, programLabel },
 ) {
   const snapshot = await getAccountSnapshot();
   const slot = anchoredStartSlot ?? await currentSlot();
+  const label = programLabel
+    || (program === GENESIS_AMM_PROGRAM ? "AMM" : "Program");
   await submitWithNonce(snapshot.nonce, (nonce) => buildAndSign({
     program,
     accounts,
@@ -359,7 +359,7 @@ async function submitProgramInstruction(
       fee, nonce, startSlot: slot, expiryAfter: 100,
       computeUnits: 500000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
     },
-  }));
+  }), { programLabel: label });
 }
 
 function parseUnits(value, decimals) {
@@ -599,6 +599,7 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
         vaultTwoStateProof: new Uint8Array(),
       }),
       startSlot: poolProof.slot,
+      programLabel: "AMM",
     });
     await waitForAccount(pool.poolAddress, "AMM pool");
   }
@@ -852,41 +853,50 @@ async function claimFaucet() {
   button.disabled = true;
   try {
     await ensureAccountExists(setStatus);
-    setStatus("Signing faucet claim locally…");
     const vault = Pubkey.from(FAUCET_VAULT);
-    const snapshot = await getAccountSnapshot();
-    const slot = await currentSlot();
-    await submitWithNonce(snapshot.nonce, (nonce) => buildAndSign({
-      program: FAUCET_PROGRAM,
-      accounts: { readWrite: [vault] },
-      instructionData: async (context) => {
-        const data = new Uint8Array(16);
-        const view = new DataView(data.buffer);
-        view.setUint32(0, 1, true);
-        view.setUint16(4, context.getAccountIndex(vault), true);
-        view.setUint16(6, context.getAccountIndex(connectedAccount.publicKey), true);
-        view.setBigUint64(8, FAUCET_AMOUNT, true);
-        return data;
-      },
-      header: {
-        fee: 0n, nonce, startSlot: slot, expiryAfter: 100,
-        computeUnits: 300000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
-      },
-    }));
-    setStatus("Claim submitted. Waiting for the Alphanet balance…");
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+    const before = await getAccountSnapshot();
+    let received = 0n;
+    // Alphanet allows max 10_000 base units per withdraw — claim several times per click.
+    for (let claim = 0; claim < FAUCET_CLAIMS_PER_CLICK; claim += 1) {
+      setStatus(`Claiming faucet pull ${claim + 1}/${FAUCET_CLAIMS_PER_CLICK}…`);
+      const snapshot = await getAccountSnapshot();
+      const slot = await currentSlot();
+      await submitWithNonce(snapshot.nonce, (nonce) => buildAndSign({
+        program: FAUCET_PROGRAM,
+        accounts: { readWrite: [vault] },
+        instructionData: async (context) => {
+          const data = new Uint8Array(16);
+          const view = new DataView(data.buffer);
+          view.setUint32(0, 1, true);
+          view.setUint16(4, context.getAccountIndex(vault), true);
+          view.setUint16(6, context.getAccountIndex(connectedAccount.publicKey), true);
+          view.setBigUint64(8, FAUCET_AMOUNT, true);
+          return data;
+        },
+        header: {
+          fee: 0n, nonce, startSlot: slot, expiryAfter: 100,
+          computeUnits: 300000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
+        },
+      }), { programLabel: "Faucet" });
+      received += FAUCET_AMOUNT;
+      await new Promise((resolve) => setTimeout(resolve, 800));
       const updated = await getAccountSnapshot();
       document.querySelector("[data-balance]").textContent =
         `${formatUnits(updated.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
-      if (updated.balance > snapshot.balance) {
-        setStatus("Test tokens received on Thru.");
-        return;
-      }
     }
-    setStatus("Claim confirmed. The balance may take another moment to update.");
+    const after = await getAccountSnapshot();
+    const gained = after.balance > before.balance ? after.balance - before.balance : received;
+    setStatus(
+      `Received about ${formatUnits(gained, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+      `(${FAUCET_CLAIMS_PER_CLICK}×${FAUCET_AMOUNT} base units). Claim again if you need more, ` +
+      "or use faucet.thruscan.net for larger drops.",
+    );
   } catch (reason) {
-    setStatus(`${reason instanceof Error ? reason.message : "Faucet claim failed."} You can also use faucet.thruscan.net.`);
+    const detail = reason instanceof Error ? reason.message : "Faucet claim failed.";
+    setStatus(
+      `${detail} Alphanet faucet max is ${FAUCET_AMOUNT} base units (0.00001 THRU) per pull. ` +
+      "You can also use faucet.thruscan.net.",
+    );
   } finally {
     button.disabled = false;
   }
