@@ -26,7 +26,15 @@
 #define TOKEN_MINT_SIZE 115UL
 #define TOKEN_ACCOUNT_AMOUNT_OFFSET 64UL
 #define TOKEN_MINT_SUPPLY_OFFSET 1UL
-#define MAX_STATE_PROOF_SIZE 6144UL
+/* Alphanet creation proofs are ~100 bytes. Keep the CPI scratch buffer small so
+   the ThruVM stack cannot fault mid-init (VM -767 with a garbage program code). */
+#define MAX_STATE_PROOF_SIZE 512UL
+#define CPI_MINT_FIXED_SIZE 142UL
+#define CPI_ACCOUNT_FIXED_SIZE 39UL
+#define CPI_BUF_SIZE (CPI_MINT_FIXED_SIZE + MAX_STATE_PROOF_SIZE)
+
+/* Reentrancy is rejected at the entrypoint, so a single static CPI buffer is safe. */
+static uchar g_cpi_buf[CPI_BUF_SIZE];
 
 typedef struct __attribute__((packed)) {
   uchar is_initialized;
@@ -121,7 +129,12 @@ static void cpi(ushort token_program, uchar const *data, ulong size,
                 tsdk_invoke_auth_t const *auth) {
   ulong invoke_error = 0;
   ulong result = tsys_invoke(data, size, token_program, auth, &invoke_error);
-  TSDK_ASSERT_OR_REVERT(result == 0 && invoke_error == 0, ERR_TOKEN_CPI);
+  if (result != 0) {
+    tsdk_revert(result);
+  }
+  if (invoke_error != 0) {
+    tsdk_revert(invoke_error);
+  }
 }
 
 static void token_transfer(ushort token_program, ushort source,
@@ -296,19 +309,20 @@ static void token_initialize_mint(
   uchar const *proof, ulong proof_size
 ) {
   TSDK_ASSERT_OR_REVERT(proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
-  uchar ix[1UL + 141UL + MAX_STATE_PROOF_SIZE];
-  memset(ix, 0, 1UL + 141UL + proof_size);
-  ix[0] = 0U;
-  TSDK_STORE(ushort, ix + 1, mint);
-  ix[3] = 6U;
-  memcpy(ix + 4, key_at(pool), 32);
-  memcpy(ix + 36, key_at(pool), 32);
+  ulong ix_size = CPI_MINT_FIXED_SIZE + proof_size;
+  TSDK_ASSERT_OR_REVERT(ix_size <= CPI_BUF_SIZE, ERR_BAD_SIZE);
+  memset(g_cpi_buf, 0, ix_size);
+  g_cpi_buf[0] = 0U;
+  TSDK_STORE(ushort, g_cpi_buf + 1, mint);
+  g_cpi_buf[3] = 6U;
+  memcpy(g_cpi_buf + 4, key_at(pool), 32);
+  memcpy(g_cpi_buf + 36, key_at(pool), 32);
   /* freeze authority remains the zero pubkey; has_freeze_authority is zero */
-  ix[101] = 6U;
-  memcpy(ix + 102, "GEN-LP", 6);
-  memcpy(ix + 110, seed, 32);
-  memcpy(ix + 142, proof, proof_size);
-  cpi(token_program, ix, 142UL + proof_size, NULL);
+  g_cpi_buf[101] = 6U;
+  memcpy(g_cpi_buf + 102, "GEN-LP", 6);
+  memcpy(g_cpi_buf + 110, seed, 32);
+  memcpy(g_cpi_buf + CPI_MINT_FIXED_SIZE, proof, proof_size);
+  cpi(token_program, g_cpi_buf, ix_size, NULL);
 }
 
 static void token_initialize_account(
@@ -316,14 +330,16 @@ static void token_initialize_account(
   uchar const seed[32], uchar const *proof, ulong proof_size
 ) {
   TSDK_ASSERT_OR_REVERT(proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
-  uchar ix[1UL + 38UL + MAX_STATE_PROOF_SIZE];
-  ix[0] = 1U;
-  TSDK_STORE(ushort, ix + 1, account);
-  TSDK_STORE(ushort, ix + 3, mint);
-  TSDK_STORE(ushort, ix + 5, pool);
-  memcpy(ix + 7, seed, 32);
-  memcpy(ix + 39, proof, proof_size);
-  cpi(token_program, ix, 39UL + proof_size, NULL);
+  ulong ix_size = CPI_ACCOUNT_FIXED_SIZE + proof_size;
+  TSDK_ASSERT_OR_REVERT(ix_size <= CPI_BUF_SIZE, ERR_BAD_SIZE);
+  memset(g_cpi_buf, 0, ix_size);
+  g_cpi_buf[0] = 1U;
+  TSDK_STORE(ushort, g_cpi_buf + 1, account);
+  TSDK_STORE(ushort, g_cpi_buf + 3, mint);
+  TSDK_STORE(ushort, g_cpi_buf + 5, pool);
+  memcpy(g_cpi_buf + 7, seed, 32);
+  memcpy(g_cpi_buf + CPI_ACCOUNT_FIXED_SIZE, proof, proof_size);
+  cpi(token_program, g_cpi_buf, ix_size, NULL);
 }
 
 static void handle_init(uchar const *data, ulong size) {
@@ -372,10 +388,12 @@ static void handle_init(uchar const *data, ulong size) {
   uchar const *two_proof = one_proof + one_proof_size;
 
   if (!tsdk_account_exists(pool_idx)) {
-    TSDK_ASSERT_OR_REVERT(
-      tsys_account_create(pool_idx, pool_seed, pool_proof, pool_proof_size) == 0,
-      ERR_POOL_ACCOUNT_SYSCALL
+    ulong create_rc = tsys_account_create(
+      pool_idx, pool_seed, pool_proof, pool_proof_size
     );
+    if (create_rc != 0) {
+      tsdk_revert(create_rc);
+    }
     return;
   }
   TSDK_ASSERT_OR_REVERT(
@@ -385,12 +403,16 @@ static void handle_init(uchar const *data, ulong size) {
   TSDK_ASSERT_OR_REVERT(
     pool_meta && pool_meta->data_sz == 0, ERR_ALREADY_INITIALIZED
   );
-  TSDK_ASSERT_OR_REVERT(
-    tsys_set_account_data_writable(pool_idx) == 0, ERR_ACCOUNT_WRITABLE
-  );
-  TSDK_ASSERT_OR_REVERT(
-    tsys_account_resize(pool_idx, POOL_DATA_SIZE) == 0, ERR_ACCOUNT_RESIZE
-  );
+  {
+    ulong writable_rc = tsys_set_account_data_writable(pool_idx);
+    if (writable_rc != 0) {
+      tsdk_revert(writable_rc);
+    }
+    ulong resize_rc = tsys_account_resize(pool_idx, POOL_DATA_SIZE);
+    if (resize_rc != 0) {
+      tsdk_revert(resize_rc);
+    }
+  }
 
   uchar lp_seed_input[39];
   uchar lp_seed[32];

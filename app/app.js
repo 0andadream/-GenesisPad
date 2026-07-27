@@ -222,7 +222,17 @@ async function submitTransaction(rawTransaction) {
   for await (const update of client.transactions.sendAndTrack(rawTransaction, { timeoutMs: 60000 })) {
     const result = update.executionResult;
     if (result?.vmError) {
+      const userCode = result.userErrorCode == null
+        ? null
+        : Number(result.userErrorCode);
       const ammErrors = {
+        1: "Invalid AMM instruction data.",
+        2: "Unknown AMM instruction.",
+        3: "This AMM pool is already initialized.",
+        4: "This AMM pool is not initialized yet.",
+        5: "Invalid account index in the AMM transaction.",
+        6: "Mint ordering is invalid for this pool.",
+        7: "Wallet is not authorized for this AMM action.",
         8: "The AMM pool account could not be created. Refresh and try again.",
         12: "The AMM pool account could not be resized.",
         13: "The AMM pool account could not be made writable.",
@@ -231,10 +241,30 @@ async function submitTransaction(rawTransaction) {
         22: "The AMM derived a different pool address than the website.",
         23: "Thru rejected the AMM pool account creation proof.",
       };
-      const explanation = result.vmError === -766
-        ? "The requested program account is not deployed on this Thru network."
-        : ammErrors[result.userErrorCode] ||
+      const syscallErrors = {
+        [-8]: "Invalid account index for a Thru syscall.",
+        [-9]: "A required account does not exist yet.",
+        [-10]: "An account was not marked writable in the transaction.",
+        [-15]: "Account already exists.",
+        [-16]: "Pool address does not match the seed.",
+        [-23]: "Invalid state proof. Refresh and try again.",
+        [-32]: "Invalid state-proof length.",
+        [-33]: "State proof slot is stale. Refresh and try again.",
+      };
+      let explanation;
+      if (result.vmError === -766) {
+        explanation = "The requested program account is not deployed on this Thru network.";
+      } else if (result.vmError === -767 && userCode != null && Math.abs(userCode) > 1000) {
+        explanation =
+          "Thru VM faulted while initializing the AMM pool (likely a program memory issue). The Genesis AMM has been patched — hard-refresh and try again.";
+      } else if (userCode != null && ammErrors[userCode]) {
+        explanation = ammErrors[userCode];
+      } else if (userCode != null && syscallErrors[userCode]) {
+        explanation = syscallErrors[userCode];
+      } else {
+        explanation =
           `Thru rejected the transaction (VM ${result.vmError}, program code ${result.userErrorCode ?? "unknown"}).`;
+      }
       throw new Error(explanation);
     }
     if (
