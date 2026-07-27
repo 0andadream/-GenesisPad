@@ -55,8 +55,10 @@ const WTHRU_DECIMALS = 8;
 const CREATOR_FEE_BPS = 21;
 const PROTOCOL_FEE_BPS = 9;
 const PRICE_TOKENS_PER_THRU = 500n;
-const EOA_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 3 : 0);
+// System / EOA program is the all-zero address (not 0x…03).
+const EOA_PROGRAM = new Uint8Array(32);
 const FAUCET_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 250 : 0);
+const AMM_MINIMUM_LIQUIDITY = 1000n;
 let connectedAccount = null;
 let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
@@ -409,7 +411,48 @@ function nativeTransferInstruction(amount) {
   return data;
 }
 
+async function readTokenAmount(address) {
+  const account = await client.accounts.get(address, { view: AccountView.FULL });
+  const raw = account.data?.data ?? account.data;
+  const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(64, true);
+}
+
+/** Integer square root for bigint (floor). */
+function sqrtBigInt(value) {
+  if (value < 0n) throw new Error("sqrt of negative");
+  if (value < 2n) return value;
+  let x0 = value;
+  let x1 = (value >> 1n) + 1n;
+  while (x1 < x0) {
+    x0 = x1;
+    x1 = (x1 + value / x1) >> 1n;
+  }
+  return x0;
+}
+
+function assertInitialLiquidityAmounts(amountOne, amountTwo) {
+  if (amountOne <= 0n || amountTwo <= 0n) {
+    throw new Error("Both pool sides need a positive deposit.");
+  }
+  const root = sqrtBigInt(amountOne * amountTwo);
+  if (root <= AMM_MINIMUM_LIQUIDITY) {
+    throw new Error(
+      "Liquidity is too small for the pool. Seed more THRU (and matching tokens) so " +
+      `√(token×wTHRU) is greater than ${AMM_MINIMUM_LIQUIDITY}.`,
+    );
+  }
+}
+
 async function wrapThru(amount, destination) {
+  if (amount <= 0n) throw new Error("Wrap amount must be positive.");
+  let before = 0n;
+  try {
+    before = await readTokenAmount(destination.address);
+  } catch {
+    before = 0n;
+  }
+  // Native transfer program is the all-zero system program.
   await submitProgramInstruction(EOA_PROGRAM, {
     accounts: { readWrite: [WTHRU_VAULT] },
     instructionData: nativeTransferInstruction(amount),
@@ -431,6 +474,13 @@ async function wrapThru(amount, destination) {
       return data;
     },
   });
+  // wTHRU mints 1:1 with native base units on Alphanet.
+  const after = await readTokenAmount(destination.address);
+  if (after < before + amount) {
+    throw new Error(
+      "Wrapped THRU was not credited. Refresh, check your balance, and try again.",
+    );
+  }
 }
 
 function bytesToHexSeed(bytes) {
@@ -557,6 +607,10 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
   const tokenIsOne = pool.mintOneAddress === mint.address;
   const depositorOne = tokenIsOne ? tokenAccount : creatorWthru;
   const depositorTwo = tokenIsOne ? creatorWthru : tokenAccount;
+  // wTHRU uses the same base units as the native amount transferred into the vault.
+  const amountOne = tokenIsOne ? tokenAmount : thruAmount;
+  const amountTwo = tokenIsOne ? thruAmount : tokenAmount;
+  assertInitialLiquidityAmounts(amountOne, amountTwo);
   await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
     accounts: {
       readWrite: [
@@ -575,8 +629,8 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
       vaultTwoAccountBytes: pool.vaultTwo.bytes,
       lpMintAccountBytes: pool.lpMint.bytes,
       tokenProgramAccountBytes: Pubkey.from(TOKEN_PROGRAM).toBytes(),
-      maxAmountMintOne: tokenIsOne ? tokenAmount : thruAmount,
-      maxAmountMintTwo: tokenIsOne ? thruAmount : tokenAmount,
+      maxAmountMintOne: amountOne,
+      maxAmountMintTwo: amountTwo,
     }),
   });
   return {
@@ -630,9 +684,13 @@ async function createToken() {
   }
   const liquidityTokens = liquidityThru * PRICE_TOKENS_PER_THRU *
     (10n ** BigInt(decimals)) / (10n ** BigInt(NATIVE_THRU_DECIMALS));
-  if (liquidityThru > 0n && liquidityTokens < 1000n) {
-    createStatus.textContent = "Seed a larger amount; the pool requires at least 1,000 raw token units.";
-    return;
+  if (liquidityThru > 0n) {
+    try {
+      assertInitialLiquidityAmounts(liquidityTokens, liquidityThru);
+    } catch (reason) {
+      createStatus.textContent = reason.message;
+      return;
+    }
   }
   if (liquidityTokens > supply * (10n ** BigInt(decimals))) {
     createStatus.textContent = `Initial supply must cover ${formatUnits(liquidityTokens, decimals)} ${ticker} for liquidity.`;
@@ -1031,6 +1089,9 @@ async function provideLiquidity() {
     const tokenIsOne = pool.mintOneAddress === activeLiquidityMarket.mintAddress;
     const depositorOne = tokenIsOne ? userToken : userWthru;
     const depositorTwo = tokenIsOne ? userWthru : userToken;
+    const amountOne = tokenIsOne ? tokenAmount : thruAmount;
+    const amountTwo = tokenIsOne ? thruAmount : tokenAmount;
+    assertInitialLiquidityAmounts(amountOne, amountTwo);
     status.textContent = "Adding liquidity and minting your LP position…";
     await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
       accounts: {
@@ -1050,8 +1111,8 @@ async function provideLiquidity() {
         vaultTwoAccountBytes: pool.vaultTwo.bytes,
         lpMintAccountBytes: pool.lpMint.bytes,
         tokenProgramAccountBytes: Pubkey.from(TOKEN_PROGRAM).toBytes(),
-        maxAmountMintOne: tokenIsOne ? tokenAmount : thruAmount,
-        maxAmountMintTwo: tokenIsOne ? thruAmount : tokenAmount,
+        maxAmountMintOne: amountOne,
+        maxAmountMintTwo: amountTwo,
       }),
     });
     status.textContent = `Liquidity added. LP tokens were issued to ${compactAddress(connectedAccount.address)}.`;
