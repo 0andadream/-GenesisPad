@@ -508,6 +508,77 @@
   font: 400 43px var(--serif);
 }
 
+.token-chart {
+  margin: 0 0 22px;
+  padding: 14px 14px 10px;
+  border: 1px solid var(--line);
+  background: rgba(231, 216, 186, 0.28);
+}
+
+.token-chart-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.token-chart-meta [data-chart-price] {
+  font: 22px var(--serif);
+  color: var(--ink);
+}
+
+.token-chart-meta [data-chart-change] {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+}
+
+.token-chart-meta [data-chart-change].up { color: #1a6b3c; }
+.token-chart-meta [data-chart-change].down { color: #8a2b2b; }
+
+.token-chart-svg {
+  display: block;
+  width: 100%;
+  height: 140px;
+  overflow: visible;
+}
+
+.token-chart-svg .chart-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+
+.token-chart-svg .chart-area {
+  fill: rgba(23, 23, 23, 0.08);
+}
+
+.token-chart-svg .chart-line {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.token-chart-svg .chart-buy {
+  fill: #1a6b3c;
+}
+
+.token-chart-svg .chart-sell {
+  fill: #8a2b2b;
+}
+
+.token-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .04em;
+}
+
 .trade-switch {
   display: grid;
   grid-template-columns: 1fr 1fr;

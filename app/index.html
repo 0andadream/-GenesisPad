@@ -99,6 +99,17 @@
         <button class="wallet-close" type="button" data-trade-close aria-label="Close">×</button>
         <p class="eyebrow">Genesis market</p>
         <h2 id="trade-title" data-trade-title>Trade token</h2>
+        <div class="token-chart" data-token-chart>
+          <div class="token-chart-meta">
+            <span data-chart-price>—</span>
+            <span data-chart-change></span>
+          </div>
+          <svg class="token-chart-svg" data-chart-svg viewBox="0 0 400 140" preserveAspectRatio="none" aria-label="Token price chart"></svg>
+          <div class="token-chart-axis">
+            <span data-chart-range>Price · THRU per token</span>
+            <span data-chart-trades>No trades yet</span>
+          </div>
+        </div>
         <div class="trade-switch"><button class="selected" type="button" data-side="buy">Buy</button><button type="button" data-side="sell">Sell</button></div>
         <label>Amount<input data-trade-amount type="number" min="0" step="any" placeholder="0.00" /></label>
         <div class="trade-balance-row">

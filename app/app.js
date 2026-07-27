@@ -541,6 +541,151 @@ function curveSpotPriceThruPerToken(market) {
   return (c.virtualThru * oneToken) / c.virtualToken;
 }
 
+function formatSpotPrice(priceBaseUnits) {
+  // priceBaseUnits = THRU base units per 1 whole token
+  if (priceBaseUnits <= 0n) return "0 THRU";
+  // Show more precision for tiny alphanet prices
+  return `${formatUnits(priceBaseUnits, NATIVE_THRU_DECIMALS, 12)} THRU`;
+}
+
+function readChart(market) {
+  const points = Array.isArray(market?.chart) ? market.chart : [];
+  return points
+    .map((p) => ({
+      t: Number(p.t) || 0,
+      price: String(p.price || "0"),
+      side: p.side || "seed",
+    }))
+    .filter((p) => BigInt(p.price) >= 0n)
+    .slice(-120);
+}
+
+function appendChartPoint(market, { side, price }) {
+  const chart = readChart(market);
+  chart.push({
+    t: Date.now(),
+    price: price.toString(),
+    side: side || "seed",
+  });
+  return updateMarket(market.mintAddress, {
+    chart: chart.slice(-120),
+    lastPrice: price.toString(),
+    updatedAt: Date.now(),
+  }) || market;
+}
+
+function ensureChartSeed(market) {
+  if (!market?.curve) return market;
+  const existing = readChart(market);
+  if (existing.length > 0) return market;
+  // Seed a short theoretical path so the chart isn't empty at launch.
+  try {
+    const c = readCurve(market);
+    const oneToken = 10n ** BigInt(market.decimals || 0);
+    const startPrice = c.virtualToken > 0n
+      ? (c.virtualThru * oneToken) / c.virtualToken
+      : 0n;
+    const now = Date.now();
+    const seed = [
+      { t: now - 60_000, price: startPrice.toString(), side: "seed" },
+      { t: now, price: startPrice.toString(), side: "seed" },
+    ];
+    return updateMarket(market.mintAddress, {
+      chart: seed,
+      lastPrice: startPrice.toString(),
+      updatedAt: now,
+    }) || market;
+  } catch {
+    return market;
+  }
+}
+
+function renderTokenChart(market) {
+  const svg = document.querySelector("[data-chart-svg]");
+  const priceEl = document.querySelector("[data-chart-price]");
+  const changeEl = document.querySelector("[data-chart-change]");
+  const tradesEl = document.querySelector("[data-chart-trades]");
+  if (!svg || !market) return;
+
+  let m = ensureChartSeed(market);
+  const points = readChart(m);
+  const prices = points.map((p) => BigInt(p.price));
+  const last = prices.length ? prices[prices.length - 1] : curveSpotPriceThruPerToken(m);
+  const first = prices.length ? prices[0] : last;
+
+  if (priceEl) priceEl.textContent = formatSpotPrice(last);
+  if (changeEl) {
+    if (first > 0n && last !== first) {
+      const up = last > first;
+      const delta = up ? last - first : first - last;
+      const bps = (delta * 10000n) / first;
+      const pct = (Number(bps) / 100).toFixed(2);
+      changeEl.textContent = `${up ? "+" : "−"}${pct}%`;
+      changeEl.classList.toggle("up", up);
+      changeEl.classList.toggle("down", !up);
+    } else {
+      changeEl.textContent = "0.00%";
+      changeEl.classList.remove("up", "down");
+    }
+  }
+  if (tradesEl) {
+    const realTrades = points.filter((p) => p.side === "buy" || p.side === "sell").length;
+    tradesEl.textContent = realTrades
+      ? `${realTrades} trade${realTrades === 1 ? "" : "s"}`
+      : "No trades yet";
+  }
+
+  const W = 400;
+  const H = 140;
+  const padX = 8;
+  const padY = 12;
+  const innerW = W - padX * 2;
+  const innerH = H - padY * 2;
+
+  let minP = prices[0] || 0n;
+  let maxP = prices[0] || 1n;
+  for (const p of prices) {
+    if (p < minP) minP = p;
+    if (p > maxP) maxP = p;
+  }
+  if (maxP === minP) {
+    maxP = minP + 1n;
+  }
+
+  const n = Math.max(points.length, 2);
+  const coords = points.map((p, i) => {
+    const x = padX + (innerW * i) / Math.max(n - 1, 1);
+    const span = maxP - minP;
+    const yRatio = Number(((BigInt(p.price) - minP) * 10000n) / span) / 10000;
+    const y = padY + innerH * (1 - yRatio);
+    return { x, y, side: p.side };
+  });
+
+  // If only one point, duplicate for a flat line.
+  if (coords.length === 1) {
+    coords.push({ x: W - padX, y: coords[0].y, side: coords[0].side });
+  }
+
+  const lineD = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
+  const areaD = `${lineD} L${coords[coords.length - 1].x.toFixed(1)},${(H - padY).toFixed(1)} L${coords[0].x.toFixed(1)},${(H - padY).toFixed(1)} Z`;
+
+  const dots = coords
+    .filter((c) => c.side === "buy" || c.side === "sell")
+    .map((c) =>
+      `<circle class="chart-${c.side}" cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.2"></circle>`
+    )
+    .join("");
+
+  svg.innerHTML = `
+    <line class="chart-grid" x1="${padX}" y1="${padY}" x2="${W - padX}" y2="${padY}"></line>
+    <line class="chart-grid" x1="${padX}" y1="${H / 2}" x2="${W - padX}" y2="${H / 2}"></line>
+    <line class="chart-grid" x1="${padX}" y1="${H - padY}" x2="${W - padX}" y2="${H - padY}"></line>
+    <path class="chart-area" d="${areaD}"></path>
+    <path class="chart-line" d="${lineD}"></path>
+    ${dots}
+  `;
+}
+
 function quoteCurveBuy(market, thruIn) {
   if (thruIn <= 0n) throw new Error("Enter an amount greater than zero.");
   const c = readCurve(market);
@@ -888,11 +1033,19 @@ async function createBondingCurve({ mint, creatorTokenAccount, decimals, supplyW
 
   const virtualThru = CURVE_VIRTUAL_THRU;
   const virtualToken = curveTokens;
+  const oneToken = 10n ** BigInt(decimals);
+  const startPrice = virtualToken > 0n ? (virtualThru * oneToken) / virtualToken : 0n;
+  const now = Date.now();
 
   return {
     phase: "bonding",
     graduated: false,
     liquidity: false,
+    lastPrice: startPrice.toString(),
+    chart: [
+      { t: now - 60_000, price: startPrice.toString(), side: "seed" },
+      { t: now, price: startPrice.toString(), side: "seed" },
+    ],
     curve: {
       address: curveSigner.address,
       privateKeyHex: bytesToHex(curveSigner.privateKey),
@@ -1752,6 +1905,7 @@ async function openTrade(index, side) {
   document.querySelectorAll("[data-side]").forEach((button) => button.classList.toggle("selected", button.dataset.side === side));
   document.querySelector("[data-trade-amount]").value = "";
   document.querySelector("[data-trade-quote]").textContent = "—";
+  renderTokenChart(activeTrade);
   await refreshTradeBalances();
 }
 
@@ -1938,6 +2092,20 @@ async function executeCurveTrade(amount, status) {
       programLabel: "Curve buy fill",
     });
     let updated = applyCurveState(market, quote.next);
+    const nextMarket = {
+      ...(updated || market),
+      curve: {
+        ...(updated || market).curve,
+        virtualThru: quote.next.virtualThru.toString(),
+        virtualToken: quote.next.virtualToken.toString(),
+        realThru: quote.next.realThru.toString(),
+        realToken: quote.next.realToken.toString(),
+      },
+    };
+    updated = appendChartPoint(nextMarket, {
+      side: "buy",
+      price: curveSpotPriceThruPerToken(nextMarket),
+    }) || nextMarket;
     status.textContent =
       `Bought ${formatUnits(quote.tokensOut, market.decimals)} ${market.ticker} ` +
       `(fee ${formatUnits(quote.fee, NATIVE_THRU_DECIMALS, 9)} THRU).`;
@@ -1948,6 +2116,7 @@ async function executeCurveTrade(amount, status) {
         : " Market graduated — public curve trading continues.";
     }
     activeTrade = updated || readMarkets().find((m) => m.mintAddress === market.mintAddress);
+    renderTokenChart(activeTrade);
     renderMarkets();
     await refreshTradeBalances();
     await refreshBalance();
@@ -1965,11 +2134,26 @@ async function executeCurveTrade(amount, status) {
     fee: 0n,
     programLabel: "Curve sell payout",
   });
-  const updated = applyCurveState(market, quote.next);
+  let updated = applyCurveState(market, quote.next);
+  const nextMarket = {
+    ...(updated || market),
+    curve: {
+      ...(updated || market).curve,
+      virtualThru: quote.next.virtualThru.toString(),
+      virtualToken: quote.next.virtualToken.toString(),
+      realThru: quote.next.realThru.toString(),
+      realToken: quote.next.realToken.toString(),
+    },
+  };
+  updated = appendChartPoint(nextMarket, {
+    side: "sell",
+    price: curveSpotPriceThruPerToken(nextMarket),
+  }) || nextMarket;
   activeTrade = updated || market;
   status.textContent =
     `Sold for ${formatUnits(quote.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
     `(fee ${formatUnits(quote.fee, NATIVE_THRU_DECIMALS, 9)} THRU).`;
+  renderTokenChart(activeTrade);
   renderMarkets();
   await refreshTradeBalances();
   await refreshBalance();
