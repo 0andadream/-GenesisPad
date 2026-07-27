@@ -72,6 +72,8 @@ const CURVE_TRADE_FEE_BPS = 100n; // 1% fee on buys/sells
 // Graduate after this much real THRU is bought into the curve (faucet-friendly).
 const GRADUATION_REAL_THRU = 2_000_000n; // 0.002 THRU raised
 const CURVE_GAS_FUND = 50_000n; // native dust so the curve account can pay fees
+// Native EOA transfers charge this fee in the transaction header (must leave headroom).
+const NATIVE_TRANSFER_FEE = 1n;
 let connectedAccount = null;
 let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
@@ -274,13 +276,28 @@ async function buildAndSign(options) {
   return rawTransaction;
 }
 
+/** Decode Thru userErrorCode (often unsigned i64 wire form, e.g. 2^64-38 → -38). */
+function normalizeUserErrorCode(code) {
+  if (code == null || code === "") return null;
+  try {
+    let value = typeof code === "bigint" ? code : BigInt(String(code).trim());
+    // Unsigned 64-bit values with the high bit set are signed i64 negatives.
+    if (value >= 0x8000000000000000n) {
+      value -= 0x10000000000000000n;
+    }
+    const asNumber = Number(value);
+    return Number.isSafeInteger(asNumber) ? asNumber : null;
+  } catch {
+    const asNumber = Number(code);
+    return Number.isFinite(asNumber) ? asNumber : null;
+  }
+}
+
 async function submitTransaction(rawTransaction, { programLabel = "Transaction" } = {}) {
   for await (const update of client.transactions.sendAndTrack(rawTransaction, { timeoutMs: 60000 })) {
     const result = update.executionResult;
     if (result?.vmError) {
-      const userCode = result.userErrorCode == null
-        ? null
-        : Number(result.userErrorCode);
+      const userCode = normalizeUserErrorCode(result.userErrorCode);
       const ammErrors = {
         1: "Invalid AMM instruction data.",
         2: "Unknown AMM instruction.",
@@ -308,6 +325,8 @@ async function submitTransaction(rawTransaction, { programLabel = "Transaction" 
         [-23]: "Invalid state proof. Refresh and try again.",
         [-32]: "Invalid state-proof length.",
         [-33]: "State proof slot is stale. Refresh and try again.",
+        // Thru VM: balance < transfer amount + transaction fee.
+        [-38]: "Insufficient THRU balance (need amount + network fee). Use Max or lower the amount.",
       };
       let explanation;
       if (result.vmError === -766) {
@@ -319,8 +338,11 @@ async function submitTransaction(rawTransaction, { programLabel = "Transaction" 
       } else if (userCode != null && syscallErrors[userCode]) {
         explanation = syscallErrors[userCode];
       } else {
+        const codeLabel = userCode != null
+          ? userCode
+          : (result.userErrorCode ?? "unknown");
         explanation =
-          `${programLabel} rejected (VM ${result.vmError}, code ${result.userErrorCode ?? "unknown"}).`;
+          `${programLabel} rejected (VM ${result.vmError}, code ${codeLabel}).`;
       }
       throw new Error(explanation);
     }
@@ -1353,7 +1375,7 @@ async function fundCurveAccount(curveAddress, amount = CURVE_GAS_FUND) {
   await submitProgramInstruction(EOA_PROGRAM, {
     accounts: { readWrite: [curveAddress] },
     instructionData: nativeTransferInstruction(amount),
-    fee: 1n,
+    fee: NATIVE_TRANSFER_FEE,
     programLabel: "Fund curve",
   });
 }
@@ -1442,7 +1464,7 @@ async function wrapThru(amount, destination) {
   await submitProgramInstruction(EOA_PROGRAM, {
     accounts: { readWrite: [WTHRU_VAULT] },
     instructionData: nativeTransferInstruction(amount),
-    fee: 1n,
+    fee: NATIVE_TRANSFER_FEE,
     programLabel: "Native transfer",
   });
   await submitProgramInstruction(WTHRU_PROGRAM, {
@@ -2078,14 +2100,17 @@ async function sendThru() {
   button.disabled = true;
   try {
     const snapshot = await getAccountSnapshot();
-    if (snapshot.balance < amount + 1n) {
-      throw new Error(`Insufficient balance. Available: ${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU.`);
+    if (snapshot.balance < amount + NATIVE_TRANSFER_FEE) {
+      throw new Error(
+        `Insufficient balance. Need ${formatUnits(amount + NATIVE_TRANSFER_FEE, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+        `(incl. fee); available: ${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU.`,
+      );
     }
     status.textContent = `Sending ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU…`;
     await submitProgramInstruction(EOA_PROGRAM, {
       accounts: { readWrite: [recipient] },
       instructionData: nativeTransferInstruction(amount),
-      fee: 1n,
+      fee: NATIVE_TRANSFER_FEE,
     });
     status.textContent = `Sent ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU to ${compactAddress(recipient.toThruFmt())}.`;
     await refreshBalance();
@@ -2433,13 +2458,24 @@ async function executeCurveTrade(amount, status) {
 
   if (activeSide === "buy") {
     const quote = quoteCurveBuy(market, amount);
+    // Preflight: native transfer needs amount + header fee (NATIVE_TRANSFER_FEE).
+    // Missing this is VM -765 / userErrorCode 2^64-38 (INSUFFICIENT_BALANCE).
+    const snapshot = await getAccountSnapshot();
+    const need = amount + NATIVE_TRANSFER_FEE;
+    if (snapshot.balance < need) {
+      throw new Error(
+        `Insufficient THRU for curve buy. Need ${formatUnits(need, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+        `(${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} + ${NATIVE_TRANSFER_FEE} fee), ` +
+        `have ${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)}. Use Max or lower the amount.`,
+      );
+    }
     status.textContent =
       `Buying ≈ ${formatUnits(quote.tokensOut, market.decimals)} ${market.ticker} on the bonding curve…`;
     // 1) User pays native THRU into the curve vault.
     await submitProgramInstruction(EOA_PROGRAM, {
       accounts: { readWrite: [curveSigner.address] },
       instructionData: nativeTransferInstruction(amount),
-      fee: 1n,
+      fee: NATIVE_TRANSFER_FEE,
       programLabel: "Curve buy payment",
     });
     // 2) Curve vault releases tokens to the buyer.
@@ -2622,8 +2658,10 @@ document.querySelector("[data-trade-max]")?.addEventListener("click", () => {
   const input = document.querySelector("[data-trade-amount]");
   if (!input) return;
   if (activeSide === "buy") {
-    // Leave 1 base unit for fee when possible.
-    const spendable = tradeBalances.thru > 1n ? tradeBalances.thru - 1n : 0n;
+    // Leave NATIVE_TRANSFER_FEE so amount + fee fits on-chain (avoids -38).
+    const spendable = tradeBalances.thru > NATIVE_TRANSFER_FEE
+      ? tradeBalances.thru - NATIVE_TRANSFER_FEE
+      : 0n;
     input.value = formatUnits(spendable, NATIVE_THRU_DECIMALS, 9);
   } else {
     // Cap by vault THRU depth so Max never quotes an unfundable sell.
