@@ -200,99 +200,128 @@ static void pool_auth(ushort pool_idx, uchar storage[24],
 }
 
 static void handle_add(uchar const *data, ulong size) {
-  TSDK_ASSERT_OR_REVERT(size == sizeof(add_ix_t), ERR_BAD_SIZE);
-  add_ix_t const *ix = (add_ix_t const *)data;
-  require_idx(ix->user);
-  TSDK_ASSERT_OR_REVERT(tsdk_is_account_authorized_by_idx(ix->user), ERR_UNAUTHORIZED);
-  pool_t const *pool = load_pool(ix->pool);
-  validate_common(pool, ix->pool, ix->vault_one, ix->vault_two,
-                  ix->lp_mint, ix->token_program);
+  /* Load fields with explicit unaligned reads — packed structs with
+     u64 at offset 18 are unsafe to access via pointer cast on ThruVM. */
+  TSDK_ASSERT_OR_REVERT(size == 34UL, ERR_BAD_SIZE);
+  ushort pool_idx = load_u16(data + 0);
+  ushort user = load_u16(data + 2);
+  ushort user_one = load_u16(data + 4);
+  ushort user_two = load_u16(data + 6);
+  ushort user_lp = load_u16(data + 8);
+  ushort vault_one = load_u16(data + 10);
+  ushort vault_two = load_u16(data + 12);
+  ushort lp_mint = load_u16(data + 14);
+  ushort token_program = load_u16(data + 16);
+  ulong max_one = load_u64(data + 18);
+  ulong max_two = load_u64(data + 26);
 
-  uint64_t reserve_one = token_amount(ix->vault_one);
-  uint64_t reserve_two = token_amount(ix->vault_two);
-  uint64_t supply = mint_supply(ix->lp_mint);
+  require_idx(user);
+  TSDK_ASSERT_OR_REVERT(tsdk_is_account_authorized_by_idx(user), ERR_UNAUTHORIZED);
+  pool_t const *pool = load_pool(pool_idx);
+  validate_common(pool, pool_idx, vault_one, vault_two, lp_mint, token_program);
+
+  uint64_t reserve_one = token_amount(vault_one);
+  uint64_t reserve_two = token_amount(vault_two);
+  uint64_t supply = mint_supply(lp_mint);
   uint64_t amount_one, amount_two, minted;
   uint64_t locked = pool->locked_lp_supply;
 
   if (reserve_one == 0 && reserve_two == 0 && supply == 0) {
+    TSDK_ASSERT_OR_REVERT(max_one && max_two, ERR_LIQUIDITY_BOUNDS);
     TSDK_ASSERT_OR_REVERT(genesis_quote_initial_liquidity(
-      ix->amount_one, ix->amount_two, &minted, &locked
+      max_one, max_two, &minted, &locked
     ), ERR_LIQUIDITY_BOUNDS);
-    pool_t *writable_pool = (pool_t *)tsdk_get_account_data_ptr(ix->pool);
-    TSDK_ASSERT_OR_REVERT(tsys_set_account_data_writable(ix->pool) == 0,
+    pool_t *writable_pool = (pool_t *)tsdk_get_account_data_ptr(pool_idx);
+    TSDK_ASSERT_OR_REVERT(tsys_set_account_data_writable(pool_idx) == 0,
                           ERR_ACCOUNT_WRITABLE);
     writable_pool->locked_lp_supply = locked;
-    amount_one = ix->amount_one;
-    amount_two = ix->amount_two;
+    amount_one = max_one;
+    amount_two = max_two;
   } else {
     TSDK_ASSERT_OR_REVERT(reserve_one && reserve_two, ERR_LIQUIDITY_BOUNDS);
     TSDK_ASSERT_OR_REVERT(supply <= UINT64_MAX - locked, ERR_OVERFLOW);
     TSDK_ASSERT_OR_REVERT(genesis_quote_add_liquidity(
-      ix->amount_one, ix->amount_two, reserve_one, reserve_two,
+      max_one, max_two, reserve_one, reserve_two,
       supply + locked, &amount_one, &amount_two, &minted
     ), ERR_LIQUIDITY_BOUNDS);
   }
 
-  token_transfer(ix->token_program, ix->user_one, ix->vault_one, amount_one, NULL);
-  token_transfer(ix->token_program, ix->user_two, ix->vault_two, amount_two, NULL);
+  token_transfer(token_program, user_one, vault_one, amount_one, NULL);
+  token_transfer(token_program, user_two, vault_two, amount_two, NULL);
   uchar auth_storage[24];
   tsdk_invoke_auth_t const *auth;
-  pool_auth(ix->pool, auth_storage, &auth);
-  token_mint(ix->token_program, ix->lp_mint, ix->user_lp, ix->pool, minted, auth);
+  pool_auth(pool_idx, auth_storage, &auth);
+  token_mint(token_program, lp_mint, user_lp, pool_idx, minted, auth);
 }
 
 static void handle_withdraw(uchar const *data, ulong size) {
-  TSDK_ASSERT_OR_REVERT(size == sizeof(withdraw_ix_t), ERR_BAD_SIZE);
-  withdraw_ix_t const *ix = (withdraw_ix_t const *)data;
-  TSDK_ASSERT_OR_REVERT(tsdk_is_account_authorized_by_idx(ix->user), ERR_UNAUTHORIZED);
-  pool_t const *pool = load_pool(ix->pool);
-  validate_common(pool, ix->pool, ix->vault_one, ix->vault_two,
-                  ix->lp_mint, ix->token_program);
-  uint64_t supply = mint_supply(ix->lp_mint);
+  TSDK_ASSERT_OR_REVERT(size == 26UL, ERR_BAD_SIZE);
+  ushort pool_idx = load_u16(data + 0);
+  ushort user = load_u16(data + 2);
+  ushort user_one = load_u16(data + 4);
+  ushort user_two = load_u16(data + 6);
+  ushort user_lp = load_u16(data + 8);
+  ushort vault_one = load_u16(data + 10);
+  ushort vault_two = load_u16(data + 12);
+  ushort lp_mint = load_u16(data + 14);
+  ushort token_program = load_u16(data + 16);
+  ulong lp_amount = load_u64(data + 18);
+
+  TSDK_ASSERT_OR_REVERT(tsdk_is_account_authorized_by_idx(user), ERR_UNAUTHORIZED);
+  pool_t const *pool = load_pool(pool_idx);
+  validate_common(pool, pool_idx, vault_one, vault_two, lp_mint, token_program);
+  uint64_t supply = mint_supply(lp_mint);
   TSDK_ASSERT_OR_REVERT(supply <= UINT64_MAX - pool->locked_lp_supply, ERR_OVERFLOW);
   uint64_t one, two;
   TSDK_ASSERT_OR_REVERT(genesis_quote_withdraw(
-    ix->lp_amount, token_amount(ix->vault_one), token_amount(ix->vault_two),
+    lp_amount, token_amount(vault_one), token_amount(vault_two),
     supply + pool->locked_lp_supply, &one, &two
   ), ERR_LIQUIDITY_BOUNDS);
-  token_burn(ix->token_program, ix->user_lp, ix->lp_mint, ix->user, ix->lp_amount);
+  token_burn(token_program, user_lp, lp_mint, user, lp_amount);
   uchar auth_storage[24];
   tsdk_invoke_auth_t const *auth;
-  pool_auth(ix->pool, auth_storage, &auth);
-  token_transfer(ix->token_program, ix->vault_one, ix->user_one, one, auth);
-  token_transfer(ix->token_program, ix->vault_two, ix->user_two, two, auth);
+  pool_auth(pool_idx, auth_storage, &auth);
+  token_transfer(token_program, vault_one, user_one, one, auth);
+  token_transfer(token_program, vault_two, user_two, two, auth);
 }
 
 static void handle_swap(uchar const *data, ulong size) {
-  TSDK_ASSERT_OR_REVERT(size == sizeof(swap_ix_t), ERR_BAD_SIZE);
-  swap_ix_t const *ix = (swap_ix_t const *)data;
+  TSDK_ASSERT_OR_REVERT(size == 24UL, ERR_BAD_SIZE);
+  ushort pool_idx = load_u16(data + 0);
+  ushort authority = load_u16(data + 2);
+  ushort user_input = load_u16(data + 4);
+  ushort user_output = load_u16(data + 6);
+  ushort vault_input = load_u16(data + 8);
+  ushort vault_output = load_u16(data + 10);
+  ushort lp_mint = load_u16(data + 12);
+  ushort token_program = load_u16(data + 14);
+  ulong amount_in = load_u64(data + 16);
+
   TSDK_ASSERT_OR_REVERT(
-    tsdk_is_account_authorized_by_idx(ix->authority), ERR_UNAUTHORIZED
+    tsdk_is_account_authorized_by_idx(authority), ERR_UNAUTHORIZED
   );
-  pool_t const *pool = load_pool(ix->pool);
-  require_token_owner(ix->vault_input, ix->token_program, ERR_VAULT_MISMATCH);
-  require_token_owner(ix->vault_output, ix->token_program, ERR_VAULT_MISMATCH);
-  int forward = key_eq(&pool->vault_one, key_at(ix->vault_input)) &&
-                key_eq(&pool->vault_two, key_at(ix->vault_output));
-  int reverse = key_eq(&pool->vault_two, key_at(ix->vault_input)) &&
-                key_eq(&pool->vault_one, key_at(ix->vault_output));
+  pool_t const *pool = load_pool(pool_idx);
+  require_token_owner(vault_input, token_program, ERR_VAULT_MISMATCH);
+  require_token_owner(vault_output, token_program, ERR_VAULT_MISMATCH);
+  int forward = key_eq(&pool->vault_one, key_at(vault_input)) &&
+                key_eq(&pool->vault_two, key_at(vault_output));
+  int reverse = key_eq(&pool->vault_two, key_at(vault_input)) &&
+                key_eq(&pool->vault_one, key_at(vault_output));
   TSDK_ASSERT_OR_REVERT(forward || reverse, ERR_VAULT_MISMATCH);
-  TSDK_ASSERT_OR_REVERT(key_eq(&pool->lp_mint, key_at(ix->lp_mint)),
+  TSDK_ASSERT_OR_REVERT(key_eq(&pool->lp_mint, key_at(lp_mint)),
                         ERR_LP_MINT_MISMATCH);
 
   genesis_swap_quote_t quote;
   TSDK_ASSERT_OR_REVERT(genesis_quote_swap_exact_in(
-    ix->amount_in, token_amount(ix->vault_input), token_amount(ix->vault_output),
+    amount_in, token_amount(vault_input), token_amount(vault_output),
     pool->swap_fee_bps, &quote
   ), ERR_LIQUIDITY_BOUNDS);
 
-  token_transfer(ix->token_program, ix->user_input, ix->vault_input,
-                 ix->amount_in, NULL);
+  token_transfer(token_program, user_input, vault_input, amount_in, NULL);
   uchar auth_storage[24];
   tsdk_invoke_auth_t const *auth;
-  pool_auth(ix->pool, auth_storage, &auth);
-  token_transfer(ix->token_program, ix->vault_output, ix->user_output,
-                 quote.amount_out, auth);
+  pool_auth(pool_idx, auth_storage, &auth);
+  token_transfer(token_program, vault_output, user_output, quote.amount_out, auth);
 }
 
 static void handle_init(uchar const *data, ulong size) {
@@ -314,17 +343,13 @@ static void handle_init(uchar const *data, ulong size) {
   ulong lp_proof_size = load_u64(data + 58);
   ulong one_proof_size = load_u64(data + 66);
   ulong two_proof_size = load_u64(data + 74);
-  genesis_u128_t total = 82U;
-  total += pool_proof_size;
-  total += lp_proof_size;
-  total += one_proof_size;
-  total += two_proof_size;
-  TSDK_ASSERT_OR_REVERT(total == size, ERR_BAD_SIZE);
+  /* Bound each proof first so the sum cannot overflow ulong. */
   TSDK_ASSERT_OR_REVERT(pool_proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
   TSDK_ASSERT_OR_REVERT(lp_proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
   TSDK_ASSERT_OR_REVERT(one_proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
   TSDK_ASSERT_OR_REVERT(two_proof_size <= MAX_STATE_PROOF_SIZE, ERR_BAD_SIZE);
-
+  ulong total = 82UL + pool_proof_size + lp_proof_size + one_proof_size + two_proof_size;
+  TSDK_ASSERT_OR_REVERT(total == size, ERR_BAD_SIZE);
   require_idx(payer);
   require_idx(pool_idx);
   require_idx(lp_mint);

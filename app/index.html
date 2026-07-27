@@ -23,7 +23,7 @@
       <section class="app-intro">
         <p class="eyebrow">The Genesis launchpad</p>
         <h1>Markets begin<br /><em>with an idea.</em></h1>
-        <p>Launch tokens, discover emerging markets, and manage a self-custodied Thru account directly in Genesis.</p>
+        <p>Launch pump-style tokens on a bonding curve, trade from the first block, and graduate into an AMM pool when the market fills — inspired by <a href="https://pump.fun/" target="_blank" rel="noreferrer">pump.fun</a>.</p>
       </section>
 
       <section class="command-bar" aria-label="Launchpad controls">
@@ -34,12 +34,14 @@
       <section class="graduated" aria-labelledby="graduated-title">
         <div class="section-heading">
           <div><p class="eyebrow">Archive 000</p><h2 id="graduated-title">Graduated</h2></div>
-          <p>Markets that have cleared the Genesis liquidity threshold.</p>
+          <p>Bonding curves that hit the graduation target and seed (or queue) the AMM — like pump.fun.</p>
         </div>
-        <div class="empty-ledger">
-          <div class="seal">G</div>
-          <div><strong>No graduated markets yet.</strong><span>The first completed Genesis launch will appear here.</span></div>
-          <em>Awaiting record</em>
+        <div data-graduated-list>
+          <div class="empty-ledger">
+            <div class="seal">G</div>
+            <div><strong>No graduated markets yet.</strong><span>Fill a bonding curve to the THRU target and the market lands here.</span></div>
+            <em>Awaiting record</em>
+          </div>
         </div>
       </section>
 
@@ -83,9 +85,17 @@
           <label>Decimals<input data-token-decimals type="number" value="6" min="0" max="9" /></label>
           <label>Initial supply<input data-token-supply type="number" min="0" step="1" value="1000000" /></label>
         </div>
-        <label>Seed liquidity in THRU <span>(optional · no 100 THRU minimum)</span><input data-token-liquidity type="number" min="0" step="0.000000001" placeholder="0.0001" /></label>
-        <small>Launch price: 1 THRU = 500 tokens. Leave liquidity blank to deploy the mint without a trading pool.</small>
-        <small>Trading fee: 0.21% accrues to the creator-held LP position; 0.09% routes to Genesis.</small>
+        <label class="confirm-backup pump-toggle">
+          <input type="checkbox" data-token-pump checked />
+          Pump-style bonding curve (recommended)
+        </label>
+        <small>
+          Like <a href="https://pump.fun/" target="_blank" rel="noreferrer">pump.fun</a>:
+          80% of supply goes on a bonding curve. Anyone can buy/sell with THRU.
+          When <strong>0.002 THRU</strong> is raised, the market graduates and we try to seed the AMM from the curve vault.
+        </small>
+        <label>Direct AMM seed in THRU <span>(only if pump mode is off)</span><input data-token-liquidity type="number" min="0" step="0.000000001" placeholder="leave blank for pump mode" /></label>
+        <small>Curve trade fee: 1%. After graduation, AMM swap fee is 0.21% creator / 0.09% Genesis.</small>
         <label>Description<textarea data-token-description placeholder="Describe the token and its purpose"></textarea></label>
         <small data-create-status>Your Thru key is generated or imported locally. Genesis never sends it to a server or stores it after this tab closes.</small>
         <button class="ink-button" type="submit" data-create>Connect wallet to continue</button>
@@ -100,9 +110,9 @@
         <h2 id="trade-title" data-trade-title>Trade token</h2>
         <div class="trade-switch"><button class="selected" type="button" data-side="buy">Buy</button><button type="button" data-side="sell">Sell</button></div>
         <label>Amount<input data-trade-amount type="number" min="0" step="any" placeholder="0.00" /></label>
-        <div class="trade-quote"><span data-trade-input-label>Pay with faucet THRU</span><strong data-trade-quote>—</strong></div>
+        <div class="trade-quote"><span data-trade-input-label>Pay with THRU</span><strong data-trade-quote>—</strong></div>
         <button class="ink-button wallet-primary" type="button" data-trade-submit>Buy with THRU</button>
-        <p data-trade-status>Trading activates after a wrapped-THRU liquidity pool is seeded for this mint.</p>
+        <p data-trade-status>Bonding-curve markets trade immediately. Graduated markets use the AMM when seeded.</p>
       </section>
     </div>
 

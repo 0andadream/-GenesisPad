@@ -7,15 +7,16 @@
 #define GENESIS_AMM_MINIMUM_LIQUIDITY 1000ULL
 #define GENESIS_AMM_MAX_FEE_BPS 500U
 
-__extension__ typedef unsigned __int128 genesis_u128_t;
-
 typedef struct {
   uint64_t amount_in_after_fee;
   uint64_t fee_amount;
   uint64_t amount_out;
 } genesis_swap_quote_t;
 
-uint64_t genesis_isqrt_u128(genesis_u128_t value);
+/* Portable 128-bit product isqrt (no __int128 — ThruVM toolchains
+   may not implement wide integer types correctly). */
+uint64_t genesis_isqrt_product(uint64_t amount_one, uint64_t amount_two);
+
 int genesis_quote_initial_liquidity(
   uint64_t amount_one,
   uint64_t amount_two,

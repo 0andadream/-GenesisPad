@@ -61,9 +61,18 @@ const PRICE_TOKENS_PER_THRU = 500n;
 const EOA_PROGRAM = new Uint8Array(32);
 const FAUCET_PROGRAM = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 250 : 0);
 const AMM_MINIMUM_LIQUIDITY = 1000n;
+// Pump.fun-style bonding curve (alphanet scale).
+// Virtual THRU sets the starting price; 80% of supply sits on the curve.
+const CURVE_VIRTUAL_THRU = 50_000_000n; // 0.05 THRU virtual reserve
+const CURVE_TOKEN_BPS = 8000n; // 80% of minted supply on the curve
+const CURVE_TRADE_FEE_BPS = 100n; // 1% fee on buys/sells
+// Graduate after this much real THRU is bought into the curve (faucet-friendly).
+const GRADUATION_REAL_THRU = 2_000_000n; // 0.002 THRU raised
+const CURVE_GAS_FUND = 50_000n; // native dust so the curve account can pay fees
 let connectedAccount = null;
 let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
+const MARKETS_KEY = "genesis-markets";
 
 function compactAddress(address) {
   return address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "Connected";
@@ -481,6 +490,356 @@ function assertInitialLiquidityAmounts(amountOne, amountTwo) {
   }
 }
 
+/* ─── Pump-style bonding curve ─────────────────────────────────────────── */
+
+function isBondingMarket(market) {
+  return Boolean(market?.curve) && market.phase !== "amm" && !market.graduated;
+}
+
+function isGraduatedMarket(market) {
+  return Boolean(market?.graduated) || market?.phase === "graduated" || market?.phase === "amm";
+}
+
+function readCurve(market) {
+  if (!market?.curve) throw new Error("This market has no bonding curve.");
+  return {
+    virtualThru: BigInt(market.curve.virtualThru),
+    virtualToken: BigInt(market.curve.virtualToken),
+    realThru: BigInt(market.curve.realThru),
+    realToken: BigInt(market.curve.realToken),
+    graduationTarget: BigInt(market.curve.graduationTargetThru || GRADUATION_REAL_THRU),
+  };
+}
+
+function curveProgress(market) {
+  try {
+    const c = readCurve(market);
+    if (c.graduationTarget <= 0n) return 1;
+    const pct = Number((c.realThru * 10000n) / c.graduationTarget) / 100;
+    return Math.min(100, Math.max(0, pct));
+  } catch {
+    return 0;
+  }
+}
+
+function curveSpotPriceThruPerToken(market) {
+  const c = readCurve(market);
+  if (c.virtualToken <= 0n) return 0n;
+  // THRU base units for one whole token (10^decimals base units).
+  const oneToken = 10n ** BigInt(market.decimals || 0);
+  return (c.virtualThru * oneToken) / c.virtualToken;
+}
+
+function quoteCurveBuy(market, thruIn) {
+  if (thruIn <= 0n) throw new Error("Enter an amount greater than zero.");
+  const c = readCurve(market);
+  const fee = (thruIn * CURVE_TRADE_FEE_BPS) / 10000n;
+  const net = thruIn - fee;
+  if (net <= 0n) throw new Error("Amount is too small after fees.");
+  const k = c.virtualThru * c.virtualToken;
+  const newVirtualThru = c.virtualThru + net;
+  const newVirtualToken = k / newVirtualThru;
+  const tokensOut = c.virtualToken - newVirtualToken;
+  if (tokensOut <= 0n) throw new Error("Quote produced zero tokens.");
+  if (tokensOut > c.realToken) {
+    throw new Error("Not enough tokens left on the bonding curve for that buy.");
+  }
+  return {
+    fee,
+    netThru: net,
+    tokensOut,
+    next: {
+      virtualThru: newVirtualThru,
+      virtualToken: newVirtualToken,
+      realThru: c.realThru + net,
+      realToken: c.realToken - tokensOut,
+      graduationTarget: c.graduationTarget,
+    },
+  };
+}
+
+function quoteCurveSell(market, tokensIn) {
+  if (tokensIn <= 0n) throw new Error("Enter an amount greater than zero.");
+  const c = readCurve(market);
+  const k = c.virtualThru * c.virtualToken;
+  const newVirtualToken = c.virtualToken + tokensIn;
+  const newVirtualThru = k / newVirtualToken;
+  if (newVirtualThru >= c.virtualThru) throw new Error("Quote produced zero THRU.");
+  const thruGross = c.virtualThru - newVirtualThru;
+  const fee = (thruGross * CURVE_TRADE_FEE_BPS) / 10000n;
+  const netThru = thruGross - fee;
+  if (netThru <= 0n) throw new Error("Amount is too small after fees.");
+  if (netThru > c.realThru) {
+    throw new Error("Not enough THRU left in the curve vault for that sell.");
+  }
+  return {
+    fee,
+    netThru,
+    tokensIn,
+    next: {
+      virtualThru: newVirtualThru,
+      virtualToken: newVirtualToken,
+      realThru: c.realThru - netThru,
+      realToken: c.realToken + tokensIn,
+      graduationTarget: c.graduationTarget,
+    },
+  };
+}
+
+function saveMarkets(markets) {
+  localStorage.setItem(MARKETS_KEY, JSON.stringify(markets.slice(0, 50)));
+}
+
+function updateMarket(mintAddress, patch) {
+  const markets = readMarkets();
+  const index = markets.findIndex((m) => m.mintAddress === mintAddress);
+  if (index < 0) return null;
+  const prev = markets[index];
+  markets[index] = { ...prev, ...patch };
+  if (patch.curve) {
+    markets[index].curve = { ...(prev.curve || {}), ...patch.curve };
+  }
+  saveMarkets(markets);
+  return markets[index];
+}
+
+function applyCurveState(market, next) {
+  return updateMarket(market.mintAddress, {
+    curve: {
+      ...market.curve,
+      virtualThru: next.virtualThru.toString(),
+      virtualToken: next.virtualToken.toString(),
+      realThru: next.realThru.toString(),
+      realToken: next.realToken.toString(),
+    },
+  });
+}
+
+async function loadCurveSigner(market) {
+  if (!market?.curve?.privateKeyHex) {
+    throw new Error("Bonding curve key is missing from this market record.");
+  }
+  const privateKey = hexToBytes(market.curve.privateKeyHex);
+  const publicKey = await client.keys.fromPrivateKey(privateKey);
+  const address = Pubkey.from(publicKey).toThruFmt();
+  if (market.curve.address && market.curve.address !== address) {
+    throw new Error("Curve private key does not match the stored curve address.");
+  }
+  return { address, publicKey, privateKey };
+}
+
+async function submitAs(signer, program, {
+  accounts, instructionData, fee = 0n, startSlot: anchoredStartSlot, programLabel = "Program",
+}) {
+  const snapshot = await getAccountSnapshot(signer.address);
+  const slot = anchoredStartSlot ?? await currentSlot();
+  let nonce = snapshot.nonce < 0n ? 0n : snapshot.nonce;
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    try {
+      const { rawTransaction } = await client.transactions.buildAndSign({
+        feePayer: { publicKey: signer.publicKey, privateKey: signer.privateKey },
+        program,
+        accounts,
+        instructionData,
+        header: {
+          fee, nonce, startSlot: slot, expiryAfter: 100,
+          computeUnits: 500000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
+        },
+      });
+      await submitTransaction(rawTransaction, { programLabel });
+      return;
+    } catch (reason) {
+      const message = String(reason?.message || reason);
+      if (message.includes("-511")) { nonce += 1n; continue; }
+      if (message.includes("-510")) { nonce = nonce > 0n ? nonce - 1n : 0n; continue; }
+      throw reason;
+    }
+  }
+  throw new Error("Could not find a valid account nonce for the curve signer.");
+}
+
+async function ensureAccountExistsFor(signer, setStatus = () => {}) {
+  if ((await getAccountSnapshot(signer.address)).exists) return;
+  setStatus("Opening the bonding-curve account…");
+  const proof = await client.proofs.generate({ address: signer.address, proofType: 1 });
+  const { rawTransaction } = await client.transactions.buildAndSign({
+    feePayer: { publicKey: signer.publicKey, privateKey: signer.privateKey },
+    program: EOA_PROGRAM,
+    header: {
+      fee: 0n, nonce: 0n, startSlot: proof.slot, expiryAfter: 100,
+      computeUnits: 10000, memoryUnits: 10000, stateUnits: 10000, chainId: CHAIN_ID,
+    },
+    feePayerStateProof: proof.proof,
+  });
+  await submitTransaction(rawTransaction, { programLabel: "Curve account" });
+  await waitForAccount(signer.address, "Bonding curve account");
+}
+
+async function fundCurveAccount(curveAddress, amount = CURVE_GAS_FUND) {
+  if (amount <= 0n) return;
+  const snap = await getAccountSnapshot(curveAddress);
+  // Top up only when the curve is empty / very low.
+  if (snap.exists && snap.balance >= amount) return;
+  await submitProgramInstruction(EOA_PROGRAM, {
+    accounts: { readWrite: [curveAddress] },
+    instructionData: nativeTransferInstruction(amount),
+    fee: 1n,
+    programLabel: "Fund curve",
+  });
+}
+
+async function createBondingCurve({ mint, creatorTokenAccount, decimals, supplyWhole, setStatus }) {
+  setStatus("Creating the bonding-curve vault…");
+  const pair = await client.keys.generateKeyPair();
+  const curveSigner = {
+    address: pair.address,
+    publicKey: pair.publicKey,
+    privateKey: pair.privateKey,
+  };
+
+  // Open the curve account first (fee 0 + state proof), then fund gas dust from creator.
+  await ensureAccountExistsFor(curveSigner, setStatus);
+  await fundCurveAccount(curveSigner.address, CURVE_GAS_FUND);
+
+  setStatus("Creating the curve token inventory account…");
+  const curveToken = await ensureTokenAccount(curveSigner.address, mint.address);
+
+  const totalBase = supplyWhole * (10n ** BigInt(decimals));
+  const curveTokens = (totalBase * CURVE_TOKEN_BPS) / 10000n;
+  if (curveTokens <= 0n) throw new Error("Supply is too small for a bonding curve.");
+
+  setStatus(`Seeding the curve with ${formatUnits(curveTokens, decimals)} tokens…`);
+  await submitTokenTransfer(creatorTokenAccount, curveToken, curveTokens);
+
+  const virtualThru = CURVE_VIRTUAL_THRU;
+  const virtualToken = curveTokens;
+
+  return {
+    phase: "bonding",
+    graduated: false,
+    liquidity: false,
+    curve: {
+      address: curveSigner.address,
+      privateKeyHex: bytesToHex(curveSigner.privateKey),
+      tokenAccount: curveToken.address,
+      tokenAccountBytesHint: bytesToHex(curveToken.bytes),
+      virtualThru: virtualThru.toString(),
+      virtualToken: virtualToken.toString(),
+      realThru: "0",
+      realToken: curveTokens.toString(),
+      graduationTargetThru: GRADUATION_REAL_THRU.toString(),
+      tradeFeeBps: Number(CURVE_TRADE_FEE_BPS),
+    },
+  };
+}
+
+async function graduateMarket(market, setStatus = () => {}) {
+  if (!market?.curve || market.graduated) return market;
+  setStatus("Graduation threshold reached — preparing AMM seed…");
+  const curveSigner = await loadCurveSigner(market);
+  const c = readCurve(market);
+  // Keep a little gas on the curve; seed the rest.
+  const seedThru = c.realThru > CURVE_GAS_FUND * 2n ? c.realThru - CURVE_GAS_FUND : c.realThru / 2n;
+  // Match launch price ~500 tokens per THRU for AMM seed amounts.
+  const seedTokens = (seedThru * PRICE_TOKENS_PER_THRU * (10n ** BigInt(market.decimals)))
+    / (10n ** BigInt(NATIVE_THRU_DECIMALS));
+  const tokensAvailable = c.realToken;
+  const tokenAmount = seedTokens > 0n && seedTokens <= tokensAvailable
+    ? seedTokens
+    : tokensAvailable / 2n;
+
+  let ammSeeded = false;
+  let liquidityPendingReason = "";
+  let poolMetadata = {};
+
+  try {
+    if (seedThru <= 0n || tokenAmount <= 0n) {
+      throw new Error("Curve reserves are too small to seed an AMM pool yet.");
+    }
+    assertInitialLiquidityAmounts(tokenAmount, seedThru);
+
+    // Move THRU + tokens to the creator (connected) wallet, then reuse seedPool.
+    // Graduation is triggered by the trader; creator must be connected for AMM LP mint.
+    if (!connectedAccount) throw new Error("Connect a wallet to complete graduation.");
+    if (connectedAccount.address !== market.creator) {
+      // Anyone can trigger accounting graduation; AMM seed needs creator later.
+      liquidityPendingReason =
+        "Graduated on the bonding curve. Creator must open the market and seed the AMM from curve reserves.";
+      const updated = updateMarket(market.mintAddress, {
+        graduated: true,
+        phase: "graduated",
+        liquidity: false,
+        liquidityPendingReason,
+        graduatedAt: Date.now(),
+      });
+      return updated || market;
+    }
+
+    setStatus("Withdrawing curve reserves to seed the AMM…");
+    const creatorToken = await ensureTokenAccount(connectedAccount.address, market.mintAddress);
+    const curveToken = {
+      address: market.curve.tokenAccount,
+      bytes: Pubkey.from(market.curve.tokenAccount).toBytes(),
+    };
+
+    // Pull tokens from curve → creator (curve signs as fee payer / owner).
+    if (tokenAmount > 0n) {
+      await submitAs(curveSigner, TOKEN_PROGRAM, {
+        accounts: { readWrite: [curveToken.address, creatorToken.address] },
+        instructionData: createTransferInstruction({
+          sourceAccountBytes: curveToken.bytes,
+          destinationAccountBytes: creatorToken.bytes,
+          amount: tokenAmount,
+        }),
+        fee: 0n,
+        programLabel: "Curve token withdraw",
+      });
+    }
+    // Pull native THRU from curve → creator.
+    if (seedThru > 0n) {
+      await submitAs(curveSigner, EOA_PROGRAM, {
+        accounts: { readWrite: [connectedAccount.address] },
+        instructionData: nativeTransferInstruction(seedThru),
+        fee: 0n,
+        programLabel: "Curve THRU withdraw",
+      });
+    }
+
+    const mintObj = {
+      address: market.mintAddress,
+      bytes: Pubkey.from(market.mintAddress).toBytes(),
+    };
+    poolMetadata = await seedPool({
+      mint: mintObj,
+      tokenAccount: creatorToken,
+      decimals: market.decimals,
+      thruAmount: seedThru,
+      tokenAmount,
+      setStatus,
+    });
+    ammSeeded = true;
+  } catch (reason) {
+    liquidityPendingReason = reason instanceof Error
+      ? `Graduated, but AMM seed pending: ${reason.message}`
+      : "Graduated, but AMM seed is pending.";
+  }
+
+  const updated = updateMarket(market.mintAddress, {
+    graduated: true,
+    phase: ammSeeded ? "amm" : "graduated",
+    liquidity: ammSeeded,
+    liquidityPendingReason: ammSeeded ? "" : liquidityPendingReason,
+    graduatedAt: Date.now(),
+    ...poolMetadata,
+    curve: {
+      ...market.curve,
+      realThru: (c.realThru - (ammSeeded ? seedThru : 0n)).toString(),
+      realToken: (c.realToken - (ammSeeded ? tokenAmount : 0n)).toString(),
+    },
+  });
+  return updated || market;
+}
+
 async function wrapThru(amount, destination) {
   if (amount <= 0n) throw new Error("Wrap amount must be positive.");
   let before = 0n;
@@ -697,6 +1056,21 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
   const amountOne = tokenIsOne ? tokenAmount : thruAmount;
   const amountTwo = tokenIsOne ? thruAmount : tokenAmount;
   assertInitialLiquidityAmounts(amountOne, amountTwo);
+  // Preflight balances — wrap must have credited wTHRU before the AMM deposit.
+  const wthruBal = await readTokenAmount(creatorWthru.address);
+  const tokenBal = await readTokenAmount(tokenAccount.address);
+  if (wthruBal < thruAmount) {
+    throw new Error(
+      `Need ${formatUnits(thruAmount, NATIVE_THRU_DECIMALS, 9)} wTHRU to seed, but this wallet only has ` +
+      `${formatUnits(wthruBal, NATIVE_THRU_DECIMALS, 9)} wTHRU. Wrap native THRU first.`,
+    );
+  }
+  if (tokenBal < tokenAmount) {
+    throw new Error(
+      `Need ${formatUnits(tokenAmount, decimals)} tokens to seed, but the mint account only holds ` +
+      `${formatUnits(tokenBal, decimals)}.`,
+    );
+  }
   await submitProgramInstruction(GENESIS_AMM_PROGRAM, {
     accounts: {
       readWrite: [
@@ -745,6 +1119,7 @@ async function createToken() {
   const decimals = Number(document.querySelector("[data-token-decimals]").value);
   const supplyText = document.querySelector("[data-token-supply]").value.trim();
   const liquidityText = document.querySelector("[data-token-liquidity]")?.value.trim() || "";
+  const pumpMode = document.querySelector("[data-token-pump]")?.checked !== false;
 
   createStatus.textContent = "Validating market details…";
 
@@ -787,13 +1162,18 @@ async function createToken() {
   try {
     createStatus.textContent = "Preparing your Thru account…";
     await ensureAccountExists((message) => { createStatus.textContent = message; });
-    const ammProgramAvailable = liquidityThru > 0n &&
+    const wantDirectAmm = !pumpMode && liquidityThru > 0n;
+    const ammProgramAvailable = wantDirectAmm &&
       (await getAccountSnapshot(GENESIS_AMM_PROGRAM)).exists;
     const nativeBalance = await getAccountSnapshot();
-    if (ammProgramAvailable && nativeBalance.balance < liquidityThru + 1n) {
+    const curveGasNeed = pumpMode ? CURVE_GAS_FUND + 2n : 0n;
+    const needBalance = (wantDirectAmm ? liquidityThru + 1n : 0n) + curveGasNeed;
+    if (nativeBalance.balance < needBalance) {
       throw new Error(
         `Insufficient balance: you have ${formatUnits(nativeBalance.balance, NATIVE_THRU_DECIMALS, 9)} THRU. ` +
-        "Lower the optional liquidity amount or leave it blank.",
+        (pumpMode
+          ? "Claim faucet THRU to fund the bonding-curve gas dust."
+          : "Lower the optional liquidity amount or leave it blank."),
       );
     }
 
@@ -853,7 +1233,16 @@ async function createToken() {
 
     let poolMetadata = {};
     let liquidityPendingReason = "";
-    if (liquidityThru > 0n) {
+    let bondingMeta = {};
+    if (pumpMode && supply > 0n) {
+      bondingMeta = await createBondingCurve({
+        mint,
+        creatorTokenAccount: tokenAccount,
+        decimals,
+        supplyWhole: supply,
+        setStatus: (message) => { createStatus.textContent = message; },
+      });
+    } else if (liquidityThru > 0n) {
       if (!ammProgramAvailable) {
         liquidityPendingReason = "The Thru Alphanet AMM program is not deployed yet. No liquidity funds were moved.";
       } else {
@@ -878,20 +1267,28 @@ async function createToken() {
       tokenAccount: tokenAccount.address,
       creator: connectedAccount.address,
       createdAt: Date.now(),
-      liquidity: liquidityThru > 0n && !liquidityPendingReason,
+      mode: pumpMode ? "pump" : "amm",
+      phase: bondingMeta.phase || (liquidityThru > 0n && !liquidityPendingReason ? "amm" : "awaiting"),
+      graduated: false,
+      liquidity: Boolean(poolMetadata.poolAddress) || (liquidityThru > 0n && !liquidityPendingReason),
       liquidityRequested: liquidityThru > 0n,
       liquidityPendingReason,
       priceTokensPerThru: PRICE_TOKENS_PER_THRU.toString(),
       creatorFeeBps: CREATOR_FEE_BPS,
       protocolFeeBps: PROTOCOL_FEE_BPS,
       protocolTreasury: GENESIS_TREASURY,
+      graduationTargetThru: GRADUATION_REAL_THRU.toString(),
+      ...bondingMeta,
       ...poolMetadata,
     };
     const markets = readMarkets();
     markets.unshift(market);
-    localStorage.setItem("genesis-markets", JSON.stringify(markets.slice(0, 50)));
+    saveMarkets(markets);
     renderMarkets();
-    createStatus.textContent = liquidityPendingReason
+    createStatus.textContent = market.curve
+      ? `${ticker} launched on a bonding curve (pump-style). Buy/sell until ` +
+        `${formatUnits(GRADUATION_REAL_THRU, NATIVE_THRU_DECIMALS, 9)} THRU is raised, then it graduates. Mint: ${mint.address}`
+      : liquidityPendingReason
       ? `${ticker} mint is live. ${liquidityPendingReason} Mint: ${mint.address}`
       : liquidityThru > 0n
       ? `${ticker} is live and tradeable at launch. Creator LP: ${poolMetadata.creatorLpAccount}`
@@ -906,27 +1303,80 @@ async function createToken() {
 
 function readMarkets() {
   try {
-    return JSON.parse(localStorage.getItem("genesis-markets") || "[]");
+    return JSON.parse(localStorage.getItem(MARKETS_KEY) || "[]");
   } catch {
     return [];
   }
+}
+
+function marketStatusLabel(market) {
+  if (market.phase === "amm" || market.liquidity) return "AMM live";
+  if (market.graduated || market.phase === "graduated") return "Graduated";
+  if (market.curve) return `Curve ${curveProgress(market).toFixed(0)}%`;
+  if (market.liquidityPendingReason) return "AMM pending";
+  return "Awaiting pool";
+}
+
+function renderMarketCard(market, index) {
+  const progress = market.curve ? curveProgress(market) : (market.liquidity ? 100 : 0);
+  return `
+    <article class="market-row">
+      <div class="market-identity"><span>${market.ticker.slice(0, 1)}</span><div><strong>${market.name}</strong><small>${market.ticker} · ${market.mintAddress.slice(0, 7)}…${market.mintAddress.slice(-5)}</small></div></div>
+      <strong>${BigInt(market.supply || "0").toLocaleString()}</strong>
+      <div class="curve-progress" title="Bonding progress to graduation">
+        <div class="curve-progress-bar"><i style="width:${progress}%"></i></div>
+        <span class="liquidity-state">${marketStatusLabel(market)}</span>
+      </div>
+      <div class="trade-actions">
+        <button type="button" data-trade="${index}" data-trade-side="buy">Buy</button>
+        <button type="button" data-trade="${index}" data-trade-side="sell">Sell</button>
+        <button type="button" data-liquidity="${index}">Pool</button>
+      </div>
+    </article>`;
 }
 
 function renderMarkets() {
   const markets = readMarkets();
   const table = document.querySelector(".token-table");
   document.querySelector("[data-count]").textContent = String(markets.length);
-  if (!markets.length) return;
+
+  const bonding = [];
+  const graduated = [];
+  markets.forEach((market, index) => {
+    if (isGraduatedMarket(market) && !isBondingMarket(market)) graduated.push({ market, index });
+    else bonding.push({ market, index });
+  });
+
+  const graduatedHost = document.querySelector("[data-graduated-list]");
+  if (graduatedHost) {
+    if (!graduated.length) {
+      graduatedHost.innerHTML = `
+        <div class="empty-ledger">
+          <div class="seal">G</div>
+          <div><strong>No graduated markets yet.</strong><span>Markets that fill the bonding curve will land here, then seed the AMM.</span></div>
+          <em>Awaiting record</em>
+        </div>`;
+    } else {
+      graduatedHost.innerHTML = `<div class="market-list">${graduated.map(({ market, index }) => renderMarketCard(market, index)).join("")}</div>`;
+    }
+  }
+
+  if (!markets.length) {
+    table.innerHTML = `
+      <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
+      <div class="token-empty">
+        <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <h3>The registry is quiet.</h3>
+        <p>Launch a pump-style token to open a bonding curve. Buys and sells run until graduation.</p>
+        <a href="#create">Create the first market</a>
+      </div>`;
+    return;
+  }
+
+  const list = bonding.length ? bonding : markets.map((market, index) => ({ market, index }));
   table.innerHTML = `
-    <div class="table-head"><span>Market</span><span>Supply</span><span>Liquidity</span><span>Trade</span></div>
-    <div class="market-list">${markets.map((market, index) => `
-      <article class="market-row">
-        <div class="market-identity"><span>${market.ticker.slice(0, 1)}</span><div><strong>${market.name}</strong><small>${market.ticker} · ${market.mintAddress.slice(0, 7)}…${market.mintAddress.slice(-5)}</small></div></div>
-        <strong>${BigInt(market.supply || "0").toLocaleString()}</strong>
-        <span class="liquidity-state">${market.liquidity ? "Live" : market.liquidityPendingReason ? "AMM pending" : "Awaiting pool"}</span>
-        <div class="trade-actions"><button type="button" data-trade="${index}" data-trade-side="buy">Buy</button><button type="button" data-trade="${index}" data-trade-side="sell">Sell</button><button type="button" data-liquidity="${index}">Pool</button></div>
-      </article>`).join("")}
-    </div>`;
+    <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
+    <div class="market-list">${list.map(({ market, index }) => renderMarketCard(market, index)).join("")}</div>`;
 }
 
 async function claimFaucet() {
@@ -1179,14 +1629,28 @@ function openTrade(index, side) {
   tradeModal.hidden = false;
   document.body.classList.add("modal-open");
   document.querySelector("[data-trade-title]").textContent = `${side === "buy" ? "Buy" : "Sell"} ${activeTrade.ticker}`;
-  document.querySelector("[data-trade-submit]").textContent = side === "buy" ? "Buy with faucet THRU" : `Sell ${activeTrade.ticker}`;
-  document.querySelector("[data-trade-input-label]").textContent = side === "buy" ? "Pay with faucet THRU" : `Sell ${activeTrade.ticker}`;
-  document.querySelector("[data-trade-status]").textContent = activeTrade.liquidity
-    ? "Quote updates from the Thru AMM pool."
-    : activeTrade.liquidityPendingReason
-      ? `${activeTrade.liquidityPendingReason} Buy and Sell will activate only after an on-chain AMM program is available.`
-    : "This mint is live, but trading needs a wrapped-THRU liquidity pool. No funds will be moved until that pool exists.";
+  document.querySelector("[data-trade-submit]").textContent = side === "buy" ? "Buy with THRU" : `Sell ${activeTrade.ticker}`;
+  document.querySelector("[data-trade-input-label]").textContent = side === "buy" ? "Pay with THRU" : `Sell ${activeTrade.ticker}`;
+  const progress = activeTrade.curve ? curveProgress(activeTrade) : null;
+  if (isBondingMarket(activeTrade)) {
+    const c = readCurve(activeTrade);
+    document.querySelector("[data-trade-status]").textContent =
+      `Bonding curve · ${progress.toFixed(1)}% to graduation ` +
+      `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU raised). ` +
+      "Like pump.fun: trade the curve until the target, then liquidity seeds the AMM.";
+  } else if (activeTrade.liquidity) {
+    document.querySelector("[data-trade-status]").textContent = "Quote updates from the Thru AMM pool.";
+  } else if (activeTrade.graduated) {
+    document.querySelector("[data-trade-status]").textContent =
+      activeTrade.liquidityPendingReason ||
+      "This market graduated from the bonding curve. AMM seed is pending.";
+  } else {
+    document.querySelector("[data-trade-status]").textContent =
+      "This mint is live, but has no bonding curve or AMM pool yet.";
+  }
   document.querySelectorAll("[data-side]").forEach((button) => button.classList.toggle("selected", button.dataset.side === side));
+  document.querySelector("[data-trade-amount]").value = "";
+  document.querySelector("[data-trade-quote]").textContent = "—";
 }
 
 function closeTrade() {
@@ -1340,16 +1804,77 @@ async function submitSwap(market, side, amountIn, tokenAccount, wthruAccount) {
   });
 }
 
+async function executeCurveTrade(amount, status) {
+  const market = activeTrade;
+  const curveSigner = await loadCurveSigner(market);
+  const userToken = await ensureTokenAccount(connectedAccount.address, market.mintAddress);
+  const curveToken = {
+    address: market.curve.tokenAccount,
+    bytes: Pubkey.from(market.curve.tokenAccount).toBytes(),
+  };
+
+  if (activeSide === "buy") {
+    const quote = quoteCurveBuy(market, amount);
+    status.textContent =
+      `Buying ≈ ${formatUnits(quote.tokensOut, market.decimals)} ${market.ticker} on the bonding curve…`;
+    // 1) User pays native THRU into the curve vault.
+    await submitProgramInstruction(EOA_PROGRAM, {
+      accounts: { readWrite: [curveSigner.address] },
+      instructionData: nativeTransferInstruction(amount),
+      fee: 1n,
+      programLabel: "Curve buy payment",
+    });
+    // 2) Curve vault releases tokens to the buyer.
+    await submitAs(curveSigner, TOKEN_PROGRAM, {
+      accounts: { readWrite: [curveToken.address, userToken.address] },
+      instructionData: createTransferInstruction({
+        sourceAccountBytes: curveToken.bytes,
+        destinationAccountBytes: userToken.bytes,
+        amount: quote.tokensOut,
+      }),
+      fee: 0n,
+      programLabel: "Curve buy fill",
+    });
+    let updated = applyCurveState(market, quote.next);
+    status.textContent =
+      `Bought ${formatUnits(quote.tokensOut, market.decimals)} ${market.ticker} ` +
+      `(fee ${formatUnits(quote.fee, NATIVE_THRU_DECIMALS, 9)} THRU).`;
+    if (quote.next.realThru >= quote.next.graduationTarget) {
+      updated = await graduateMarket(updated || market, (message) => { status.textContent = message; });
+      status.textContent += updated?.liquidity
+        ? " Market graduated and AMM was seeded."
+        : " Market graduated from the bonding curve.";
+    }
+    activeTrade = updated || readMarkets().find((m) => m.mintAddress === market.mintAddress);
+    renderMarkets();
+    return;
+  }
+
+  // Sell
+  const quote = quoteCurveSell(market, amount);
+  status.textContent =
+    `Selling ${formatUnits(amount, market.decimals)} ${market.ticker} on the bonding curve…`;
+  await submitTokenTransfer(userToken, curveToken, amount);
+  await submitAs(curveSigner, EOA_PROGRAM, {
+    accounts: { readWrite: [connectedAccount.address] },
+    instructionData: nativeTransferInstruction(quote.netThru),
+    fee: 0n,
+    programLabel: "Curve sell payout",
+  });
+  const updated = applyCurveState(market, quote.next);
+  activeTrade = updated || market;
+  status.textContent =
+    `Sold for ${formatUnits(quote.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+    `(fee ${formatUnits(quote.fee, NATIVE_THRU_DECIMALS, 9)} THRU).`;
+  renderMarkets();
+}
+
 async function executeTrade() {
   const button = document.querySelector("[data-trade-submit]");
   const status = document.querySelector("[data-trade-status]");
   if (!connectedAccount) {
     closeTrade();
     openWallet();
-    return;
-  }
-  if (!activeTrade?.liquidity) {
-    status.textContent = "Trade not submitted: a wrapped-THRU pool has not been seeded for this mint yet.";
     return;
   }
 
@@ -1362,24 +1887,40 @@ async function executeTrade() {
     status.textContent = reason.message;
     return;
   }
-  const protocolFee = amount * BigInt(PROTOCOL_FEE_BPS) / 10000n;
-  const swapAmount = amount - protocolFee;
-  if (swapAmount <= 0n) {
-    status.textContent = "Amount is too small to route.";
-    return;
-  }
 
   button.disabled = true;
   try {
-    status.textContent = "Preparing your Thru token accounts…";
+    status.textContent = "Preparing your Thru account…";
     await ensureAccountExists((message) => { status.textContent = message; });
+
+    // Pump-style bonding curve path (default for new launches).
+    if (isBondingMarket(activeTrade)) {
+      await executeCurveTrade(amount, status);
+      return;
+    }
+
+    if (!activeTrade?.liquidity) {
+      status.textContent = activeTrade?.graduated
+        ? (activeTrade.liquidityPendingReason || "Graduated, but the AMM pool is not seeded yet.")
+        : "Trade not submitted: no bonding curve or AMM pool is available for this mint.";
+      return;
+    }
+
+    const protocolFee = amount * BigInt(PROTOCOL_FEE_BPS) / 10000n;
+    const swapAmount = amount - protocolFee;
+    if (swapAmount <= 0n) {
+      status.textContent = "Amount is too small to route.";
+      return;
+    }
+
+    status.textContent = "Preparing your Thru token accounts…";
     const userToken = await ensureTokenAccount(connectedAccount.address, activeTrade.mintAddress);
     const userWthru = await ensureTokenAccount(connectedAccount.address, WTHRU_MINT);
     const feeMint = activeSide === "buy" ? WTHRU_MINT : activeTrade.mintAddress;
     const treasuryAccount = await ensureTokenAccount(GENESIS_TREASURY, feeMint);
 
     if (activeSide === "buy") {
-      status.textContent = `Wrapping ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} faucet THRU…`;
+      status.textContent = `Wrapping ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU…`;
       await wrapThru(amount, userWthru);
     }
 
@@ -1402,30 +1943,53 @@ async function executeTrade() {
   }
 }
 
-document.querySelector(".token-table")?.addEventListener("click", (event) => {
+function onMarketActionClick(event) {
   const button = event.target.closest("[data-trade]");
   if (button) openTrade(Number(button.dataset.trade), button.dataset.tradeSide);
   const liquidityButton = event.target.closest("[data-liquidity]");
   if (liquidityButton) openLiquidity(Number(liquidityButton.dataset.liquidity));
-});
+}
+document.querySelector(".token-table")?.addEventListener("click", onMarketActionClick);
+document.querySelector("[data-graduated-list]")?.addEventListener("click", onMarketActionClick);
 document.querySelectorAll("[data-trade-close]").forEach((button) => button.addEventListener("click", closeTrade));
 document.querySelectorAll("[data-side]").forEach((button) => button.addEventListener("click", () => {
   if (activeTrade) openTrade(readMarkets().findIndex((market) => market.mintAddress === activeTrade.mintAddress), button.dataset.side);
 }));
 document.querySelector("[data-trade-amount]")?.addEventListener("input", (event) => {
   const quote = document.querySelector("[data-trade-quote]");
-  if (!event.target.value || !activeTrade?.liquidity) {
+  if (!event.target.value || !activeTrade) {
     quote.textContent = "—";
     return;
   }
   try {
-    const raw = parseUnits(event.target.value, activeSide === "buy" ? NATIVE_THRU_DECIMALS : activeTrade.decimals);
+    const raw = parseUnits(
+      event.target.value,
+      activeSide === "buy" ? NATIVE_THRU_DECIMALS : activeTrade.decimals,
+    );
+    if (isBondingMarket(activeTrade)) {
+      if (activeSide === "buy") {
+        const q = quoteCurveBuy(activeTrade, raw);
+        quote.textContent =
+          `≈ ${formatUnits(q.tokensOut, activeTrade.decimals)} ${activeTrade.ticker} ` +
+          `(incl. ${Number(CURVE_TRADE_FEE_BPS) / 100}% fee)`;
+      } else {
+        const q = quoteCurveSell(activeTrade, raw);
+        quote.textContent =
+          `≈ ${formatUnits(q.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+          `(incl. ${Number(CURVE_TRADE_FEE_BPS) / 100}% fee)`;
+      }
+      return;
+    }
+    if (!activeTrade.liquidity) {
+      quote.textContent = "—";
+      return;
+    }
     const afterFees = raw * 9970n / 10000n;
     quote.textContent = activeSide === "buy"
       ? `≈ ${formatUnits(afterFees * PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals)) / (10n ** BigInt(NATIVE_THRU_DECIMALS)), activeTrade.decimals)} ${activeTrade.ticker}`
       : `≈ ${formatUnits(afterFees * (10n ** BigInt(NATIVE_THRU_DECIMALS)) / (PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals))), NATIVE_THRU_DECIMALS, 9)} WTHRU`;
-  } catch {
-    quote.textContent = "—";
+  } catch (reason) {
+    quote.textContent = reason instanceof Error ? reason.message : "—";
   }
 });
 document.querySelector("[data-trade-submit]")?.addEventListener("click", executeTrade);

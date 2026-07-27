@@ -4,12 +4,23 @@
 #include <stdio.h>
 
 int main(void) {
+  /* Portable isqrt(product) must work for realistic seed sizes. */
+  assert(genesis_isqrt_product(2000000ULL, 1000000ULL) == 1414213ULL);
+  assert(genesis_isqrt_product(1416ULL, 708ULL) == 1001ULL);
+
   uint64_t creator = 0, locked = 0;
   assert(genesis_quote_initial_liquidity(
     1000000ULL, 4000000ULL, &creator, &locked
   ));
   assert(creator == 1999000ULL);
   assert(locked == 1000ULL);
+
+  creator = 0; locked = 0;
+  assert(genesis_quote_initial_liquidity(
+    2000000ULL, 1000000ULL, &creator, &locked
+  ));
+  assert(locked == 1000ULL);
+  assert(creator == 1413213ULL);
 
   uint64_t one = 0, two = 0, minted = 0;
   assert(genesis_quote_add_liquidity(
