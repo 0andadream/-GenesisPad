@@ -1257,6 +1257,15 @@ span.wallet-token-avatar {
   background: #999;
   animation: none;
 }
+.registry-live[data-state="error"] {
+  border-color: rgba(185, 28, 28, 0.35);
+  background: rgba(185, 28, 28, 0.08);
+  color: #991b1b;
+}
+.registry-live[data-state="error"]::before {
+  background: #ef4444;
+  animation: none;
+}
 @keyframes registry-pulse {
   0% { box-shadow: 0 0 0 0 rgba(20, 241, 149, 0.55); }
   70% { box-shadow: 0 0 0 6px rgba(20, 241, 149, 0); }
