@@ -4,38 +4,16 @@ const MARKET_REGISTRY_URL = "/api/markets";
 const MARKETS_KEY = "genesis-markets";
 const REGISTRY_FETCH_TIMEOUT_MS = 12000;
 const NATIVE_THRU_DECIMALS = 9;
-const THEME_KEY = "genesis-theme";
-/** Home: light by default; Protocol section forces dark while in view. */
+/** Home: light by default; Protocol section forces dark while in view. No manual toggle on home. */
 let scrollThemeFrame = 0;
-let scrollThemeLocked = false;
 
-function getPreferredTheme() {
-  // Marketing home always boots light — scroll drives temporary dark over Protocol.
-  return "light";
-}
-
-function applyTheme(theme, { persist = false } = {}) {
+function applyTheme(theme) {
   const next = theme === "dark" ? "dark" : "light";
   const prev = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
   document.documentElement.dataset.theme = next;
   document.documentElement.style.colorScheme = next;
-  if (persist) {
-    try {
-      localStorage.setItem(THEME_KEY, next);
-    } catch {
-      /* ignore */
-    }
-  }
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = next === "dark" ? "#121211" : "#eeeeec";
-  document.querySelectorAll("[data-theme-icon]").forEach((el) => {
-    el.textContent = next === "dark" ? "☀" : "☾";
-  });
-  document.querySelectorAll("[data-theme-toggle]").forEach((btn) => {
-    const toLight = next === "dark";
-    btn.setAttribute("aria-label", toLight ? "Switch to light mode" : "Switch to dark mode");
-    btn.title = toLight ? "Light mode" : "Dark mode";
-  });
   // Soft transition only when the value actually changes.
   if (prev !== next) {
     document.documentElement.classList.add("theme-switching");
@@ -45,13 +23,12 @@ function applyTheme(theme, { persist = false } = {}) {
 
 /**
  * Dark while Protocol is the focused section; light on hero / engine / rest.
- * Engine (and everything past Protocol) returns to light.
+ * Theme toggle lives only on the app page — home is scroll-driven only.
  */
 function themeFromScroll() {
-  if (scrollThemeLocked) return;
   const protocol = document.querySelector("#protocol, [data-manifest]");
   if (!protocol) {
-    applyTheme("light", { persist: false });
+    applyTheme("light");
     return;
   }
   const rect = protocol.getBoundingClientRect();
@@ -61,7 +38,7 @@ function themeFromScroll() {
   const coverage = visible / vh;
   // Enter dark a bit before the section fills the screen; leave when it mostly exits.
   const inProtocol = coverage >= 0.42 && rect.bottom > vh * 0.22 && rect.top < vh * 0.72;
-  applyTheme(inProtocol ? "dark" : "light", { persist: false });
+  applyTheme(inProtocol ? "dark" : "light");
 }
 
 function requestScrollTheme() {
@@ -73,21 +50,7 @@ function requestScrollTheme() {
 }
 
 function initTheme() {
-  applyTheme(getPreferredTheme(), { persist: false });
-  document.querySelectorAll("[data-theme-toggle]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-      const next = current === "dark" ? "light" : "dark";
-      // Manual toggle is temporary; the next scroll snap re-applies section theme.
-      scrollThemeLocked = true;
-      applyTheme(next, { persist: false });
-      window.setTimeout(() => {
-        scrollThemeLocked = false;
-        themeFromScroll();
-      }, 1800);
-    });
-  });
-
+  applyTheme("light");
   window.addEventListener("scroll", requestScrollTheme, { passive: true });
   window.addEventListener("resize", requestScrollTheme);
   themeFromScroll();
