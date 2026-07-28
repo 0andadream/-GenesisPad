@@ -1033,41 +1033,164 @@ function readTradeStats(market) {
   return { buys, sells, buyThru, sellThru, buyTokens, sellTokens, high, low, points };
 }
 
-function appendChartPoint(market, { side, price, thru = 0n, tokens = 0n }) {
-  const chart = readChart(market);
-  const t = Date.now();
-  const id = `${market.mintAddress || "m"}-${t}-${side || "x"}-${price}-${thru}-${Math.random().toString(36).slice(2, 8)}`;
-  chart.push({
-    id,
-    t,
-    price: price.toString(),
-    side: side || "seed",
-    thru: thru.toString(),
-    tokens: tokens.toString(),
-  });
+function computeTradeStats(chart) {
   const stats = {
     buys: 0,
     sells: 0,
     buyThru: "0",
     sellThru: "0",
   };
-  for (const p of chart) {
+  for (const p of chart || []) {
+    if (!p) continue;
     if (p.side === "buy") {
       stats.buys += 1;
-      stats.buyThru = (BigInt(stats.buyThru) + BigInt(p.thru || "0")).toString();
+      try {
+        stats.buyThru = (BigInt(stats.buyThru) + BigInt(p.thru || "0")).toString();
+      } catch { /* ignore */ }
     } else if (p.side === "sell") {
       stats.sells += 1;
-      stats.sellThru = (BigInt(stats.sellThru) + BigInt(p.thru || "0")).toString();
+      try {
+        stats.sellThru = (BigInt(stats.sellThru) + BigInt(p.thru || "0")).toString();
+      } catch { /* ignore */ }
     }
   }
-  // Local-only write — caller awaits publishTradeActivity so friends get one
-  // coherent durable push (not a race of two half-finished PUTs).
-  return updateMarket(market.mintAddress, {
+  return stats;
+}
+
+function appendChartPoint(market, { side, price, thru = 0n, tokens = 0n }) {
+  return recordCurveFill(market, {
+    side,
+    price,
+    thru,
+    tokens,
+    nextCurve: null,
+  });
+}
+
+/**
+ * Atomically persist a buy/sell: curve reserves + chart print + stats in ONE
+ * localStorage write. Split applyCurveState/appendChartPoint races left the
+ * vault updated on-chain while the tape stayed on seed-only (no trades).
+ */
+function recordCurveFill(market, {
+  side,
+  price,
+  thru = 0n,
+  tokens = 0n,
+  nextCurve = null,
+}) {
+  if (!market?.mintAddress) return market;
+  const t = Date.now();
+  const id = `${market.mintAddress}-${t}-${side || "x"}-${price}-${thru}-${Math.random().toString(36).slice(2, 8)}`;
+  const markets = readMarkets();
+  const index = markets.findIndex((m) => m.mintAddress === market.mintAddress);
+  const prev = index >= 0 ? markets[index] : market;
+  const chart = readChart(prev);
+  // Avoid double-insert if caller retries the same fill.
+  const thruStr = thru.toString();
+  const priceStr = typeof price === "bigint" ? price.toString() : String(price || "0");
+  const dup = chart.some((p) => (
+    p
+    && p.side === side
+    && String(p.thru || "") === thruStr
+    && String(p.price || "") === priceStr
+    && Math.abs(Number(p.t || 0) - t) < 15_000
+  ));
+  if (!dup && (side === "buy" || side === "sell")) {
+    chart.push({
+      id,
+      t,
+      price: priceStr,
+      side,
+      thru: thruStr,
+      tokens: tokens.toString(),
+    });
+  }
+  const curve = {
+    ...(prev.curve || {}),
+    ...(market.curve || {}),
+  };
+  if (nextCurve) {
+    curve.virtualThru = nextCurve.virtualThru.toString();
+    curve.virtualToken = nextCurve.virtualToken.toString();
+    curve.realThru = nextCurve.realThru.toString();
+    curve.realToken = nextCurve.realToken.toString();
+  }
+  const next = {
+    ...prev,
+    ...market,
+    mintAddress: market.mintAddress,
+    curve,
     chart: chart.slice(-CHART_HISTORY),
-    lastPrice: price.toString(),
-    stats,
+    lastPrice: priceStr,
+    stats: computeTradeStats(chart),
     updatedAt: t,
-  }, { publish: false }) || market;
+  };
+  if (index >= 0) markets[index] = next;
+  else markets.unshift(next);
+  // Local only — publishTradeActivity does the durable fan-out once.
+  saveMarkets(markets, { publish: false });
+  return next;
+}
+
+/**
+ * Heal markets where vault shows activity but chart has only seeds
+ * (crashed mid-buy / race wiped the print). Rebuilds a tape row + virtuals.
+ * Pure when persist=false (returns a new object); otherwise writes localStorage.
+ */
+function healMissingTradePrints(market, { persist = false, publish = false } = {}) {
+  if (!market?.mintAddress || !market?.curve) return market;
+  try {
+    const realThru = BigInt(market.curve.realThru || "0");
+    const trades = countMarketTrades(market);
+    if (realThru <= 0n || trades > 0) return market;
+
+    const vThru = BigInt(market.curve.virtualThru || "0");
+    const vTok = BigInt(market.curve.virtualToken || "0");
+    let curve = { ...market.curve };
+    // Virtual still at seed while vault has buy THRU → rebuild CP state.
+    if (vThru === CURVE_VIRTUAL_THRU && vTok > 0n && realThru > 0n) {
+      const k = vThru * vTok;
+      const feeBps = BigInt(Number(market.curve.tradeFeeBps) || Number(CURVE_TRADE_FEE_BPS) || 100);
+      const net = realThru - (realThru * feeBps) / 10000n;
+      const newVThru = vThru + (net > 0n ? net : realThru);
+      if (newVThru > 0n) {
+        curve.virtualThru = newVThru.toString();
+        curve.virtualToken = (k / newVThru).toString();
+      }
+    }
+    const patched = { ...market, curve };
+    const price = curveSpotPriceThruPerToken(patched);
+    if (price <= 0n) return market;
+    const t = Number(market.updatedAt) || Date.now();
+    const chart = readChart(market);
+    chart.push({
+      id: `heal-${market.mintAddress}-${realThru}`,
+      t,
+      price: price.toString(),
+      side: "buy",
+      thru: realThru.toString(),
+      tokens: "0",
+    });
+    const next = {
+      ...market,
+      curve,
+      chart: chart.slice(-CHART_HISTORY),
+      lastPrice: price.toString(),
+      stats: computeTradeStats(chart),
+      updatedAt: Date.now(),
+    };
+    if (!persist) return next;
+    return updateMarket(market.mintAddress, {
+      curve: next.curve,
+      chart: next.chart,
+      lastPrice: next.lastPrice,
+      stats: next.stats,
+      updatedAt: next.updatedAt,
+    }, { publish }) || next;
+  } catch {
+    return market;
+  }
 }
 
 function ensureChartSeed(market) {
@@ -1274,16 +1397,22 @@ async function syncCurveVaultFromChain(market) {
     const metaThru = BigInt(market.curve.realThru || "0");
     const metaToken = BigInt(market.curve.realToken || "0");
     // Always trust on-chain vault depth (fixes drained vaults after failed AMM attempts).
-    if (spendable === metaThru && onChainTokens === metaToken) return market;
-    return updateMarket(market.mintAddress, {
-      curve: {
-        realThru: spendable.toString(),
-        realToken: onChainTokens.toString(),
-      },
-      updatedAt: Date.now(),
-    }) || market;
+    let next = market;
+    if (spendable !== metaThru || onChainTokens !== metaToken) {
+      // Local-only — do not fan-out a vault-only patch that can wipe chart prints.
+      next = updateMarket(market.mintAddress, {
+        curve: {
+          realThru: spendable.toString(),
+          realToken: onChainTokens.toString(),
+        },
+        updatedAt: Date.now(),
+      }, { publish: false }) || market;
+    }
+    // If vault has buy THRU but tape is seed-only, restore a trade print.
+    next = healMissingTradePrints(next, { persist: true, publish: true });
+    return next;
   } catch {
-    return market;
+    return healMissingTradePrints(market, { persist: true, publish: true });
   }
 }
 
@@ -2231,27 +2360,43 @@ async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = 
       return now - created < 10 * 60 * 1000;
     });
     const before = marketsSignature(local);
-    const after = marketsSignature(merged);
-    localStorage.setItem(MARKETS_KEY, JSON.stringify(merged));
+    // Restore tape when vault has THRU but chart is seed-only (orphaned on-chain buys).
+    const healed = (merged || []).map((m) => {
+      try {
+        return healMissingTradePrints(m, { persist: false });
+      } catch {
+        return m;
+      }
+    });
+    const afterHeal = stampMarkets(healed);
+    localStorage.setItem(MARKETS_KEY, JSON.stringify(afterHeal));
     registryLiveAt = Date.now();
-    lastPublicBoard = { ok: true, count: Math.max(remote.length, merged.length), error: "" };
+    lastPublicBoard = { ok: true, count: Math.max(remote.length, afterHeal.length), error: "" };
 
     const remoteByMint = new Map((remote || []).map((m) => [m.mintAddress, m]));
     // Heal when market/key missing OR remote tape is behind local fills (friend must see us).
-    const needsHeal = (merged || []).some((l) => {
+    const needsHeal = (afterHeal || []).some((l) => {
       if (!l?.mintAddress || !l?.curve?.privateKeyHex) return false;
       const r = remoteByMint.get(l.mintAddress);
       if (!r) return true;
       if (!String(r?.curve?.privateKeyHex || "").trim()) return true;
-      return countMarketTrades(l) > countMarketTrades(r);
+      if (countMarketTrades(l) > countMarketTrades(r)) return true;
+      // Orphaned vault fill: we synthesized a print — push so friends see it too.
+      try {
+        const realThru = BigInt(l.curve?.realThru || "0");
+        return realThru > 0n && countMarketTrades(r) === 0 && countMarketTrades(l) > 0;
+      } catch {
+        return false;
+      }
     });
     if (needsHeal) {
       pushMarketsToPublic(readMarkets(), { attempts: 4 }).catch(() => {});
     }
     void publish;
 
+    const after = marketsSignature(afterHeal);
     if (activeTrade?.mintAddress) {
-      const fresh = merged.find((m) => m.mintAddress === activeTrade.mintAddress);
+      const fresh = afterHeal.find((m) => m.mintAddress === activeTrade.mintAddress);
       if (fresh) {
         const prevSig = [
           countMarketTrades(activeTrade),
@@ -3600,14 +3745,22 @@ let lastTapeSignature = "";
 function renderTradeTape(market) {
   const tape = document.querySelector("[data-trade-tape]");
   if (!tape) return;
-  const points = Array.isArray(market?.chart) ? market.chart.slice() : [];
+  // Always prefer the freshest storage row so a stale activeTrade can't hide fills.
+  const live = market?.mintAddress
+    ? (readMarkets().find((m) => m.mintAddress === market.mintAddress) || market)
+    : market;
+  const points = Array.isArray(live?.chart) ? live.chart.slice() : [];
   const trades = points
     .filter((p) => p && (p.side === "buy" || p.side === "sell"))
     .slice(-16)
     .reverse();
   if (!trades.length) {
     lastTapeSignature = "";
-    tape.innerHTML = `<p class="trade-tape-empty">No trades yet · waiting for buys/sells</p>`;
+    const realThru = live?.curve?.realThru;
+    const hint = realThru && realThru !== "0"
+      ? "Vault has THRU but no tape yet — refresh or buy again to publish."
+      : "No trades yet · waiting for buys/sells";
+    tape.innerHTML = `<p class="trade-tape-empty">${hint}</p>`;
     return;
   }
   const sig = trades.map((p) => `${p.t}:${p.side}:${p.thru}:${p.tokens}`).join("|");
@@ -3623,7 +3776,7 @@ function renderTradeTape(market) {
     } catch { /* ignore */ }
     try {
       tokens = point.tokens != null
-        ? formatUnits(BigInt(String(point.tokens)), market.decimals || 6)
+        ? formatUnits(BigInt(String(point.tokens)), live.decimals || 6)
         : "—";
     } catch { /* ignore */ }
     try {
@@ -3640,7 +3793,7 @@ function renderTradeTape(market) {
     return `
       <div class="trade-tape-row${flash}">
         <span class="side-${side}">${side.toUpperCase()}</span>
-        <span>${tokens} ${market.ticker || ""}</span>
+        <span>${tokens} ${live.ticker || ""}</span>
         <span class="tape-muted">${thru} THRU</span>
         <span class="tape-muted" title="${price}">${when || price}</span>
       </div>`;
@@ -3962,6 +4115,7 @@ async function openTrade(index, side) {
   const progress = activeTrade.curve ? curveProgress(activeTrade) : null;
   if (isBondingMarket(activeTrade)) {
     activeTrade = await syncCurveVaultFromChain(activeTrade);
+    activeTrade = healMissingTradePrints(activeTrade, { persist: true, publish: true });
     const c = readCurve(activeTrade);
     if (activeTrade.graduated) {
       document.querySelector("[data-trade-status]").textContent =
@@ -4189,24 +4343,27 @@ async function executeCurveTrade(amount, status) {
       fee: 0n,
       programLabel: "Curve buy fill",
     });
-    let updated = applyCurveState(market, quote.next);
-    const nextMarket = {
-      ...(updated || market),
-      curve: {
-        ...(updated || market).curve,
-        virtualThru: quote.next.virtualThru.toString(),
-        virtualToken: quote.next.virtualToken.toString(),
-        realThru: quote.next.realThru.toString(),
-        realToken: quote.next.realToken.toString(),
-      },
-    };
-    const buyPrice = curveSpotPriceThruPerToken(nextMarket);
-    updated = appendChartPoint(nextMarket, {
+    // Record curve + tape print in one write BEFORE any network sync/publish.
+    const buyPrice = (() => {
+      const provisional = {
+        ...market,
+        curve: {
+          ...market.curve,
+          virtualThru: quote.next.virtualThru.toString(),
+          virtualToken: quote.next.virtualToken.toString(),
+          realThru: quote.next.realThru.toString(),
+          realToken: quote.next.realToken.toString(),
+        },
+      };
+      return curveSpotPriceThruPerToken(provisional);
+    })();
+    let updated = recordCurveFill(market, {
       side: "buy",
       price: buyPrice,
       thru: amount,
       tokens: quote.tokensOut,
-    }) || nextMarket;
+      nextCurve: quote.next,
+    });
     let successMsg =
       `✓ Buy confirmed — received ${formatUnits(quote.tokensOut, market.decimals)} ${market.ticker} ` +
       `for ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU ` +
@@ -4217,7 +4374,9 @@ async function executeCurveTrade(amount, status) {
         ? " Market graduated and AMM was seeded."
         : " Market graduated — curve still tradeable.";
     }
-    activeTrade = updated || readMarkets().find((m) => m.mintAddress === market.mintAddress);
+    activeTrade = updated
+      || readMarkets().find((m) => m.mintAddress === market.mintAddress)
+      || market;
     status.textContent = successMsg;
     try {
       pushLiveTradePoint({
@@ -4230,10 +4389,14 @@ async function executeCurveTrade(amount, status) {
     renderTokenChart(activeTrade);
     renderTradeTape(activeTrade);
     renderMarkets();
-    // Await durable publish so other devices pick this fill up on their next poll.
+    // Await durable publish so other devices (and re-open) see the tape.
     try {
       await publishTradeActivity(activeTrade, null);
     } catch { /* soft-fail — background heal may still land */ }
+    // Re-read after publish (merge may attach peer fills).
+    activeTrade = readMarkets().find((m) => m.mintAddress === market.mintAddress) || activeTrade;
+    renderTradeTape(activeTrade);
+    renderTokenChart(activeTrade);
     await refreshTradeBalances();
     await refreshBalance();
     refreshOpenTradeUi({ sync: true }).then(() => {
@@ -4272,25 +4435,29 @@ async function executeCurveTrade(amount, status) {
     fee: 0n,
     programLabel: "Curve sell payout",
   });
-  let updated = applyCurveState(market, quote.next);
-  const nextMarket = {
-    ...(updated || market),
-    curve: {
-      ...(updated || market).curve,
-      virtualThru: quote.next.virtualThru.toString(),
-      virtualToken: quote.next.virtualToken.toString(),
-      realThru: quote.next.realThru.toString(),
-      realToken: quote.next.realToken.toString(),
-    },
-  };
-  const sellPrice = curveSpotPriceThruPerToken(nextMarket);
-  updated = appendChartPoint(nextMarket, {
+  const sellPrice = (() => {
+    const provisional = {
+      ...market,
+      curve: {
+        ...market.curve,
+        virtualThru: quote.next.virtualThru.toString(),
+        virtualToken: quote.next.virtualToken.toString(),
+        realThru: quote.next.realThru.toString(),
+        realToken: quote.next.realToken.toString(),
+      },
+    };
+    return curveSpotPriceThruPerToken(provisional);
+  })();
+  let updated = recordCurveFill(market, {
     side: "sell",
     price: sellPrice,
     thru: quote.netThru,
     tokens: amount,
-  }) || nextMarket;
-  activeTrade = updated || market;
+    nextCurve: quote.next,
+  });
+  activeTrade = updated
+    || readMarkets().find((m) => m.mintAddress === market.mintAddress)
+    || market;
   const successMsg =
     `✓ Sell confirmed — received ${formatUnits(quote.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
     `for ${formatUnits(amount, market.decimals)} ${market.ticker} ` +
@@ -4310,6 +4477,9 @@ async function executeCurveTrade(amount, status) {
   try {
     await publishTradeActivity(activeTrade, null);
   } catch { /* soft-fail */ }
+  activeTrade = readMarkets().find((m) => m.mintAddress === market.mintAddress) || activeTrade;
+  renderTradeTape(activeTrade);
+  renderTokenChart(activeTrade);
   await refreshTradeBalances();
   await refreshBalance();
   refreshOpenTradeUi({ sync: true }).then(() => {
@@ -4328,6 +4498,10 @@ async function executeTrade() {
     return;
   }
 
+  // Pause live poll so a mid-fill sync cannot clobber the fresh tape write.
+  const resumeLive = Boolean(tradeLiveTimer);
+  stopTradeLiveFeed();
+
   // Pull peer trades first so quotes use the latest curve (friend's buy marks you up).
   try {
     await syncPublicMarkets({ mode: "full", publish: false });
@@ -4336,6 +4510,7 @@ async function executeTrade() {
     activeTrade = resolveTradeMarket(
       readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress) || activeTrade,
     ) || activeTrade;
+    activeTrade = healMissingTradePrints(activeTrade, { persist: true, publish: true });
   }
 
   const value = document.querySelector("[data-trade-amount]").value;
@@ -4348,6 +4523,7 @@ async function executeTrade() {
     if (amount <= 0n) throw new Error("Enter an amount greater than zero.");
   } catch (reason) {
     status.textContent = reason.message;
+    if (resumeLive) startTradeLiveFeed();
     return;
   }
 
@@ -4415,6 +4591,9 @@ async function executeTrade() {
     status.textContent = reason instanceof Error ? reason.message : "Trade failed on Thru.";
   } finally {
     button.disabled = false;
+    if (resumeLive || (activeTrade && document.querySelector("[data-trade-modal]")?.hidden === false)) {
+      startTradeLiveFeed();
+    }
   }
 }
 
