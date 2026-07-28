@@ -116,13 +116,17 @@ const ZERO_STATS = Object.freeze({
   tvl: 0n,
 });
 
-/** Target stats waiting for / used by the count-up. */
+/** Latest target stats (updated by registry polls). */
 let pendingProtocolStats = null;
+/** True once the 0 → N intro has begun (never restart from zero after this). */
+let protocolCountStarted = false;
 /** True after the 0 → N intro animation has finished once. */
 let protocolCountDone = false;
 /** True when the protocol stats card is (or has been) on screen. */
 let protocolStatsInView = false;
 let protocolCountRaf = 0;
+/** Last painted final values — avoid unnecessary DOM writes / flashes. */
+let lastPaintedStatsKey = "";
 
 function formatThruDisplay(baseUnits) {
   try {
@@ -185,12 +189,21 @@ function paintStatValue(key, value) {
   if (element.textContent !== next) element.textContent = next;
 }
 
+function statsKey(stats) {
+  const n = normalizeStats(stats);
+  return `${n.markets}|${n.trades}|${n.graduated}|${n.volume.toString()}|${n.tvl.toString()}`;
+}
+
 function paintStats(stats, { flash = false } = {}) {
   const normalized = normalizeStats(stats);
-  STAT_KEYS.forEach((key) => {
-    paintStatValue(key, normalized[key]);
+  const key = statsKey(normalized);
+  // Skip no-op repaints (registry poll every few seconds).
+  if (!flash && key === lastPaintedStatsKey) return;
+  lastPaintedStatsKey = key;
+  STAT_KEYS.forEach((statKey) => {
+    paintStatValue(statKey, normalized[statKey]);
     if (!flash) return;
-    const element = document.querySelector(`[data-stat="${key}"]`);
+    const element = document.querySelector(`[data-stat="${statKey}"]`);
     if (!element) return;
     element.classList.add("stat-flash");
     window.setTimeout(() => element.classList.remove("stat-flash"), 600);
@@ -203,6 +216,7 @@ function paintInterpolatedStats(from, to, t) {
   paintStatValue("graduated", lerpInt(from.graduated, to.graduated, t));
   paintStatValue("volume", lerpBig(from.volume, to.volume, t));
   paintStatValue("tvl", lerpBig(from.tvl, to.tvl, t));
+  lastPaintedStatsKey = ""; // mid-animation; allow final paint
 }
 
 function stopProtocolCount() {
@@ -212,32 +226,44 @@ function stopProtocolCount() {
   }
 }
 
-/** One-shot 0 → target count. Later refreshes just snap to the new value. */
+/**
+ * One-shot 0 → target count.
+ * Never restarts from zero after it has begun — later polls only retarget or snap.
+ */
 function startProtocolCountUp(stats) {
-  const target = normalizeStats(stats);
-  pendingProtocolStats = target;
+  pendingProtocolStats = normalizeStats(stats);
+
+  // Already finished: just show the latest numbers (no reset).
   if (protocolCountDone) {
-    paintStats(target, { flash: true });
-    return;
-  }
-  if (!protocolStatsInView) {
-    // Hold zeros until the card is visible.
-    paintStats(ZERO_STATS);
+    paintStats(pendingProtocolStats, { flash: false });
     return;
   }
 
-  stopProtocolCount();
-  paintStats(ZERO_STATS);
-  const from = { ...ZERO_STATS };
+  // Animation already running: keep going toward the latest pending target.
+  if (protocolCountStarted) return;
+
+  // Wait until the card is on screen before counting.
+  if (!protocolStatsInView) return;
+
+  protocolCountStarted = true;
+  const from = {
+    markets: 0,
+    trades: 0,
+    graduated: 0,
+    volume: 0n,
+    tvl: 0n,
+  };
+  paintStats(from);
   const startedAt = performance.now();
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (reduceMotion) {
-    paintStats(target, { flash: true });
+    paintStats(pendingProtocolStats, { flash: true });
     protocolCountDone = true;
     return;
   }
 
   const tick = (now) => {
+    const target = pendingProtocolStats || from;
     const progress = Math.min(1, (now - startedAt) / COUNT_DURATION_MS);
     paintInterpolatedStats(from, target, easeOutCubic(progress));
     if (progress < 1) {
@@ -245,8 +271,9 @@ function startProtocolCountUp(stats) {
       return;
     }
     protocolCountRaf = 0;
-    paintStats(target, { flash: true });
     protocolCountDone = true;
+    protocolCountStarted = true;
+    paintStats(pendingProtocolStats || target, { flash: true });
   };
   protocolCountRaf = requestAnimationFrame(tick);
 }
@@ -300,12 +327,15 @@ function setProtocolLive(state, text) {
 function applyStats(stats) {
   const normalized = normalizeStats(stats);
   pendingProtocolStats = normalized;
-  if (!protocolCountDone) {
-    startProtocolCountUp(normalized);
+
+  // After intro: only update the display if numbers actually changed.
+  if (protocolCountDone) {
+    paintStats(normalized, { flash: false });
     return;
   }
-  // After the intro count, keep values updated without replaying 0 → N.
-  paintStats(normalized, { flash: true });
+
+  // During / before intro: never force zeros from a poll — start or retarget once.
+  startProtocolCountUp(normalized);
 }
 
 function readLocalMarkets() {
@@ -433,18 +463,18 @@ document.querySelectorAll(".nav-pill a").forEach((link) => {
 // Watch the stats card: count 0 → N the first time it enters the viewport.
 const protocolStatsEl = document.querySelector("[data-protocol-stats]");
 if (protocolStatsEl) {
-  // Show zeros until the intro animation runs.
-  paintStats(ZERO_STATS);
+  // Initial zeros only once; polls must never re-zero this.
+  if (!protocolCountStarted && !protocolCountDone) {
+    paintStats(ZERO_STATS);
+  }
   const statsObserver = new IntersectionObserver(
     (entries) => {
       entries.forEach((entry) => {
         if (!entry.isIntersecting) return;
         protocolStatsInView = true;
-        if (pendingProtocolStats && !protocolCountDone) {
+        // Start the one-shot count if we already have data; never reset if done.
+        if (!protocolCountDone && pendingProtocolStats) {
           startProtocolCountUp(pendingProtocolStats);
-        } else if (!pendingProtocolStats && !protocolCountDone) {
-          // Data still loading — keep zeros until applyStats arrives.
-          paintStats(ZERO_STATS);
         }
         statsObserver.disconnect();
       });
