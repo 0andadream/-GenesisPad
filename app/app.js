@@ -27,6 +27,51 @@ let wrapSide = "wrap";
 /** Assets available to send from the wallet (native, wTHRU, held mints). */
 let walletSendAssets = [];
 
+const THEME_KEY = "genesis-theme";
+
+function getPreferredTheme() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === "light" || saved === "dark") return saved;
+  } catch {
+    /* ignore */
+  }
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function applyTheme(theme) {
+  const next = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = next;
+  document.documentElement.style.colorScheme = next;
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch {
+    /* ignore */
+  }
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = next === "dark" ? "#121211" : "#f4f4f2";
+  document.querySelectorAll("[data-theme-icon]").forEach((el) => {
+    el.textContent = next === "dark" ? "☀" : "☾";
+  });
+  document.querySelectorAll("[data-theme-toggle]").forEach((btn) => {
+    const toLight = next === "dark";
+    btn.setAttribute("aria-label", toLight ? "Switch to light mode" : "Switch to dark mode");
+    btn.title = toLight ? "Light mode" : "Dark mode";
+  });
+}
+
+function initTheme() {
+  applyTheme(getPreferredTheme());
+  document.querySelectorAll("[data-theme-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+      applyTheme(current === "dark" ? "light" : "dark");
+    });
+  });
+}
+
+initTheme();
+
 document.querySelectorAll("[role='tablist'] button").forEach((button) => {
   button.addEventListener("click", () => {
     if (button.dataset.filter) {

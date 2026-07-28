@@ -44,6 +44,17 @@
   border-radius: 50%;
 }
 
+html[data-theme="dark"] .sculpture-image {
+  filter: grayscale(1) contrast(1.05) brightness(0.72);
+  opacity: 0.9;
+}
+
+html[data-theme="dark"] .sculpture-orbit,
+html[data-theme="dark"] .sculpture-orbit::before,
+html[data-theme="dark"] .sculpture-orbit::after {
+  border-color: rgba(240, 239, 233, 0.12);
+}
+
 .sculpture-orbit::after {
   inset: 28%;
 }
@@ -71,6 +82,20 @@
     0 0 5px #eeeeec,
     0 0 12px #eeeeec,
     0 0 22px #eeeeec;
+}
+
+html[data-theme="dark"] .engine .steps article::before {
+  background: rgba(18, 18, 16, 0.72);
+}
+
+html[data-theme="dark"] .engine .steps span,
+html[data-theme="dark"] .engine .steps h3,
+html[data-theme="dark"] .engine .steps p {
+  color: #f0efe9;
+  text-shadow:
+    0 0 5px #121211,
+    0 0 12px #121211,
+    0 0 22px #121211;
 }
 
 .engine .steps h3 {

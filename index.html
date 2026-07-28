@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Genesis — public bonding-curve launchpad on Thru Alphanet. Launch, trade, and graduate markets on-chain." />
     <meta name="theme-color" content="#f4f4f2" />
+    <script>
+      (function () {
+        try {
+          var key = "genesis-theme";
+          var theme = localStorage.getItem(key);
+          if (theme !== "light" && theme !== "dark") {
+            theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          }
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch (e) {}
+      })();
+    </script>
     <title>Genesis — Launchpad on Thru</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
@@ -34,7 +47,12 @@
     <header class="site-header">
       <a class="brand" href="#home"><img src="/genesis-logo.png" alt="" /><strong>GENESIS</strong></a>
       <nav><a href="#protocol">Protocol</a><a href="#engine">Engine</a><a href="#principles">Principles</a></nav>
-      <a class="launch-link" href="/app/">Launch app <i>↗</i></a>
+      <div class="header-end">
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark mode" title="Dark mode">
+          <span data-theme-icon aria-hidden="true">☾</span>
+        </button>
+        <a class="launch-link" href="/app/">Launch app <i>↗</i></a>
+      </div>
     </header>
 
     <main>
@@ -89,10 +107,10 @@
         <div class="section-index">IV — FIRST PRINCIPLES</div>
         <h2>Built like an institution.<br /><em>Owned by no institution.</em></h2>
         <div class="principle-grid">
-          <article><b>Α</b><h3>Lightning fast</h3><p>Responsiveness measured in intent, not waiting.</p></article>
-          <article><b>Β</b><h3>Capital efficient</h3><p>Every unit of liquidity works across two engines.</p></article>
-          <article><b>Γ</b><h3>Self-custodial</h3><p>Your keys remain the final authority over your assets.</p></article>
-          <article><b>Δ</b><h3>On-chain truth</h3><p>Every execution resolves into a permanent public record.</p></article>
+          <article><h3>Lightning fast</h3><p>Responsiveness measured in intent, not waiting.</p></article>
+          <article><h3>Capital efficient</h3><p>Every unit of liquidity works across two engines.</p></article>
+          <article><h3>Self-custodial</h3><p>Your keys remain the final authority over your assets.</p></article>
+          <article><h3>On-chain truth</h3><p>Every execution resolves into a permanent public record.</p></article>
         </div>
       </section>
 
