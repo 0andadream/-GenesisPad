@@ -302,9 +302,11 @@ module.exports = async function handler(req, res) {
         ? JSON.parse(req.body || "{}")
         : (req.body || {});
       const incoming = Array.isArray(body.markets) ? body.markets : [];
+      const forceEmpty = Boolean(body.forceEmpty || body.wipe);
       const existing = await readBoard();
 
-      if (!incoming.length && existing.markets.length) {
+      // Refuse accidental empty publishes, but allow explicit launch clean-slate wipes.
+      if (!incoming.length && existing.markets.length && !forceEmpty) {
         res.status(200).json({
           markets: existing.markets,
           updatedAt: existing.updatedAt,
@@ -315,7 +317,9 @@ module.exports = async function handler(req, res) {
         return;
       }
 
-      const markets = mergeMarkets(existing.markets, incoming);
+      const markets = forceEmpty && !incoming.length
+        ? []
+        : mergeMarkets(existing.markets, incoming);
       const written = await writeBoard(markets);
 
       // Prefer re-read merge, but never drop the board we just accepted.

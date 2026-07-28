@@ -149,7 +149,8 @@ const NATIVE_TRANSFER_FEE = 1n;
 let connectedAccount = null;
 let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
-const MARKETS_KEY = "genesis-markets";
+// Bumped at public-launch clean slate so old local test boards are abandoned.
+const MARKETS_KEY = "genesis-markets-v2";
 // Public board: SAME-ORIGIN API only.
 // Hitting free JSONBlob from every browser tab caused 429 rate-limits and false
 // "not public" / friends-can't-see failures. The API merges + fans out server-side.
