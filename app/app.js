@@ -260,7 +260,7 @@ function activateAccount(account) {
   }
   setWalletState(compactAddress(account.address));
   document.querySelector("[data-account-address]").textContent = account.address;
-  document.querySelector("[data-explorer]").href = `https://scan.thru.org/account/${account.address}`;
+  document.querySelector("[data-explorer]").href = `https://scan.thru.org/address/${account.address}`;
   if (createButton) createButton.textContent = "Deploy token on Thru";
   if (createStatus) createStatus.textContent = "Thru wallet connected locally. The private key remains only in this browser tab.";
   showWalletView("account");
@@ -3676,7 +3676,7 @@ async function openTrade(index, side) {
   const mintLink = document.querySelector("[data-trade-mint-link]");
   if (mintLink) {
     if (mint) {
-      mintLink.href = `https://scan.thru.org/account/${mint}`;
+      mintLink.href = `https://scan.thru.org/address/${mint}`;
       mintLink.hidden = false;
       mintLink.title = mint;
     } else {
