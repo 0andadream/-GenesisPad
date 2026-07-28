@@ -1580,6 +1580,15 @@ function saveMarkets(markets, { publish = true } = {}) {
  * Fetch one registry URL with a hard timeout + cache bust.
  * @returns {{ ok: boolean, markets: any[], error?: string, url: string }}
  */
+function parseRegistryTime(value) {
+  if (value == null || value === "") return 0;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const asNum = Number(value);
+  if (Number.isFinite(asNum) && asNum > 0) return asNum;
+  const asDate = Date.parse(String(value));
+  return Number.isFinite(asDate) ? asDate : 0;
+}
+
 async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_MS } = {}) {
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = controller
@@ -1602,7 +1611,13 @@ async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_
     const markets = Array.isArray(data.markets)
       ? data.markets
       : Array.isArray(data) ? data : [];
-    return { ok: true, markets, url };
+    return {
+      ok: true,
+      markets,
+      url,
+      wiped: Boolean(data?.wiped || data?.wipe || data?.forceEmpty) && markets.length === 0,
+      updatedAt: parseRegistryTime(data?.updatedAt),
+    };
   } catch (reason) {
     const aborted = reason?.name === "AbortError";
     return {
@@ -1619,19 +1634,15 @@ async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_
 }
 
 /**
- * Optional extra sources (static bootstrap + JSONBlob mirrors).
- * No GitHub login. Gist is intentionally NOT merged here — it often still
- * holds deleted tokens when there is no server token to clear it.
+ * JSONBlob mirrors only (not static markets-board.json — that file is a permanent
+ * wipe snapshot and was making new tokens flash then vanish on poll).
  */
 async function fetchMirrorMarkets() {
   const lists = [];
   let newestWipeAt = 0;
-  let sawExplicitWipe = false;
-  const urls = [
-    ...MARKET_BLOB_URLS,
-    "/markets-board.json",
-  ];
-  await Promise.all(urls.map(async (url) => {
+  let wipeVotes = 0;
+  let blobOk = 0;
+  await Promise.all(MARKET_BLOB_URLS.map(async (url) => {
     try {
       const response = await fetch(`${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`, {
         headers: { Accept: "application/json" },
@@ -1639,51 +1650,53 @@ async function fetchMirrorMarkets() {
         mode: "cors",
       });
       if (!response.ok) return;
+      blobOk += 1;
       const data = await response.json();
-      // Honor explicit wipe: empty + wipe flag means board is intentionally empty.
-      if (
+      const markets = Array.isArray(data?.markets)
+        ? data.markets
+        : Array.isArray(data) ? data : [];
+      const updatedAt = parseRegistryTime(
+        data && typeof data === "object" && !Array.isArray(data) ? data.updatedAt : 0,
+      );
+      const wipedAt = parseRegistryTime(
+        data && typeof data === "object" && !Array.isArray(data)
+          ? (data.wipedAt || data.updatedAt)
+          : 0,
+      );
+      const isWipe = Boolean(
         data
         && typeof data === "object"
         && !Array.isArray(data)
         && (data.wipe || data.forceEmpty)
-        && Array.isArray(data.markets)
-        && data.markets.length === 0
-      ) {
-        sawExplicitWipe = true;
-        newestWipeAt = Math.max(
-          newestWipeAt,
-          Number(data.wipedAt || data.updatedAt || 0),
-        );
+        && markets.length === 0,
+      );
+      if (isWipe) {
+        wipeVotes += 1;
+        newestWipeAt = Math.max(newestWipeAt, wipedAt || updatedAt);
         return;
       }
-      const markets = Array.isArray(data?.markets)
-        ? data.markets
-        : Array.isArray(data) ? data : [];
-      const updatedAt = Number(
-        (data && typeof data === "object" && !Array.isArray(data) && data.updatedAt) || 0,
-      );
       if (markets.length) lists.push({ markets, updatedAt });
     } catch {
       /* ignore */
     }
   }));
-  // If any mirror is an explicit empty wipe and nothing newer exists, board is empty.
-  if (sawExplicitWipe) {
-    const postWipe = lists
-      .filter((entry) => !newestWipeAt || entry.updatedAt > newestWipeAt)
-      .map((entry) => entry.markets);
-    const markets = stampMarkets(mergeMarketLists(...postWipe));
-    return { markets, wiped: markets.length === 0, wipedAt: newestWipeAt };
-  }
+
   const markets = stampMarkets(mergeMarketLists(...lists.map((e) => e.markets)));
-  return { markets, wiped: false, wipedAt: 0 };
+  // Wipe only if majority of reachable blobs agree AND no blob still has markets.
+  const wipeConsensus = wipeVotes > 0
+    && wipeVotes >= Math.ceil(Math.max(blobOk, 1) / 2)
+    && markets.length === 0;
+  return {
+    markets,
+    wiped: wipeConsensus,
+    wipedAt: wipeConsensus ? newestWipeAt : 0,
+  };
 }
 
 /**
  * Read the public board from /api/markets + durable mirrors.
- * CRITICAL: failed fetches must NOT be treated as empty boards —
- * except when mirrors report an explicit clean-slate wipe.
- * Friends must merge multi-source so a cold API instance is not a blind spot.
+ * CRITICAL: failed fetches must NOT be treated as empty boards.
+ * Stale wipe mirrors must NOT erase a live API board (show-then-vanish bug).
  */
 async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
   void mode;
@@ -1695,24 +1708,42 @@ async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
   ]);
   const mirrors = mirrorResult.markets || [];
   const mirrorWiped = Boolean(mirrorResult.wiped);
+  const apiMarkets = result.ok ? (result.markets || []) : [];
 
-  // Explicit wipe on mirrors wins over a stale warm API instance still
-  // holding deleted tokens.
-  if (mirrorWiped && mirrors.length === 0) {
+  // Live markets always win over a lagging wipe payload.
+  if (apiMarkets.length || mirrors.length) {
+    const markets = stampMarkets(mergeMarketLists(apiMarkets, mirrors));
+    lastPublicBoard = { ok: true, count: markets.length, error: "" };
+    return {
+      ok: true,
+      markets,
+      durable: mirrors.length > 0 || result.ok,
+      wiped: false,
+    };
+  }
+
+  // Both empty: only treat as intentional wipe when API and/or mirrors agree.
+  if (result.ok && (result.wiped || mirrorWiped)) {
     lastPublicBoard = { ok: true, count: 0, error: "" };
     return {
       ok: true,
       markets: [],
       durable: true,
       wiped: true,
-      wipedAt: mirrorResult.wipedAt || 0,
+      wipedAt: mirrorResult.wipedAt || result.updatedAt || 0,
     };
   }
 
   if (!result.ok) {
-    if (mirrors.length) {
-      lastPublicBoard = { ok: true, count: mirrors.length, error: "" };
-      return { ok: true, markets: mirrors, fromBootstrap: true, durable: true };
+    if (mirrorWiped) {
+      lastPublicBoard = { ok: true, count: 0, error: "" };
+      return {
+        ok: true,
+        markets: [],
+        durable: true,
+        wiped: true,
+        wipedAt: mirrorResult.wipedAt || 0,
+      };
     }
     lastPublicBoard = {
       ok: false,
@@ -1721,14 +1752,10 @@ async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
     };
     return { ok: false, markets: [], error: lastPublicBoard.error };
   }
-  const markets = stampMarkets(mergeMarketLists(result.markets, mirrors));
-  lastPublicBoard = { ok: true, count: markets.length, error: "" };
-  return {
-    ok: true,
-    markets,
-    durable: mirrors.length > 0 || Boolean(result.ok),
-    wiped: false,
-  };
+
+  // Empty API, no wipe signal — still a valid empty board (not an error).
+  lastPublicBoard = { ok: true, count: 0, error: "" };
+  return { ok: true, markets: [], durable: true, wiped: false };
 }
 
 async function fetchPublicMarkets() {
@@ -1748,6 +1775,7 @@ async function publishToBlobMirrors(markets) {
     note: "GenesisPad public market registry",
     wipe: false,
     forceEmpty: false,
+    wipedAt: 0,
   };
   const body = JSON.stringify(payload);
   const results = await Promise.all(
@@ -1879,12 +1907,10 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
         const remoteMints = mintSet(remote);
         const now = Date.now();
 
-        // Explicit public wipe: abandon local ghosts and do not republish them.
+        // Explicit public wipe: drop old local ghosts, but keep a brand-new
+        // requireMint launch (and never clear a just-created token on poll lag).
         if (remoteResult.ok && remoteResult.wiped && remote.length === 0) {
-          localStorage.setItem(MARKETS_KEY, JSON.stringify([]));
-          lastPublicBoard = { ok: true, count: 0, error: "" };
           if (requireMint) {
-            // Still allow a brand-new launch right after a wipe.
             const onlyNew = stampMarkets((localMarkets || []).filter(
               (m) => m?.mintAddress === requireMint,
             ));
@@ -1900,7 +1926,14 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
             lastPublicBoard = { ok: true, count: publicView.length, error: "" };
             return publicView;
           }
-          return [];
+          const recentKeep = stampMarkets((localMarkets || []).filter((market) => {
+            if (!market?.mintAddress) return false;
+            const created = Number(market.createdAt || market.updatedAt || 0);
+            return created > 0 && now - created < 5 * 60 * 1000;
+          }));
+          localStorage.setItem(MARKETS_KEY, JSON.stringify(recentKeep));
+          lastPublicBoard = { ok: true, count: recentKeep.length, error: "" };
+          return recentKeep;
         }
 
         const pushableLocal = (localMarkets || []).filter((market) => {
@@ -1946,27 +1979,35 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
           );
         }
 
-        // Brief re-read across API + mirrors; create flow must see mint durably.
+        // Prefer the publish result; a lagging wipe re-read must not erase it.
         await new Promise((r) => setTimeout(r, 200));
         const confirmed = await fetchPublicMarketsDetailed();
         let publicView = published;
-        if (confirmed.ok) {
+        if (confirmed.ok && !confirmed.wiped) {
           publicView = stampMarkets(mergeMarketLists(confirmed.markets, published));
         }
         publicView = stampMarkets(mergeMarketLists(publicView, merged));
 
         if (requireMint) {
-          const onDurableRead = confirmed.ok && remoteHasMint(confirmed.markets, requireMint);
           const wroteDurable = Boolean(publishResult.durable);
-          if (!onDurableRead && !wroteDurable) {
+          const onPublished = remoteHasMint(published, requireMint);
+          const onConfirm = confirmed.ok
+            && !confirmed.wiped
+            && remoteHasMint(confirmed.markets, requireMint);
+          // Success if PUT body had the mint AND (durable write OR confirm saw it).
+          // Do not fail solely because a lagging wipe re-read returned empty.
+          if (!onPublished) {
+            throw new Error(
+              "Token was not present in the public board response. Retrying…",
+            );
+          }
+          if (!wroteDurable && !onConfirm) {
             throw new Error(
               "Public board write did not stick on shared mirrors. Retrying…",
             );
           }
           if (!remoteHasMint(publicView, requireMint)) {
-            throw new Error(
-              "Token was not present after public board confirm. Retrying…",
-            );
+            publicView = stampMarkets(mergeMarketLists(publicView, published, merged));
           }
         }
 
@@ -2031,23 +2072,25 @@ async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = 
     const remoteMints = mintSet(remote);
     const now = Date.now();
 
-    // Explicit wipe: public board is empty on purpose — drop local ghosts.
-    if (remoteResult.wiped && remote.length === 0) {
-      localStorage.setItem(MARKETS_KEY, JSON.stringify([]));
-      registryLiveAt = Date.now();
-      lastPublicBoard = { ok: true, count: 0, error: "" };
-      void publish;
-      return [];
-    }
-
-    // Public board is source of truth. Only keep local-only markets created in the
-    // last few minutes (in-flight launches). Older local ghosts must not reappear
-    // after a public wipe or on friends' machines.
+    // Public board is source of truth. Always keep local-only markets created in
+    // the last few minutes (in-flight launches) — including when remote reports
+    // wipe/empty, so a lagging wipe cannot make a new token flash then vanish.
     const recentLocalOnly = (local || []).filter((market) => {
       if (!market?.mintAddress || remoteMints.has(market.mintAddress)) return false;
       const created = Number(market.createdAt || market.updatedAt || 0);
-      return created > 0 && now - created < 5 * 60 * 1000;
+      return created > 0 && now - created < 10 * 60 * 1000;
     });
+
+    // Intentional wipe + no remote markets: drop old ghosts, keep only recent.
+    if (remoteResult.wiped && remote.length === 0) {
+      const kept = stampMarkets(recentLocalOnly);
+      localStorage.setItem(MARKETS_KEY, JSON.stringify(kept));
+      registryLiveAt = Date.now();
+      lastPublicBoard = { ok: true, count: kept.length, error: "" };
+      void publish;
+      return kept;
+    }
+
     const merged = stampMarkets(mergeMarketLists(remote, recentLocalOnly));
     const before = marketsSignature(local);
     const after = marketsSignature(merged);

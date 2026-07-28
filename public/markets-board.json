@@ -1,8 +1,8 @@
 {
   "markets": [],
-  "updatedAt": 1785251468320,
-  "note": "GenesisPad public market registry \u2014 clean slate",
-  "wipedAt": "2026-07-28T15:11:08Z",
-  "forceEmpty": true,
-  "wipe": true
+  "updatedAt": 0,
+  "note": "Static bootstrap only — live board is /api/markets + JSONBlob mirrors",
+  "wipe": false,
+  "forceEmpty": false,
+  "wipedAt": 0
 }
