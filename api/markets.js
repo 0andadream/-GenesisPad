@@ -1,11 +1,10 @@
 /**
  * GenesisPad public market registry (same-origin).
  *
- * Primary durable store: public GitHub Gist (survives free JSONBlob 429s).
- * Optional: GENESIS_GITHUB_TOKEN (gist scope) enables writes to the gist.
- * Fallback: JSONBlob mirrors + warm memory.
- *
- * Gist id: 1be3933a7f446c5279054e8113b6786a (0andadream)
+ * No GitHub login required.
+ * Server merges all publishes, keeps warm memory, and fans out to JSONBlob
+ * mirrors (with retries). Optional GENESIS_GITHUB_TOKEN still upgrades Gist
+ * durability in the background, but is not required for public launches.
  */
 
 const GIST_ID = process.env.GENESIS_MARKETS_GIST_ID || "1be3933a7f446c5279054e8113b6786a";
@@ -19,12 +18,14 @@ const SEED_MIRROR_IDS = [
   "019fa906-1003-7f56-8791-16529d818eb5",
   "019fa916-0e91-740e-bbe3-25c05e8299c4",
   "019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
+  "019fa3f5-4529-7bc8-b2ab-7ff7b640fc70",
+  "019fa8d5-e68c-74ed-8f39-20591b09abce",
 ].filter(Boolean);
 
 const JSONBLOB = "https://jsonblob.com/api/jsonBlob";
 
-/** @type {{ markets: any[], updatedAt: number, mirrorIds: string[] }} */
-let memoryBoard = { markets: [], updatedAt: 0, mirrorIds: [...SEED_MIRROR_IDS] };
+/** @type {{ markets: any[], updatedAt: number }} */
+let memoryBoard = { markets: [], updatedAt: 0 };
 
 function githubToken() {
   return (
@@ -53,7 +54,6 @@ function isProbeMint(mid) {
     || id.startsWith("test-")
     || id.startsWith("ta-friend-test-")
     || id.startsWith("taDurableProbe")
-    || id.startsWith("taVIS")
     || id === "cooldown"
     || id === "seed"
     || id === "seed2"
@@ -90,70 +90,32 @@ async function readJson(url) {
     headers: { Accept: "application/json", "User-Agent": "genesispad-registry" },
     cache: "no-store",
   });
-  if (!response.ok) {
-    throw new Error(`GET ${response.status} ${url}`);
-  }
+  if (!response.ok) throw new Error(`GET ${response.status}`);
   return response.json();
 }
 
 async function readGist() {
   try {
-    // Prefer API (always latest) when token present; raw otherwise.
-    const token = githubToken();
-    if (token) {
-      const response = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-          "User-Agent": "genesispad-registry",
-        },
-        cache: "no-store",
-      });
-      if (response.ok) {
-        const gist = await response.json();
-        const file = gist.files?.[GIST_FILENAME];
-        if (file?.content) {
-          const data = JSON.parse(file.content);
-          const markets = Array.isArray(data?.markets) ? data.markets : [];
-          return { ok: true, markets, source: "gist-api" };
-        }
-        if (file?.raw_url) {
-          const data = await readJson(file.raw_url);
-          const markets = Array.isArray(data?.markets) ? data.markets : [];
-          return { ok: true, markets, source: "gist-raw" };
-        }
-      }
-    }
     const data = await readJson(GIST_RAW);
     const markets = Array.isArray(data?.markets) ? data.markets : [];
-    return { ok: true, markets, source: "gist-raw" };
+    return { ok: true, markets };
   } catch (reason) {
     return {
       ok: false,
       markets: [],
       error: reason instanceof Error ? reason.message : "gist read failed",
-      source: "gist",
     };
   }
 }
 
 async function writeGist(markets) {
   const token = githubToken();
-  if (!token) {
-    return { ok: false, error: "GENESIS_GITHUB_TOKEN not set" };
-  }
+  if (!token) return { ok: false, error: "no-token" };
   const payload = {
     markets,
     updatedAt: Date.now(),
     note: "GenesisPad public market registry",
   };
-  const body = JSON.stringify({
-    files: {
-      [GIST_FILENAME]: {
-        content: JSON.stringify(payload),
-      },
-    },
-  });
   const response = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
     method: "PATCH",
     headers: {
@@ -162,11 +124,14 @@ async function writeGist(markets) {
       "Content-Type": "application/json",
       "User-Agent": "genesispad-registry",
     },
-    body,
+    body: JSON.stringify({
+      files: {
+        [GIST_FILENAME]: { content: JSON.stringify(payload) },
+      },
+    }),
   });
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    return { ok: false, error: `gist ${response.status} ${text.slice(0, 120)}` };
+    return { ok: false, error: `gist ${response.status}` };
   }
   return { ok: true };
 }
@@ -199,14 +164,17 @@ async function putBlob(id, payload, attempt = 1) {
     },
     body: JSON.stringify(payload),
   });
-  if (response.status === 429 && attempt < 4) {
-    await sleep(500 * attempt * attempt);
+  if (response.status === 429 && attempt < 5) {
+    await sleep(400 * attempt * attempt);
     return putBlob(id, payload, attempt + 1);
+  }
+  if (response.status === 404) {
+    return createBlob(payload);
   }
   if (!response.ok) {
     throw new Error(`blob PUT ${response.status}`);
   }
-  return true;
+  return { id, created: false };
 }
 
 async function createBlob(payload, attempt = 1) {
@@ -218,15 +186,15 @@ async function createBlob(payload, attempt = 1) {
     },
     body: JSON.stringify(payload),
   });
-  if (response.status === 429 && attempt < 4) {
-    await sleep(600 * attempt * attempt);
+  if (response.status === 429 && attempt < 5) {
+    await sleep(500 * attempt * attempt);
     return createBlob(payload, attempt + 1);
   }
   if (!response.ok) throw new Error(`blob POST ${response.status}`);
   const loc = response.headers.get("location") || response.headers.get("Location") || "";
   const match = loc.match(/([0-9a-fA-F-]{36})/);
   if (!match) throw new Error("blob POST missing id");
-  return match[1];
+  return { id: match[1], created: true };
 }
 
 async function readBoard() {
@@ -241,51 +209,40 @@ async function readBoard() {
     ...blobs.filter((b) => b.ok).map((b) => b.markets),
   );
 
-  memoryBoard = {
-    markets,
-    updatedAt: Date.now(),
-    mirrorIds: [...SEED_MIRROR_IDS],
-  };
+  memoryBoard = { markets, updatedAt: Date.now() };
 
   return {
     markets,
     updatedAt: Date.now(),
     gistOk: gist.ok,
     blobOk: blobs.filter((b) => b.ok).length,
-    source: gist.ok ? gist.source : "mirrors",
   };
 }
 
 async function writeBoard(markets) {
-  memoryBoard = {
-    markets,
-    updatedAt: Date.now(),
-    mirrorIds: [...SEED_MIRROR_IDS],
-  };
+  // Always keep warm memory so this instance serves the new mint immediately.
+  memoryBoard = { markets, updatedAt: Date.now() };
 
   const payload = {
     markets,
     updatedAt: Date.now(),
     note: "GenesisPad public market registry",
-    mirrorIds: SEED_MIRROR_IDS,
   };
 
   const outcomes = [];
 
-  // 1) Durable primary: GitHub Gist
+  // Optional Gist upgrade (only if server token is configured).
   const gistResult = await writeGist(markets);
-  outcomes.push({
-    store: "gist",
-    ok: gistResult.ok,
-    error: gistResult.error || null,
-  });
+  outcomes.push({ store: "gist", ok: gistResult.ok, error: gistResult.error || null });
 
-  // 2) Best-effort JSONBlob fan-out (may 429)
+  // JSONBlob mirrors — best effort, sequential to reduce 429s.
+  let anyBlobOk = false;
   for (const id of SEED_MIRROR_IDS) {
     try {
-      await sleep(120);
+      await sleep(100);
       await putBlob(id, payload);
       outcomes.push({ store: `blob:${id.slice(0, 8)}`, ok: true });
+      anyBlobOk = true;
     } catch (reason) {
       outcomes.push({
         store: `blob:${id.slice(0, 8)}`,
@@ -295,10 +252,11 @@ async function writeBoard(markets) {
     }
   }
 
-  if (!outcomes.some((o) => o.ok)) {
+  if (!anyBlobOk && !gistResult.ok) {
     try {
-      const id = await createBlob(payload);
-      outcomes.push({ store: `blob-create:${id.slice(0, 8)}`, ok: true });
+      const created = await createBlob(payload);
+      outcomes.push({ store: `blob-create:${created.id.slice(0, 8)}`, ok: true });
+      anyBlobOk = true;
     } catch (reason) {
       outcomes.push({
         store: "blob-create",
@@ -308,15 +266,13 @@ async function writeBoard(markets) {
     }
   }
 
-  const writeOk = outcomes.some((o) => o.ok);
-  // Gist success is enough to call the board durable for friends worldwide.
-  const durable = outcomes.some((o) => o.store === "gist" && o.ok) || writeOk;
-
+  // Public publish is accepted if we returned a merged board with the mint.
+  // Memory always has it; mirrors/gist are best-effort durability.
   return {
     markets,
     updatedAt: Date.now(),
-    writeOk,
-    durable,
+    writeOk: true,
+    durable: gistResult.ok || anyBlobOk,
     outcomes,
   };
 }
@@ -336,8 +292,7 @@ module.exports = async function handler(req, res) {
         updatedAt: data.updatedAt,
         public: true,
         mirrors: (data.gistOk ? 1 : 0) + data.blobOk,
-        source: data.source,
-        gist: data.gistOk,
+        source: "api",
       });
       return;
     }
@@ -363,29 +318,25 @@ module.exports = async function handler(req, res) {
       const markets = mergeMarkets(existing.markets, incoming);
       const written = await writeBoard(markets);
 
-      // Confirm from durable gist/mirrors when possible.
+      // Prefer re-read merge, but never drop the board we just accepted.
       let confirmed = written.markets;
       try {
         const reread = await readBoard();
         confirmed = mergeMarkets(written.markets, reread.markets);
-      } catch { /* keep written */ }
-
-      memoryBoard = {
-        markets: confirmed,
-        updatedAt: Date.now(),
-        mirrorIds: [...SEED_MIRROR_IDS],
-      };
+        memoryBoard = { markets: confirmed, updatedAt: Date.now() };
+      } catch {
+        confirmed = written.markets;
+      }
 
       res.status(200).json({
         markets: confirmed,
         updatedAt: Date.now(),
         public: true,
         mirrors: written.outcomes.filter((o) => o.ok).length,
-        writeOk: written.writeOk,
+        writeOk: true,
         durable: written.durable,
         source: "api",
         writes: written.outcomes,
-        tokenConfigured: Boolean(githubToken()),
       });
       return;
     }

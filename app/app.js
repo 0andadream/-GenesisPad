@@ -1591,19 +1591,15 @@ async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_
   }
 }
 
-/** Durable public gist (no auth required to read). */
-const MARKET_GIST_RAW =
-  "https://gist.githubusercontent.com/0andadream/1be3933a7f446c5279054e8113b6786a/raw/markets.json";
-
 /**
- * Static bootstrap board + durable gist.
- * Friends always merge these even when free JSONBlob mirrors are rate-limited.
+ * Optional extra sources (static bootstrap + public gist read-only).
+ * No GitHub login required — anyone can read these.
  */
 async function fetchBootstrapMarkets() {
   const lists = [];
   const urls = [
-    MARKET_GIST_RAW,
-    `/markets-board.json`,
+    "https://gist.githubusercontent.com/0andadream/1be3933a7f446c5279054e8113b6786a/raw/markets.json",
+    "/markets-board.json",
   ];
   await Promise.all(urls.map(async (url) => {
     try {
@@ -1625,7 +1621,7 @@ async function fetchBootstrapMarkets() {
 }
 
 /**
- * Read the public board (API + durable gist + static bootstrap).
+ * Read the public board from /api/markets (+ optional bootstrap sources).
  * CRITICAL: failed fetches must NOT be treated as empty boards.
  */
 async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
@@ -1658,172 +1654,9 @@ async function fetchPublicMarkets() {
   return result.markets;
 }
 
-const GIST_ID = "1be3933a7f446c5279054e8113b6786a";
-const GIST_TOKEN_KEY = "genesis-gist-token";
-/** Public GitHub CLI OAuth app id — used only for device-flow gist scope. */
-const GITHUB_DEVICE_CLIENT_ID = "178c6fc778ccc68e1d6a";
-
-function getBrowserGistToken() {
-  try {
-    return (localStorage.getItem(GIST_TOKEN_KEY) || "").trim();
-  } catch {
-    return "";
-  }
-}
-
-function setBrowserGistToken(token) {
-  try {
-    if (token) localStorage.setItem(GIST_TOKEN_KEY, token);
-    else localStorage.removeItem(GIST_TOKEN_KEY);
-  } catch {
-    /* ignore */
-  }
-}
-
-/** Allow ?boardToken=ghp_… once to enable durable browser-side gist publishes. */
-(function bootstrapBoardTokenFromUrl() {
-  try {
-    const url = new URL(location.href);
-    const token = url.searchParams.get("boardToken") || url.searchParams.get("gistToken");
-    if (token && token.length > 20) {
-      setBrowserGistToken(token);
-      url.searchParams.delete("boardToken");
-      url.searchParams.delete("gistToken");
-      history.replaceState({}, "", url.pathname + url.search + url.hash);
-    }
-  } catch {
-    /* ignore */
-  }
-})();
-
 /**
- * One-time GitHub device login (gist scope) so this browser can publish
- * to the public board even when the server has no GENESIS_GITHUB_TOKEN.
- */
-async function connectPublicBoard(setStatus = () => {}) {
-  setStatus("Requesting GitHub device login for the public board…");
-  // Proxy through our API — github.com/login/* blocks browser CORS.
-  const codeRes = await fetch("/api/github-device", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ step: "code" }),
-  });
-  if (!codeRes.ok) {
-    throw new Error("Could not start GitHub device login.");
-  }
-  const device = await codeRes.json();
-  if (!device.device_code || !device.user_code) {
-    throw new Error(device.error_description || device.error || "Device login failed to start.");
-  }
-  const userCode = device.user_code;
-  const verifyUrl = device.verification_uri || "https://github.com/login/device";
-  const intervalMs = Math.max(5, Number(device.interval) || 5) * 1000;
-  const expiresAt = Date.now() + (Number(device.expires_in) || 900) * 1000;
-
-  setStatus(
-    `Authorize public board: open ${verifyUrl} and enter code ${userCode}. Waiting…`,
-  );
-  window.open(verifyUrl, "_blank", "noopener,noreferrer");
-
-  while (Date.now() < expiresAt) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    const tokenRes = await fetch("/api/github-device", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ step: "token", device_code: device.device_code }),
-    });
-    if (!tokenRes.ok) continue;
-    const tokenJson = await tokenRes.json();
-    if (tokenJson.access_token) {
-      setBrowserGistToken(tokenJson.access_token);
-      setStatus("Public board connected. You can publish launches for everyone.");
-      return true;
-    }
-    if (tokenJson.error === "authorization_pending") continue;
-    if (tokenJson.error === "slow_down") {
-      await new Promise((r) => setTimeout(r, intervalMs));
-      continue;
-    }
-    if (tokenJson.error === "expired_token") {
-      throw new Error("GitHub login expired. Try Connect public board again.");
-    }
-    if (tokenJson.error === "access_denied") {
-      throw new Error("GitHub login was denied.");
-    }
-  }
-  throw new Error("Timed out waiting for GitHub authorization.");
-}
-
-/**
- * Durable browser-side write to the public GitHub Gist (CORS + token).
- * Anyone with a gist-scoped token can publish; board is public by design.
- */
-async function publishToGistBrowser(markets) {
-  const token = getBrowserGistToken();
-  if (!token) return { ok: false, reason: "no-token" };
-  const cleaned = stampMarkets(markets);
-  const payload = {
-    markets: cleaned,
-    updatedAt: Date.now(),
-    note: "GenesisPad public market registry",
-  };
-  try {
-    // Read-merge first so we never wipe other launches.
-    let remote = [];
-    try {
-      const gistRes = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      if (gistRes.ok) {
-        const gist = await gistRes.json();
-        const content = gist.files?.["markets.json"]?.content;
-        if (content) {
-          const parsed = JSON.parse(content);
-          remote = Array.isArray(parsed?.markets) ? parsed.markets : [];
-        }
-      }
-    } catch {
-      /* continue with local only */
-    }
-    const merged = stampMarkets(mergeMarketLists(remote, cleaned));
-    const body = JSON.stringify({
-      files: {
-        "markets.json": {
-          content: JSON.stringify({
-            markets: merged,
-            updatedAt: Date.now(),
-            note: "GenesisPad public market registry",
-          }),
-        },
-      },
-    });
-    const response = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-      method: "PATCH",
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body,
-    });
-    if (!response.ok) {
-      return { ok: false, reason: `gist ${response.status}`, markets: merged };
-    }
-    return { ok: true, markets: merged };
-  } catch (reason) {
-    return {
-      ok: false,
-      reason: reason instanceof Error ? reason.message : "gist write failed",
-    };
-  }
-}
-
-/**
- * Publish markets through the same-origin API + durable gist.
- * Returns the authoritative public market list.
+ * Publish markets through same-origin /api/markets (server merges for everyone).
+ * No GitHub login — same simple flow as before.
  */
 async function publishPublicMarkets(markets, { stripImages = false } = {}) {
   let cleaned = stampMarkets(markets);
@@ -1836,54 +1669,31 @@ async function publishPublicMarkets(markets, { stripImages = false } = {}) {
     note: "GenesisPad public market registry",
   };
   const body = JSON.stringify(payload);
-  let data = null;
-  try {
-    const response = await fetch(MARKET_REGISTRY_API, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body,
-      cache: "no-store",
-    });
-    if (!response.ok) {
-      if (!stripImages && body.length > 120_000) {
-        return publishPublicMarkets(markets, { stripImages: true });
-      }
-      let detail = "";
-      try {
-        const err = await response.json();
-        detail = err?.error ? `: ${err.error}` : "";
-      } catch { /* ignore */ }
-      throw new Error(`Public board publish failed (${response.status})${detail}`);
+  const response = await fetch(MARKET_REGISTRY_API, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body,
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    if (!stripImages && body.length > 120_000) {
+      return publishPublicMarkets(markets, { stripImages: true });
     }
-    data = await response.json();
-    if (!Array.isArray(data?.markets)) {
-      throw new Error("Public board publish returned an invalid payload.");
-    }
-  } catch (apiError) {
-    // Fall through to browser gist write.
-    data = { markets: cleaned, durable: false, writeOk: false, tokenConfigured: false, apiError: String(apiError) };
+    let detail = "";
+    try {
+      const err = await response.json();
+      detail = err?.error ? `: ${err.error}` : "";
+    } catch { /* ignore */ }
+    throw new Error(`Public board publish failed (${response.status})${detail}`);
   }
-
-  // Always try durable gist write from the browser when a board token is configured.
-  const gistWrite = await publishToGistBrowser(
-    Array.isArray(data?.markets) ? mergeMarketLists(data.markets, cleaned) : cleaned,
-  );
-
-  let stamped = stampMarkets(
-    gistWrite.ok && Array.isArray(gistWrite.markets)
-      ? gistWrite.markets
-      : (data?.markets || cleaned),
-  );
-
-  const serverDurable = Boolean(data?.durable || data?.writeOk);
-  const browserDurable = Boolean(gistWrite.ok);
-  stamped.__durable = serverDurable || browserDurable;
-  stamped.__tokenConfigured = Boolean(data?.tokenConfigured) || Boolean(getBrowserGistToken());
-  stamped.__gistOk = browserDurable;
-  return stamped;
+  const data = await response.json();
+  if (!Array.isArray(data?.markets)) {
+    throw new Error("Public board publish returned an invalid payload.");
+  }
+  return stampMarkets(data.markets);
 }
 
 function mintSet(markets) {
@@ -1896,9 +1706,8 @@ function remoteHasMint(markets, mintAddress) {
 }
 
 /**
- * Fetch remote → merge with local → publish via /api/markets → verify API body.
- * NEVER treats a failed fetch as an empty board.
- * requireMint must appear on the API response (not only in localStorage).
+ * Fetch remote → merge with local → publish via /api/markets.
+ * Success = the mint appears in the API response (server-side public board).
  */
 async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts = 5 } = {}) {
   return withRegistryLock(async () => {
@@ -1906,7 +1715,6 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
         const remoteResult = await fetchPublicMarketsDetailed();
-        // If GET fails, still try to publish local (API will merge with its memory/mirrors).
         const remote = remoteResult.ok ? remoteResult.markets : [];
         const merged = stampMarkets(mergeMarketLists(remote, localMarkets));
 
@@ -1929,7 +1737,6 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
           throw new Error("Nothing to publish to the public board.");
         }
 
-        // API response is the public truth for this write.
         const published = await publishPublicMarkets(merged);
 
         if (requireMint && !remoteHasMint(published, requireMint)) {
@@ -1938,35 +1745,14 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
           );
         }
 
-        // Warm API memory alone is NOT enough for friends. Require a durable write
-        // (server gist/token OR browser gist token).
-        if (requireMint && published.__durable === false) {
-          const hasBrowserToken = Boolean(getBrowserGistToken());
-          throw new Error(
-            hasBrowserToken
-              ? "Public board write failed (rate-limit or network). Retry publish in a few seconds."
-              : "Public board is not fully configured. In the browser console run: localStorage.setItem('genesis-gist-token','YOUR_GITHUB_TOKEN_WITH_GIST_SCOPE') then retry. Or set GENESIS_GITHUB_TOKEN on Vercel.",
-          );
-        }
-
-        // Confirm with a fresh GET (API + durable gist).
-        await new Promise((r) => setTimeout(r, 200));
+        // Brief re-read; if GET is flaky but PUT body had the mint, still succeed.
+        await new Promise((r) => setTimeout(r, 150));
         const confirmed = await fetchPublicMarketsDetailed();
         let publicView = published;
         if (confirmed.ok) {
           publicView = stampMarkets(mergeMarketLists(confirmed.markets, published));
-          if (requireMint && !remoteHasMint(confirmed.markets, requireMint)
-            && !remoteHasMint(published, requireMint)) {
-            throw new Error("Public board GET still missing the new mint. Retrying…");
-          }
-        } else if (requireMint && !remoteHasMint(published, requireMint)) {
-          throw new Error("Could not confirm public board after publish.");
         }
-
-        // Keep any local-only fields the API might have stripped, but prefer public.
         publicView = stampMarkets(mergeMarketLists(publicView, merged));
-        // Strip internal flags
-        publicView = publicView.map(({ __durable, __tokenConfigured, ...rest }) => rest);
         localStorage.setItem(MARKETS_KEY, JSON.stringify(publicView));
         registryLiveAt = Date.now();
         lastPublicBoard = { ok: true, count: publicView.length, error: "" };
@@ -2546,29 +2332,6 @@ async function retryPublicPublishOnly(mintAddress, ticker = "Token") {
   }
 }
 
-function updateBoardConnectStatus() {
-  const el = document.querySelector("[data-board-connect-status]");
-  if (!el) return;
-  el.textContent = getBrowserGistToken()
-    ? "Public board connected — friends can see your launches."
-    : "Required so friends can see your launch (GitHub gist authorize, one time).";
-}
-
-document.querySelector("[data-connect-board]")?.addEventListener("click", async () => {
-  const status = document.querySelector("[data-board-connect-status]")
-    || document.querySelector("[data-create-status]");
-  const setStatus = (msg) => {
-    if (status) status.textContent = msg;
-  };
-  try {
-    await connectPublicBoard(setStatus);
-    updateBoardConnectStatus();
-  } catch (reason) {
-    setStatus(reason instanceof Error ? reason.message : "Could not connect public board.");
-  }
-});
-updateBoardConnectStatus();
-
 async function createToken() {
   if (!connectedAccount) {
     openWallet();
@@ -2583,22 +2346,6 @@ async function createToken() {
       existing?.ticker || "Token",
     );
     return;
-  }
-
-  // Ensure this browser can write the durable public gist before minting.
-  if (!getBrowserGistToken()) {
-    try {
-      createStatus.textContent = "Connect the public board first (one-time GitHub authorize)…";
-      await connectPublicBoard((msg) => {
-        createStatus.textContent = msg;
-      });
-      updateBoardConnectStatus();
-    } catch (reason) {
-      createStatus.textContent =
-        `${reason instanceof Error ? reason.message : "Public board not connected."} ` +
-        "Click “Connect public board”, authorize GitHub, then create again.";
-      return;
-    }
   }
 
   const name = document.querySelector("[data-token-name]").value.trim();

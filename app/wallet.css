@@ -1828,13 +1828,4 @@ html[data-theme="dark"] .trade-launch-side[data-side="sell"] .trade-submit {
 }
 
 
-.board-connect-row {
-  display: grid;
-  gap: 8px;
-  margin: 12px 0 4px;
-}
-.board-connect-row .plain-button {
-  justify-self: start;
-  min-height: 36px;
-}
 
