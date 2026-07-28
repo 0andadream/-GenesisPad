@@ -5,6 +5,9 @@
  * Server merges all publishes, keeps warm memory, and fans out to JSONBlob
  * mirrors (with retries). Optional GENESIS_GITHUB_TOKEN still upgrades Gist
  * durability in the background, but is not required for public launches.
+ *
+ * Friend visibility depends on durable mirrors — never treat a successful
+ * publish as complete unless at least one durable store accepts the write.
  */
 
 const GIST_ID = process.env.GENESIS_MARKETS_GIST_ID || "1be3933a7f446c5279054e8113b6786a";
@@ -18,14 +21,13 @@ const SEED_MIRROR_IDS = [
   "019fa906-1003-7f56-8791-16529d818eb5",
   "019fa916-0e91-740e-bbe3-25c05e8299c4",
   "019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
-  "019fa3f5-4529-7bc8-b2ab-7ff7b640fc70",
   "019fa8d5-e68c-74ed-8f39-20591b09abce",
 ].filter(Boolean);
 
 const JSONBLOB = "https://jsonblob.com/api/jsonBlob";
 
-/** @type {{ markets: any[], updatedAt: number }} */
-let memoryBoard = { markets: [], updatedAt: 0 };
+/** @type {{ markets: any[], updatedAt: number, wipedAt: number }} */
+let memoryBoard = { markets: [], updatedAt: 0, wipedAt: 0 };
 
 function githubToken() {
   return (
@@ -85,6 +87,20 @@ function blobUrl(id) {
   return `${JSONBLOB}/${id}`;
 }
 
+function boardPayload(markets, { wipe = false } = {}) {
+  const now = Date.now();
+  return {
+    markets,
+    updatedAt: now,
+    note: wipe
+      ? "GenesisPad public market registry — clean slate"
+      : "GenesisPad public market registry",
+    wipe: Boolean(wipe),
+    forceEmpty: Boolean(wipe),
+    wipedAt: wipe ? now : undefined,
+  };
+}
+
 async function readJson(url) {
   const response = await fetch(`${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`, {
     headers: { Accept: "application/json", "User-Agent": "genesispad-registry" },
@@ -98,24 +114,28 @@ async function readGist() {
   try {
     const data = await readJson(GIST_RAW);
     const markets = Array.isArray(data?.markets) ? data.markets : [];
-    return { ok: true, markets };
+    return {
+      ok: true,
+      markets,
+      wipe: Boolean(data?.wipe || data?.forceEmpty),
+      updatedAt: Number(data?.updatedAt || 0),
+      wipedAt: Number(data?.wipedAt || 0),
+    };
   } catch (reason) {
     return {
       ok: false,
       markets: [],
+      wipe: false,
+      updatedAt: 0,
+      wipedAt: 0,
       error: reason instanceof Error ? reason.message : "gist read failed",
     };
   }
 }
 
-async function writeGist(markets) {
+async function writeGist(payload) {
   const token = githubToken();
   if (!token) return { ok: false, error: "no-token" };
-  const payload = {
-    markets,
-    updatedAt: Date.now(),
-    note: "GenesisPad public market registry",
-  };
   const response = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
     method: "PATCH",
     headers: {
@@ -144,12 +164,22 @@ async function readBlob(id) {
       : Array.isArray(data)
         ? data
         : [];
-    return { ok: true, id, markets };
+    return {
+      ok: true,
+      id,
+      markets,
+      wipe: Boolean(data?.wipe || data?.forceEmpty),
+      updatedAt: Number(data?.updatedAt || 0),
+      wipedAt: Number(data?.wipedAt || 0),
+    };
   } catch (reason) {
     return {
       ok: false,
       id,
       markets: [],
+      wipe: false,
+      updatedAt: 0,
+      wipedAt: 0,
       error: reason instanceof Error ? reason.message : "blob read failed",
     };
   }
@@ -197,73 +227,119 @@ async function createBlob(payload, attempt = 1) {
   return { id: match[1], created: true };
 }
 
+/**
+ * Read durable stores. Only honor an empty durable board when an explicit
+ * wipe flag is present — never treat "only probes after filter" as a wipe,
+ * which previously cleared warm memory and made friends see zero markets.
+ */
 async function readBoard() {
   const [gist, ...blobs] = await Promise.all([
     readGist(),
     ...SEED_MIRROR_IDS.map((id) => readBlob(id)),
   ]);
 
-  const durableOk = gist.ok || blobs.some((b) => b.ok);
+  const durableSources = [
+    gist.ok ? gist : null,
+    ...blobs.filter((b) => b.ok),
+  ].filter(Boolean);
+
+  const durableOk = durableSources.length > 0;
   const durableMarkets = mergeMarkets(
-    gist.ok ? gist.markets : [],
-    ...blobs.filter((b) => b.ok).map((b) => b.markets),
+    ...durableSources.map((s) => s.markets),
+  );
+  const durableUpdatedAt = Math.max(
+    0,
+    ...durableSources.map((s) => Number(s.updatedAt || 0)),
+  );
+  const durableWipedAt = Math.max(
+    0,
+    ...durableSources.map((s) => Number(s.wipedAt || 0)),
+  );
+  // Explicit wipe only: empty markets + wipe flag on at least one durable store.
+  const durableExplicitWipe = durableSources.some(
+    (s) => s.wipe && (!s.markets || mergeMarkets(s.markets).length === 0),
   );
 
-  // If durable stores are reachable and empty, trust that over stale warm memory
-  // (otherwise a wiped board keeps reappearing on old serverless instances).
-  if (durableOk && durableMarkets.length === 0) {
-    memoryBoard = { markets: [], updatedAt: Date.now() };
+  // Honor a clean-slate wipe when durable stores agree the board is empty.
+  if (
+    durableOk
+    && durableMarkets.length === 0
+    && durableExplicitWipe
+    && durableWipedAt >= memoryBoard.updatedAt
+  ) {
+    memoryBoard = { markets: [], updatedAt: Date.now(), wipedAt: durableWipedAt };
     return {
       markets: [],
       updatedAt: Date.now(),
       gistOk: gist.ok,
       blobOk: blobs.filter((b) => b.ok).length,
+      durable: true,
+      wiped: true,
     };
   }
 
+  // Always merge warm memory with durable. Cold instances with empty memory
+  // still serve durable markets; warm instances keep recent publishes while
+  // mirrors catch up.
   const markets = mergeMarkets(memoryBoard.markets, durableMarkets);
-  memoryBoard = { markets, updatedAt: Date.now() };
+  memoryBoard = {
+    markets,
+    updatedAt: Math.max(memoryBoard.updatedAt, durableUpdatedAt, Date.now()),
+    wipedAt: memoryBoard.wipedAt || 0,
+  };
 
   return {
     markets,
-    updatedAt: Date.now(),
+    updatedAt: memoryBoard.updatedAt,
     gistOk: gist.ok,
     blobOk: blobs.filter((b) => b.ok).length,
+    durable: durableOk,
+    wiped: false,
   };
 }
 
-async function writeBoard(markets) {
-  // Always keep warm memory so this instance serves the new mint immediately.
-  memoryBoard = { markets, updatedAt: Date.now() };
-
-  const payload = {
+async function writeBoard(markets, { wipe = false } = {}) {
+  const now = Date.now();
+  memoryBoard = {
     markets,
-    updatedAt: Date.now(),
-    note: "GenesisPad public market registry",
+    updatedAt: now,
+    wipedAt: wipe ? now : memoryBoard.wipedAt || 0,
   };
 
+  const payload = boardPayload(markets, { wipe });
   const outcomes = [];
 
   // Optional Gist upgrade (only if server token is configured).
-  const gistResult = await writeGist(markets);
+  const gistResult = await writeGist(payload);
   outcomes.push({ store: "gist", ok: gistResult.ok, error: gistResult.error || null });
 
-  // JSONBlob mirrors — best effort, sequential to reduce 429s.
-  let anyBlobOk = false;
-  for (const id of SEED_MIRROR_IDS) {
-    try {
-      await sleep(100);
-      await putBlob(id, payload);
-      outcomes.push({ store: `blob:${id.slice(0, 8)}`, ok: true });
-      anyBlobOk = true;
-    } catch (reason) {
-      outcomes.push({
-        store: `blob:${id.slice(0, 8)}`,
-        ok: false,
-        error: reason instanceof Error ? reason.message : "blob write failed",
-      });
-    }
-  }
+  // JSONBlob mirrors — parallel with staggered retries for 429s.
+  const blobResults = await Promise.all(
+    SEED_MIRROR_IDS.map(async (id, index) => {
+      try {
+        if (index > 0) await sleep(80 * index);
+        await putBlob(id, payload);
+        return { store: `blob:${id.slice(0, 8)}`, ok: true };
+      } catch (reason) {
+        // One more delayed retry per mirror.
+        try {
+          await sleep(300 + 120 * index);
+          await putBlob(id, payload);
+          return { store: `blob:${id.slice(0, 8)}`, ok: true, retried: true };
+        } catch (retryReason) {
+          return {
+            store: `blob:${id.slice(0, 8)}`,
+            ok: false,
+            error: retryReason instanceof Error
+              ? retryReason.message
+              : reason instanceof Error ? reason.message : "blob write failed",
+          };
+        }
+      }
+    }),
+  );
+  outcomes.push(...blobResults);
+  let anyBlobOk = blobResults.some((r) => r.ok);
 
   if (!anyBlobOk && !gistResult.ok) {
     try {
@@ -279,13 +355,12 @@ async function writeBoard(markets) {
     }
   }
 
-  // Public publish is accepted if we returned a merged board with the mint.
-  // Memory always has it; mirrors/gist are best-effort durability.
+  const durable = gistResult.ok || anyBlobOk;
   return {
     markets,
-    updatedAt: Date.now(),
+    updatedAt: now,
     writeOk: true,
-    durable: gistResult.ok || anyBlobOk,
+    durable,
     outcomes,
   };
 }
@@ -305,6 +380,8 @@ module.exports = async function handler(req, res) {
         updatedAt: data.updatedAt,
         public: true,
         mirrors: (data.gistOk ? 1 : 0) + data.blobOk,
+        durable: Boolean(data.durable),
+        wiped: Boolean(data.wiped),
         source: "api",
       });
       return;
@@ -325,6 +402,7 @@ module.exports = async function handler(req, res) {
           updatedAt: existing.updatedAt,
           public: true,
           refusedEmpty: true,
+          durable: true,
           source: "api",
         });
         return;
@@ -333,23 +411,30 @@ module.exports = async function handler(req, res) {
       const markets = forceEmpty && !incoming.length
         ? []
         : mergeMarkets(existing.markets, incoming);
-      const written = await writeBoard(markets);
+      const written = await writeBoard(markets, { wipe: forceEmpty && !incoming.length });
 
       // After an explicit wipe, do not re-merge stale durable/memory into the response.
       let confirmed = written.markets;
       if (!forceEmpty || incoming.length) {
         try {
+          // Prefer durable re-read so friends hitting other instances see the same board.
           const reread = await readBoard();
           confirmed = mergeMarkets(written.markets, reread.markets);
-          memoryBoard = { markets: confirmed, updatedAt: Date.now() };
+          memoryBoard = {
+            markets: confirmed,
+            updatedAt: Date.now(),
+            wipedAt: memoryBoard.wipedAt || 0,
+          };
         } catch {
           confirmed = written.markets;
         }
       } else {
-        memoryBoard = { markets: [], updatedAt: Date.now() };
+        memoryBoard = { markets: [], updatedAt: Date.now(), wipedAt: Date.now() };
         confirmed = [];
       }
 
+      // Publish is only "durable" when mirrors accepted the write. Clients that
+      // requireMint should retry when durable is false.
       res.status(200).json({
         markets: confirmed,
         updatedAt: Date.now(),

@@ -151,11 +151,22 @@ let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
 // Bumped at public-launch clean slate so old local test boards are abandoned.
 const MARKETS_KEY = "genesis-markets-v3";
-// Public board: SAME-ORIGIN API only.
-// Hitting free JSONBlob from every browser tab caused 429 rate-limits and false
-// "not public" / friends-can't-see failures. The API merges + fans out server-side.
+// Public board: same-origin API is primary; JSONBlob mirrors are the durable
+// backup so friends always share the same launches without GitHub login.
+// Serverless memory alone is not enough — cold instances must hit mirrors.
 const MARKET_REGISTRY_API = "/api/markets";
-const MARKET_REGISTRY_URLS = [MARKET_REGISTRY_API];
+const MARKET_BLOB_IDS = [
+  "019fa906-1003-7f56-8791-16529d818eb5",
+  "019fa916-0e91-740e-bbe3-25c05e8299c4",
+  "019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
+  "019fa8d5-e68c-74ed-8f39-20591b09abce",
+];
+const MARKET_BLOB_URLS = MARKET_BLOB_IDS.map(
+  (id) => `https://jsonblob.com/api/jsonBlob/${id}`,
+);
+const MARKET_GIST_RAW =
+  "https://gist.githubusercontent.com/0andadream/1be3933a7f446c5279054e8113b6786a/raw/markets.json";
+const MARKET_REGISTRY_URLS = [MARKET_REGISTRY_API, ...MARKET_BLOB_URLS];
 const MARKET_REGISTRY_URL = MARKET_REGISTRY_API;
 /** Abort slow registry calls so one hung request cannot block the UI. */
 const REGISTRY_FETCH_TIMEOUT_MS = 12000;
@@ -1490,11 +1501,26 @@ function setTokenImagePreview(dataUrl) {
   preview.hidden = false;
 }
 
+/** Diagnostic / probe mints never belong on the public Explore board. */
+function isRegistryProbeMint(mid) {
+  const id = String(mid || "");
+  return (
+    !id
+    || id.startsWith("test-")
+    || id.startsWith("ta-friend-test-")
+    || id.startsWith("taDurableProbe")
+    || id === "cooldown"
+    || id === "seed"
+    || id === "seed2"
+    || id === "test-mint-visibility"
+  );
+}
+
 function mergeMarketLists(...lists) {
   const map = new Map();
   for (const list of lists) {
     for (const market of list || []) {
-      if (!market?.mintAddress) continue;
+      if (!market?.mintAddress || isRegistryProbeMint(market.mintAddress)) continue;
       const prev = map.get(market.mintAddress);
       map.set(market.mintAddress, prev ? mergeTwoMarkets(prev, market) : market);
     }
@@ -1593,13 +1619,14 @@ async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_
 }
 
 /**
- * Optional extra sources (static bootstrap + public gist read-only).
- * No GitHub login required — anyone can read these.
+ * Optional extra sources (static bootstrap + public gist + JSONBlob mirrors).
+ * No GitHub login — anyone can read these. Friends hit the same mirrors.
  */
-async function fetchBootstrapMarkets() {
+async function fetchMirrorMarkets() {
   const lists = [];
   const urls = [
-    "https://gist.githubusercontent.com/0andadream/1be3933a7f446c5279054e8113b6786a/raw/markets.json",
+    ...MARKET_BLOB_URLS,
+    MARKET_GIST_RAW,
     "/markets-board.json",
   ];
   await Promise.all(urls.map(async (url) => {
@@ -1607,9 +1634,21 @@ async function fetchBootstrapMarkets() {
       const response = await fetch(`${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`, {
         headers: { Accept: "application/json" },
         cache: "no-store",
+        mode: "cors",
       });
       if (!response.ok) return;
       const data = await response.json();
+      // Honor explicit wipe: empty + wipe flag means board is intentionally empty.
+      if (
+        data
+        && typeof data === "object"
+        && !Array.isArray(data)
+        && (data.wipe || data.forceEmpty)
+        && Array.isArray(data.markets)
+        && data.markets.length === 0
+      ) {
+        return;
+      }
       const markets = Array.isArray(data?.markets)
         ? data.markets
         : Array.isArray(data) ? data : [];
@@ -1622,21 +1661,22 @@ async function fetchBootstrapMarkets() {
 }
 
 /**
- * Read the public board from /api/markets (+ optional bootstrap sources).
+ * Read the public board from /api/markets + durable mirrors.
  * CRITICAL: failed fetches must NOT be treated as empty boards.
+ * Friends must merge multi-source so a cold API instance is not a blind spot.
  */
 async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
   void mode;
-  const [result, bootstrap] = await Promise.all([
+  const [result, mirrors] = await Promise.all([
     fetchPublicMarketsFrom(MARKET_REGISTRY_API, {
       timeoutMs: REGISTRY_FETCH_TIMEOUT_MS,
     }),
-    fetchBootstrapMarkets(),
+    fetchMirrorMarkets(),
   ]);
   if (!result.ok) {
-    if (bootstrap.length) {
-      lastPublicBoard = { ok: true, count: bootstrap.length, error: "" };
-      return { ok: true, markets: bootstrap, fromBootstrap: true };
+    if (mirrors.length) {
+      lastPublicBoard = { ok: true, count: mirrors.length, error: "" };
+      return { ok: true, markets: mirrors, fromBootstrap: true, durable: true };
     }
     lastPublicBoard = {
       ok: false,
@@ -1645,9 +1685,13 @@ async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
     };
     return { ok: false, markets: [], error: lastPublicBoard.error };
   }
-  const markets = stampMarkets(mergeMarketLists(result.markets, bootstrap));
+  const markets = stampMarkets(mergeMarketLists(result.markets, mirrors));
   lastPublicBoard = { ok: true, count: markets.length, error: "" };
-  return { ok: true, markets };
+  return {
+    ok: true,
+    markets,
+    durable: mirrors.length > 0 || Boolean(result.ok),
+  };
 }
 
 async function fetchPublicMarkets() {
@@ -1656,8 +1700,62 @@ async function fetchPublicMarkets() {
 }
 
 /**
- * Publish markets through same-origin /api/markets (server merges for everyone).
+ * Write the board to every JSONBlob mirror from the browser.
+ * Belt-and-suspenders for friend visibility when the API instance is cold.
+ */
+async function publishToBlobMirrors(markets) {
+  const cleaned = stampMarkets(markets);
+  const payload = {
+    markets: cleaned,
+    updatedAt: Date.now(),
+    note: "GenesisPad public market registry",
+    wipe: false,
+    forceEmpty: false,
+  };
+  const body = JSON.stringify(payload);
+  const results = await Promise.all(
+    MARKET_BLOB_URLS.map(async (url, index) => {
+      try {
+        if (index > 0) {
+          await new Promise((r) => setTimeout(r, 90 * index));
+        }
+        const response = await fetch(url, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body,
+          mode: "cors",
+          cache: "no-store",
+        });
+        if (response.status === 429) {
+          await new Promise((r) => setTimeout(r, 500 * (index + 1)));
+          const retry = await fetch(url, {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            body,
+            mode: "cors",
+            cache: "no-store",
+          });
+          return retry.ok;
+        }
+        return response.ok;
+      } catch {
+        return false;
+      }
+    }),
+  );
+  return results.some(Boolean);
+}
+
+/**
+ * Publish markets through same-origin /api/markets + durable blob mirrors.
  * No GitHub login — same simple flow as before.
+ * @returns {{ markets: any[], durable: boolean }}
  */
 async function publishPublicMarkets(markets, { stripImages = false } = {}) {
   let cleaned = stampMarkets(markets);
@@ -1670,31 +1768,50 @@ async function publishPublicMarkets(markets, { stripImages = false } = {}) {
     note: "GenesisPad public market registry",
   };
   const body = JSON.stringify(payload);
-  const response = await fetch(MARKET_REGISTRY_API, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body,
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    if (!stripImages && body.length > 120_000) {
-      return publishPublicMarkets(markets, { stripImages: true });
-    }
-    let detail = "";
-    try {
-      const err = await response.json();
-      detail = err?.error ? `: ${err.error}` : "";
-    } catch { /* ignore */ }
-    throw new Error(`Public board publish failed (${response.status})${detail}`);
+
+  // Fan out: API (merge + server mirrors) and direct browser blob writes.
+  const [apiOutcome, blobOk] = await Promise.all([
+    (async () => {
+      const response = await fetch(MARKET_REGISTRY_API, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body,
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        if (!stripImages && body.length > 120_000) {
+          return { retryStrip: true };
+        }
+        let detail = "";
+        try {
+          const err = await response.json();
+          detail = err?.error ? `: ${err.error}` : "";
+        } catch { /* ignore */ }
+        throw new Error(`Public board publish failed (${response.status})${detail}`);
+      }
+      const data = await response.json();
+      if (!Array.isArray(data?.markets)) {
+        throw new Error("Public board publish returned an invalid payload.");
+      }
+      return {
+        markets: stampMarkets(data.markets),
+        durable: Boolean(data.durable),
+      };
+    })(),
+    publishToBlobMirrors(cleaned).catch(() => false),
+  ]);
+
+  if (apiOutcome?.retryStrip) {
+    return publishPublicMarkets(markets, { stripImages: true });
   }
-  const data = await response.json();
-  if (!Array.isArray(data?.markets)) {
-    throw new Error("Public board publish returned an invalid payload.");
-  }
-  return stampMarkets(data.markets);
+
+  const durable = Boolean(apiOutcome.durable || blobOk);
+  // Prefer the merged API board, but ensure our payload is never lost.
+  const merged = stampMarkets(mergeMarketLists(apiOutcome.markets, cleaned));
+  return { markets: merged, durable };
 }
 
 function mintSet(markets) {
@@ -1707,8 +1824,9 @@ function remoteHasMint(markets, mintAddress) {
 }
 
 /**
- * Fetch remote → merge with local → publish via /api/markets.
- * Success = the mint appears in the API response (server-side public board).
+ * Fetch remote → merge with local → publish via /api/markets + blob mirrors.
+ * When requireMint is set (create flow), success requires the mint on a durable
+ * re-read so friends on other devices/instances can see it — not just warm memory.
  */
 async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts = 5 } = {}) {
   return withRegistryLock(async () => {
@@ -1738,7 +1856,8 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
           throw new Error("Nothing to publish to the public board.");
         }
 
-        const published = await publishPublicMarkets(merged);
+        const publishResult = await publishPublicMarkets(merged);
+        const published = publishResult.markets;
 
         if (requireMint && !remoteHasMint(published, requireMint)) {
           throw new Error(
@@ -1746,14 +1865,30 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
           );
         }
 
-        // Brief re-read; if GET is flaky but PUT body had the mint, still succeed.
-        await new Promise((r) => setTimeout(r, 150));
+        // Brief re-read across API + mirrors; create flow must see mint durably.
+        await new Promise((r) => setTimeout(r, 200));
         const confirmed = await fetchPublicMarketsDetailed();
         let publicView = published;
         if (confirmed.ok) {
           publicView = stampMarkets(mergeMarketLists(confirmed.markets, published));
         }
         publicView = stampMarkets(mergeMarketLists(publicView, merged));
+
+        if (requireMint) {
+          const onDurableRead = confirmed.ok && remoteHasMint(confirmed.markets, requireMint);
+          const wroteDurable = Boolean(publishResult.durable);
+          if (!onDurableRead && !wroteDurable) {
+            throw new Error(
+              "Public board write did not stick on shared mirrors. Retrying…",
+            );
+          }
+          if (!remoteHasMint(publicView, requireMint)) {
+            throw new Error(
+              "Token was not present after public board confirm. Retrying…",
+            );
+          }
+        }
+
         localStorage.setItem(MARKETS_KEY, JSON.stringify(publicView));
         registryLiveAt = Date.now();
         lastPublicBoard = { ok: true, count: publicView.length, error: "" };
