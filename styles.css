@@ -311,3 +311,13 @@ html[data-theme="dark"] .final {
   }
 }
 
+
+/* Smooth home theme flips when Protocol enters/leaves view */
+html.theme-switching,
+html.theme-switching body,
+html.theme-switching .site-header,
+html.theme-switching .panel,
+html.theme-switching footer {
+  transition: background-color .38s ease, color .38s ease, border-color .38s ease !important;
+}
+

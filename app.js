@@ -8,25 +8,26 @@ const MARKETS_KEY = "genesis-markets";
 const REGISTRY_FETCH_TIMEOUT_MS = 2800;
 const NATIVE_THRU_DECIMALS = 9;
 const THEME_KEY = "genesis-theme";
+/** Home: light by default; Protocol section forces dark while in view. */
+let scrollThemeFrame = 0;
+let scrollThemeLocked = false;
 
 function getPreferredTheme() {
-  try {
-    const saved = localStorage.getItem(THEME_KEY);
-    if (saved === "light" || saved === "dark") return saved;
-  } catch {
-    /* ignore */
-  }
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  // Marketing home always boots light — scroll drives temporary dark over Protocol.
+  return "light";
 }
 
-function applyTheme(theme) {
+function applyTheme(theme, { persist = false } = {}) {
   const next = theme === "dark" ? "dark" : "light";
+  const prev = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
   document.documentElement.dataset.theme = next;
   document.documentElement.style.colorScheme = next;
-  try {
-    localStorage.setItem(THEME_KEY, next);
-  } catch {
-    /* ignore */
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch {
+      /* ignore */
+    }
   }
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = next === "dark" ? "#121211" : "#eeeeec";
@@ -38,16 +39,61 @@ function applyTheme(theme) {
     btn.setAttribute("aria-label", toLight ? "Switch to light mode" : "Switch to dark mode");
     btn.title = toLight ? "Light mode" : "Dark mode";
   });
+  // Soft transition only when the value actually changes.
+  if (prev !== next) {
+    document.documentElement.classList.add("theme-switching");
+    window.setTimeout(() => document.documentElement.classList.remove("theme-switching"), 420);
+  }
+}
+
+/**
+ * Dark while Protocol is the focused section; light on hero / engine / rest.
+ * Engine (and everything past Protocol) returns to light.
+ */
+function themeFromScroll() {
+  if (scrollThemeLocked) return;
+  const protocol = document.querySelector("#protocol, [data-manifest]");
+  if (!protocol) {
+    applyTheme("light", { persist: false });
+    return;
+  }
+  const rect = protocol.getBoundingClientRect();
+  const vh = window.innerHeight || 1;
+  // How much of the viewport is covered by the protocol section.
+  const visible = Math.min(rect.bottom, vh) - Math.max(rect.top, 0);
+  const coverage = visible / vh;
+  // Enter dark a bit before the section fills the screen; leave when it mostly exits.
+  const inProtocol = coverage >= 0.42 && rect.bottom > vh * 0.22 && rect.top < vh * 0.72;
+  applyTheme(inProtocol ? "dark" : "light", { persist: false });
+}
+
+function requestScrollTheme() {
+  if (scrollThemeFrame) return;
+  scrollThemeFrame = requestAnimationFrame(() => {
+    scrollThemeFrame = 0;
+    themeFromScroll();
+  });
 }
 
 function initTheme() {
-  applyTheme(getPreferredTheme());
+  applyTheme(getPreferredTheme(), { persist: false });
   document.querySelectorAll("[data-theme-toggle]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-      applyTheme(current === "dark" ? "light" : "dark");
+      const next = current === "dark" ? "light" : "dark";
+      // Manual toggle is temporary; the next scroll snap re-applies section theme.
+      scrollThemeLocked = true;
+      applyTheme(next, { persist: false });
+      window.setTimeout(() => {
+        scrollThemeLocked = false;
+        themeFromScroll();
+      }, 1800);
     });
   });
+
+  window.addEventListener("scroll", requestScrollTheme, { passive: true });
+  window.addEventListener("resize", requestScrollTheme);
+  themeFromScroll();
 }
 
 initTheme();
