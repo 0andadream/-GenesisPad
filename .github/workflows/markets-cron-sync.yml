@@ -1,0 +1,118 @@
+name: Markets cron sync
+
+# Keeps the public GitHub Gist durable board up to date every 2 minutes.
+# Uses GENESIS_GIST_TOKEN (gist-capable PAT) from repo secrets.
+on:
+  schedule:
+    - cron: "*/2 * * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge mirrors into durable gist
+        env:
+          GH_TOKEN: ${{ secrets.GENESIS_GIST_TOKEN }}
+          GIST_ID: 1be3933a7f446c5279054e8113b6786a
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json, urllib.request, os, time
+
+          def get(url, headers=None):
+              h = {"Accept": "application/json", "User-Agent": "genesispad-cron"}
+              if headers:
+                  h.update(headers)
+              req = urllib.request.Request(url, headers=h)
+              with urllib.request.urlopen(req, timeout=45) as r:
+                  return json.load(r)
+
+          def merge(lists):
+              best = {}
+              for lst in lists:
+                  for m in lst or []:
+                      mid = m.get("mintAddress")
+                      if not mid or not str(mid).startswith("ta"):
+                          continue
+                      s = str(mid)
+                      if any(x in s for x in ["friend-test", "DurableProbe", "taVIS", "test-mint"]):
+                          continue
+                      sc = int(m.get("updatedAt") or m.get("createdAt") or 0)
+                      prev = best.get(mid)
+                      if not prev or sc >= int(prev.get("updatedAt") or prev.get("createdAt") or 0):
+                          best[mid] = m
+              return sorted(
+                  best.values(),
+                  key=lambda m: int(m.get("updatedAt") or m.get("createdAt") or 0),
+                  reverse=True,
+              )
+
+          lists = []
+          token = os.environ["GH_TOKEN"]
+          gist_id = os.environ["GIST_ID"]
+
+          try:
+              g = get(
+                  f"https://api.github.com/gists/{gist_id}",
+                  {
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                  },
+              )
+              content = g["files"]["markets.json"]["content"]
+              lists.append(json.loads(content).get("markets", []))
+              print("gist", len(lists[-1]))
+          except Exception as e:
+              print("gist fail", e)
+
+          try:
+              lists.append(
+                  get(f"https://genesispad.vercel.app/api/markets?t={int(time.time())}").get(
+                      "markets", []
+                  )
+              )
+              print("api", len(lists[-1]))
+          except Exception as e:
+              print("api fail", e)
+
+          for bid in [
+              "019fa906-1003-7f56-8791-16529d818eb5",
+              "019fa916-0e91-740e-bbe3-25c05e8299c4",
+              "019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
+              "019fa3f5-4529-7bc8-b2ab-7ff7b640fc70",
+              "019fa8d5-e68c-74ed-8f39-20591b09abce",
+          ]:
+              try:
+                  d = get(f"https://jsonblob.com/api/jsonBlob/{bid}?t={int(time.time() * 1000)}")
+                  m = d.get("markets", d if isinstance(d, list) else [])
+                  if isinstance(m, list):
+                      lists.append(m)
+                      print("blob", bid[:13], len(m))
+              except Exception as e:
+                  print("blob fail", bid[:13], e)
+
+          markets = merge(lists)
+          print("merged", len(markets), [m.get("ticker") for m in markets[:12]])
+          payload = {
+              "markets": markets,
+              "updatedAt": int(time.time() * 1000),
+              "note": "GenesisPad public market registry",
+          }
+          body = json.dumps(
+              {"files": {"markets.json": {"content": json.dumps(payload)}}}
+          ).encode()
+          req = urllib.request.Request(
+              f"https://api.github.com/gists/{gist_id}",
+              data=body,
+              method="PATCH",
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+                  "User-Agent": "genesispad-cron",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=60) as r:
+              print("gist updated", r.status)
+          PY

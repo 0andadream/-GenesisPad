@@ -1,0 +1,50 @@
+name: Sync markets gist
+on:
+  repository_dispatch:
+    types: [markets-sync]
+  workflow_dispatch:
+    inputs:
+      markets_b64:
+        description: base64 markets json payload
+        required: false
+        default: ""
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update gist
+        env:
+          GH_TOKEN: ${{ secrets.GENESIS_GIST_TOKEN }}
+          MARKETS_B64: ${{ github.event.client_payload.markets_b64 || inputs.markets_b64 }}
+          GIST_ID: 1be3933a7f446c5279054e8113b6786a
+        run: |
+          set -euo pipefail
+          if [ -z "${MARKETS_B64}" ]; then
+            echo "No payload"
+            exit 0
+          fi
+          echo "$MARKETS_B64" | base64 -d > /tmp/markets.json
+          python3 - <<'PY'
+          import json, urllib.request, os
+          token=os.environ["GH_TOKEN"]
+          gist=os.environ["GIST_ID"]
+          content=open("/tmp/markets.json").read()
+          # validate
+          data=json.loads(content)
+          assert isinstance(data.get("markets"), list)
+          body=json.dumps({"files":{"markets.json":{"content": content}}}).encode()
+          req=urllib.request.Request(
+            f"https://api.github.com/gists/{gist}",
+            data=body,
+            method="PATCH",
+            headers={
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "Content-Type": "application/json",
+              "User-Agent": "genesispad-action",
+            },
+          )
+          with urllib.request.urlopen(req, timeout=60) as r:
+            print("gist updated", r.status, "markets", len(data["markets"]))
+          PY

@@ -1591,38 +1591,51 @@ async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_
   }
 }
 
+/** Durable public gist (no auth required to read). */
+const MARKET_GIST_RAW =
+  "https://gist.githubusercontent.com/0andadream/1be3933a7f446c5279054e8113b6786a/raw/markets.json";
+
 /**
- * Static bootstrap board committed to the deploy (friends still see known markets
- * even if free mirrors are rate-limited). Never treats this alone as a wipe source.
+ * Static bootstrap board + durable gist.
+ * Friends always merge these even when free JSONBlob mirrors are rate-limited.
  */
 async function fetchBootstrapMarkets() {
-  try {
-    const response = await fetch(`/markets-board.json?t=${Date.now()}`, {
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
-    if (!response.ok) return [];
-    const data = await response.json();
-    const markets = Array.isArray(data?.markets)
-      ? data.markets
-      : Array.isArray(data) ? data : [];
-    return stampMarkets(markets);
-  } catch {
-    return [];
-  }
+  const lists = [];
+  const urls = [
+    MARKET_GIST_RAW,
+    `/markets-board.json`,
+  ];
+  await Promise.all(urls.map(async (url) => {
+    try {
+      const response = await fetch(`${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      const markets = Array.isArray(data?.markets)
+        ? data.markets
+        : Array.isArray(data) ? data : [];
+      if (markets.length) lists.push(markets);
+    } catch {
+      /* ignore */
+    }
+  }));
+  return stampMarkets(mergeMarketLists(...lists));
 }
 
 /**
- * Read the public board (same-origin API), merge bootstrap if needed.
- * mode is kept for call-site compatibility.
+ * Read the public board (API + durable gist + static bootstrap).
  * CRITICAL: failed fetches must NOT be treated as empty boards.
  */
 async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
   void mode;
-  const result = await fetchPublicMarketsFrom(MARKET_REGISTRY_API, {
-    timeoutMs: REGISTRY_FETCH_TIMEOUT_MS,
-  });
-  const bootstrap = await fetchBootstrapMarkets();
+  const [result, bootstrap] = await Promise.all([
+    fetchPublicMarketsFrom(MARKET_REGISTRY_API, {
+      timeoutMs: REGISTRY_FETCH_TIMEOUT_MS,
+    }),
+    fetchBootstrapMarkets(),
+  ]);
   if (!result.ok) {
     if (bootstrap.length) {
       lastPublicBoard = { ok: true, count: bootstrap.length, error: "" };
@@ -1645,9 +1658,103 @@ async function fetchPublicMarkets() {
   return result.markets;
 }
 
+const GIST_ID = "1be3933a7f446c5279054e8113b6786a";
+const GIST_TOKEN_KEY = "genesis-gist-token";
+
+function getBrowserGistToken() {
+  try {
+    return (localStorage.getItem(GIST_TOKEN_KEY) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Allow ?boardToken=ghp_… once to enable durable browser-side gist publishes. */
+(function bootstrapBoardTokenFromUrl() {
+  try {
+    const url = new URL(location.href);
+    const token = url.searchParams.get("boardToken") || url.searchParams.get("gistToken");
+    if (token && token.length > 20) {
+      localStorage.setItem(GIST_TOKEN_KEY, token);
+      url.searchParams.delete("boardToken");
+      url.searchParams.delete("gistToken");
+      history.replaceState({}, "", url.pathname + url.search + url.hash);
+    }
+  } catch {
+    /* ignore */
+  }
+})();
+
 /**
- * Publish markets through the same-origin API (server merges + fans out).
- * Returns the authoritative public market list from the API response body.
+ * Durable browser-side write to the public GitHub Gist (CORS + token).
+ * Anyone with a gist-scoped token can publish; board is public by design.
+ */
+async function publishToGistBrowser(markets) {
+  const token = getBrowserGistToken();
+  if (!token) return { ok: false, reason: "no-token" };
+  const cleaned = stampMarkets(markets);
+  const payload = {
+    markets: cleaned,
+    updatedAt: Date.now(),
+    note: "GenesisPad public market registry",
+  };
+  try {
+    // Read-merge first so we never wipe other launches.
+    let remote = [];
+    try {
+      const gistRes = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (gistRes.ok) {
+        const gist = await gistRes.json();
+        const content = gist.files?.["markets.json"]?.content;
+        if (content) {
+          const parsed = JSON.parse(content);
+          remote = Array.isArray(parsed?.markets) ? parsed.markets : [];
+        }
+      }
+    } catch {
+      /* continue with local only */
+    }
+    const merged = stampMarkets(mergeMarketLists(remote, cleaned));
+    const body = JSON.stringify({
+      files: {
+        "markets.json": {
+          content: JSON.stringify({
+            markets: merged,
+            updatedAt: Date.now(),
+            note: "GenesisPad public market registry",
+          }),
+        },
+      },
+    });
+    const response = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+      method: "PATCH",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body,
+    });
+    if (!response.ok) {
+      return { ok: false, reason: `gist ${response.status}`, markets: merged };
+    }
+    return { ok: true, markets: merged };
+  } catch (reason) {
+    return {
+      ok: false,
+      reason: reason instanceof Error ? reason.message : "gist write failed",
+    };
+  }
+}
+
+/**
+ * Publish markets through the same-origin API + durable gist.
+ * Returns the authoritative public market list.
  */
 async function publishPublicMarkets(markets, { stripImages = false } = {}) {
   let cleaned = stampMarkets(markets);
@@ -1660,32 +1767,54 @@ async function publishPublicMarkets(markets, { stripImages = false } = {}) {
     note: "GenesisPad public market registry",
   };
   const body = JSON.stringify(payload);
-  const response = await fetch(MARKET_REGISTRY_API, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body,
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    // Payload may be too large with base64 images — retry stripped.
-    if (!stripImages && body.length > 120_000) {
-      return publishPublicMarkets(markets, { stripImages: true });
+  let data = null;
+  try {
+    const response = await fetch(MARKET_REGISTRY_API, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body,
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      if (!stripImages && body.length > 120_000) {
+        return publishPublicMarkets(markets, { stripImages: true });
+      }
+      let detail = "";
+      try {
+        const err = await response.json();
+        detail = err?.error ? `: ${err.error}` : "";
+      } catch { /* ignore */ }
+      throw new Error(`Public board publish failed (${response.status})${detail}`);
     }
-    let detail = "";
-    try {
-      const err = await response.json();
-      detail = err?.error ? `: ${err.error}` : "";
-    } catch { /* ignore */ }
-    throw new Error(`Public board publish failed (${response.status})${detail}`);
+    data = await response.json();
+    if (!Array.isArray(data?.markets)) {
+      throw new Error("Public board publish returned an invalid payload.");
+    }
+  } catch (apiError) {
+    // Fall through to browser gist write.
+    data = { markets: cleaned, durable: false, writeOk: false, tokenConfigured: false, apiError: String(apiError) };
   }
-  const data = await response.json();
-  if (!Array.isArray(data?.markets)) {
-    throw new Error("Public board publish returned an invalid payload.");
-  }
-  return stampMarkets(data.markets);
+
+  // Always try durable gist write from the browser when a board token is configured.
+  const gistWrite = await publishToGistBrowser(
+    Array.isArray(data?.markets) ? mergeMarketLists(data.markets, cleaned) : cleaned,
+  );
+
+  let stamped = stampMarkets(
+    gistWrite.ok && Array.isArray(gistWrite.markets)
+      ? gistWrite.markets
+      : (data?.markets || cleaned),
+  );
+
+  const serverDurable = Boolean(data?.durable || data?.writeOk);
+  const browserDurable = Boolean(gistWrite.ok);
+  stamped.__durable = serverDurable || browserDurable;
+  stamped.__tokenConfigured = Boolean(data?.tokenConfigured) || Boolean(getBrowserGistToken());
+  stamped.__gistOk = browserDurable;
+  return stamped;
 }
 
 function mintSet(markets) {
@@ -1740,8 +1869,19 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
           );
         }
 
-        // Confirm with a fresh GET (same API — no multi-blob race).
-        await new Promise((r) => setTimeout(r, 150));
+        // Warm API memory alone is NOT enough for friends. Require a durable write
+        // (server gist/token OR browser gist token).
+        if (requireMint && published.__durable === false) {
+          const hasBrowserToken = Boolean(getBrowserGistToken());
+          throw new Error(
+            hasBrowserToken
+              ? "Public board write failed (rate-limit or network). Retry publish in a few seconds."
+              : "Public board is not fully configured. In the browser console run: localStorage.setItem('genesis-gist-token','YOUR_GITHUB_TOKEN_WITH_GIST_SCOPE') then retry. Or set GENESIS_GITHUB_TOKEN on Vercel.",
+          );
+        }
+
+        // Confirm with a fresh GET (API + durable gist).
+        await new Promise((r) => setTimeout(r, 200));
         const confirmed = await fetchPublicMarketsDetailed();
         let publicView = published;
         if (confirmed.ok) {
@@ -1756,6 +1896,8 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
 
         // Keep any local-only fields the API might have stripped, but prefer public.
         publicView = stampMarkets(mergeMarketLists(publicView, merged));
+        // Strip internal flags
+        publicView = publicView.map(({ __durable, __tokenConfigured, ...rest }) => rest);
         localStorage.setItem(MARKETS_KEY, JSON.stringify(publicView));
         registryLiveAt = Date.now();
         lastPublicBoard = { ok: true, count: publicView.length, error: "" };
