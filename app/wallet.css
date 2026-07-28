@@ -1454,12 +1454,25 @@ html[data-theme="dark"] .token-card-actions button[data-trade-side="sell"] {
 .token-chart-meta [data-chart-price] {
   font: 22px var(--serif, Georgia, serif);
   color: #f4f7f4;
+  transition: color .2s ease;
+}
+
+.token-chart-meta [data-chart-price].price-flash {
+  animation: chart-price-flash .55s ease;
+}
+
+@keyframes chart-price-flash {
+  0% { transform: scale(1); filter: brightness(1); }
+  40% { transform: scale(1.04); filter: brightness(1.35); }
+  100% { transform: scale(1); filter: brightness(1); }
 }
 
 .token-chart-meta [data-chart-change] {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: .06em;
+  min-width: 4.5em;
+  text-align: right;
 }
 
 .token-chart-meta [data-chart-change].up,
@@ -1493,6 +1506,16 @@ html[data-theme="dark"] .token-card-actions button[data-trade-side="sell"] {
 .token-chart-svg .chart-line.up { stroke: #22c55e; }
 .token-chart-svg .chart-line.down { stroke: #ef4444; }
 
+/* Segmented candle path — green on up ticks, red on down. */
+.token-chart-svg .chart-seg {
+  fill: none;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.token-chart-svg .chart-seg.up { stroke: #22c55e; }
+.token-chart-svg .chart-seg.down { stroke: #ef4444; }
+
 .token-chart-svg .chart-buy {
   fill: #22c55e;
   stroke: #0f1410;
@@ -1503,6 +1526,15 @@ html[data-theme="dark"] .token-card-actions button[data-trade-side="sell"] {
   fill: #ef4444;
   stroke: #0f1410;
   stroke-width: 1;
+}
+
+.trade-tape-row.is-new {
+  animation: tape-new-flash .9s ease;
+}
+
+@keyframes tape-new-flash {
+  0% { background: rgba(34, 197, 94, 0.28); }
+  100% { background: transparent; }
 }
 
 .token-chart-axis {

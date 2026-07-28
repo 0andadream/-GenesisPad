@@ -173,6 +173,8 @@ const REGISTRY_FETCH_TIMEOUT_MS = 12000;
 /** First paint poll cadence; backs off when the board is quiet. */
 const REGISTRY_POLL_FAST_MS = 2500;
 const REGISTRY_POLL_SLOW_MS = 10000;
+/** While a trade modal is open, poll this often so candles/tape/% feel live. */
+const TRADE_LIVE_POLL_MS = 1000;
 const TOKEN_IMAGE_MAX_DIM = 256;
 const TOKEN_IMAGE_MAX_CHARS = 80_000;
 let pendingTokenImage = null;
@@ -1063,8 +1065,9 @@ function ensureChartSeed(market) {
 }
 
 /**
- * Original green/red line + area price chart (trade prints connected in order).
- * Quiet time extends a flat tail to "now" so the series doesn't leave a blank edge.
+ * Live price chart: green/red segments on up/down moves, live % from open → spot.
+ * Quiet time extends a flat tail to "now". Spot tip always uses curve reserves
+ * so the candle moves as soon as peer trades land on the board.
  */
 function renderTokenChart(market) {
   const root = document.querySelector("[data-token-chart]");
@@ -1076,16 +1079,29 @@ function renderTokenChart(market) {
   if (!svg || !market) return;
 
   let m = ensureChartSeed(market);
-  const points = readChart(m).slice();
+  const points = readChart(m)
+    .filter((p) => p.side !== "hold")
+    .slice();
   const stats = readTradeStats(m);
 
-  // Hold last price out to now when flow is quiet (flat consolidation tail).
+  // Live tip: bonding-curve spot (moves when virtual reserves update).
+  let spot = 0n;
+  try {
+    spot = curveSpotPriceThruPerToken(m);
+  } catch {
+    spot = 0n;
+  }
+  if (spot <= 0n && m.lastPrice) {
+    try { spot = BigInt(m.lastPrice); } catch { spot = 0n; }
+  }
+
+  // Hold last printed price out to now, then pin to live spot.
   if (points.length) {
     const lastPt = points[points.length - 1];
     const now = Date.now();
-    if (now - (Number(lastPt.t) || 0) > 5_000) {
+    if (now - (Number(lastPt.t) || 0) > 2_000) {
       points.push({
-        t: now,
+        t: now - 1,
         price: lastPt.price,
         side: "hold",
         thru: "0",
@@ -1093,22 +1109,41 @@ function renderTokenChart(market) {
       });
     }
   }
+  if (spot > 0n) {
+    points.push({
+      t: Date.now(),
+      price: spot.toString(),
+      side: "live",
+      thru: "0",
+      tokens: "0",
+    });
+  }
 
   const prices = points.map((p) => BigInt(p.price || "0"));
-  const last = prices.length ? prices[prices.length - 1] : curveSpotPriceThruPerToken(m);
-  const first = prices.length ? prices[0] : last;
-  const up = last >= first;
+  // Open = first seed/trade price; last = live spot (or last print).
+  const openPrice = prices.length ? prices[0] : spot;
+  const last = spot > 0n ? spot : (prices.length ? prices[prices.length - 1] : 0n);
+  const up = last >= openPrice;
   const dir = up ? "up" : "down";
 
   if (root) {
     root.classList.toggle("up", up);
     root.classList.toggle("down", !up);
   }
-  if (priceEl) priceEl.textContent = formatSpotPrice(last);
+  if (priceEl) {
+    const prevText = priceEl.textContent;
+    priceEl.textContent = formatSpotPrice(last);
+    if (prevText && prevText !== priceEl.textContent) {
+      priceEl.classList.remove("price-flash");
+      // restart animation
+      void priceEl.offsetWidth;
+      priceEl.classList.add("price-flash");
+    }
+  }
   if (changeEl) {
-    if (first > 0n && last !== first) {
-      const delta = up ? last - first : first - last;
-      const bps = (delta * 10000n) / first;
+    if (openPrice > 0n && last !== openPrice) {
+      const delta = up ? last - openPrice : openPrice - last;
+      const bps = (delta * 10000n) / openPrice;
       const pct = (Number(bps) / 100).toFixed(2);
       changeEl.textContent = `${up ? "+" : "−"}${pct}%`;
       changeEl.classList.toggle("up", up);
@@ -1124,7 +1159,7 @@ function renderTokenChart(market) {
       ? `${realTrades} trade${realTrades === 1 ? "" : "s"} · ${stats.buys}B / ${stats.sells}S`
       : "No trades yet";
   }
-  if (rangeEl) rangeEl.textContent = "Price · THRU per token";
+  if (rangeEl) rangeEl.textContent = "Price · THRU per token · live";
 
   const setStat = (sel, text, cls) => {
     const el = document.querySelector(sel);
@@ -1137,8 +1172,10 @@ function renderTokenChart(market) {
   setStat("[data-stat-sells]", String(stats.sells), "stat-sell");
   setStat("[data-stat-buy-vol]", `${formatUnits(stats.buyThru, NATIVE_THRU_DECIMALS, 6)} THRU`, "stat-buy");
   setStat("[data-stat-sell-vol]", `${formatUnits(stats.sellThru, NATIVE_THRU_DECIMALS, 6)} THRU`, "stat-sell");
-  setStat("[data-stat-high]", formatSpotPrice(stats.high || last));
-  setStat("[data-stat-low]", formatSpotPrice(stats.low || last));
+  const high = stats.high > last ? stats.high : last;
+  const low = stats.low > 0n && stats.low < last ? stats.low : (last > 0n ? last : stats.low);
+  setStat("[data-stat-high]", formatSpotPrice(high || last));
+  setStat("[data-stat-low]", formatSpotPrice(low || last));
   try {
     const c = readCurve(m);
     setStat("[data-stat-vault]", `${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 6)} THRU`);
@@ -1161,6 +1198,10 @@ function renderTokenChart(market) {
     if (p < minP) minP = p;
     if (p > maxP) maxP = p;
   }
+  if (last > 0n) {
+    if (last < minP) minP = last;
+    if (last > maxP) maxP = last;
+  }
   if (maxP === minP) maxP = minP + 1n;
   // Soft pad so tiny moves still read.
   const pad = (maxP - minP) / 10n || 1n;
@@ -1173,11 +1214,23 @@ function renderTokenChart(market) {
     const x = padX + (innerW * i) / Math.max(n - 1, 1);
     const yRatio = Number(((BigInt(p.price) - minP) * 10000n) / span) / 10000;
     const y = padY + innerH * (1 - Math.min(1, Math.max(0, yRatio)));
-    return { x, y, side: p.side };
+    return { x, y, side: p.side, price: BigInt(p.price || "0") };
   });
 
   if (coords.length === 1) {
-    coords.push({ x: W - padX, y: coords[0].y, side: coords[0].side });
+    coords.push({ x: W - padX, y: coords[0].y, side: coords[0].side, price: coords[0].price });
+  }
+
+  // Per-segment green/red so candles read up and down, not one flat color.
+  let segments = "";
+  for (let i = 1; i < coords.length; i += 1) {
+    const a = coords[i - 1];
+    const b = coords[i];
+    const segUp = b.price >= a.price;
+    segments +=
+      `<line class="chart-seg ${segUp ? "up" : "down"}" ` +
+      `x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" ` +
+      `x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" />`;
   }
 
   const lineD = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
@@ -1200,7 +1253,7 @@ function renderTokenChart(market) {
     <line class="chart-grid" x1="${padX}" y1="${H / 2}" x2="${W - padX}" y2="${H / 2}"></line>
     <line class="chart-grid" x1="${padX}" y1="${H - padY}" x2="${W - padX}" y2="${H - padY}"></line>
     <path class="chart-area ${dir}" d="${areaD}"></path>
-    <path class="chart-line ${dir}" d="${lineD}"></path>
+    ${segments}
     ${dots}
   `;
 }
@@ -3544,36 +3597,105 @@ function shortAddress(value, head = 6, tail = 4) {
   return `${text.slice(0, head)}…${text.slice(-tail)}`;
 }
 
+let lastTapeSignature = "";
+
 function renderTradeTape(market) {
   const tape = document.querySelector("[data-trade-tape]");
   if (!tape) return;
   const points = Array.isArray(market?.chart) ? market.chart.slice() : [];
   const trades = points
     .filter((p) => p && (p.side === "buy" || p.side === "sell"))
-    .slice(-12)
+    .slice(-16)
     .reverse();
   if (!trades.length) {
-    tape.innerHTML = `<p class="trade-tape-empty">No trades yet.</p>`;
+    lastTapeSignature = "";
+    tape.innerHTML = `<p class="trade-tape-empty">No trades yet · waiting for buys/sells</p>`;
     return;
   }
-  tape.innerHTML = trades.map((point) => {
+  const sig = trades.map((p) => `${p.t}:${p.side}:${p.thru}:${p.tokens}`).join("|");
+  const isFresh = sig !== lastTapeSignature && lastTapeSignature !== "";
+  lastTapeSignature = sig;
+  tape.innerHTML = trades.map((point, index) => {
     const side = point.side === "sell" ? "sell" : "buy";
-    const thru = point.thru != null ? formatUnits(BigInt(String(point.thru)), NATIVE_THRU_DECIMALS, 6) : "—";
-    const tokens = point.tokens != null
-      ? formatUnits(BigInt(String(point.tokens)), market.decimals || 6)
-      : "—";
-    const price = point.price != null ? formatSpotPrice(BigInt(String(point.price))) : "—";
+    let thru = "—";
+    let tokens = "—";
+    let price = "—";
+    try {
+      thru = point.thru != null ? formatUnits(BigInt(String(point.thru)), NATIVE_THRU_DECIMALS, 6) : "—";
+    } catch { /* ignore */ }
+    try {
+      tokens = point.tokens != null
+        ? formatUnits(BigInt(String(point.tokens)), market.decimals || 6)
+        : "—";
+    } catch { /* ignore */ }
+    try {
+      price = point.price != null ? formatSpotPrice(BigInt(String(point.price))) : "—";
+    } catch { /* ignore */ }
     const when = point.t || point.ts || point.at
-      ? new Date(Number(point.t || point.ts || point.at)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      ? new Date(Number(point.t || point.ts || point.at)).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
       : "";
+    const flash = isFresh && index === 0 ? " is-new" : "";
     return `
-      <div class="trade-tape-row">
+      <div class="trade-tape-row${flash}">
         <span class="side-${side}">${side.toUpperCase()}</span>
         <span>${tokens} ${market.ticker || ""}</span>
         <span class="tape-muted">${thru} THRU</span>
         <span class="tape-muted" title="${price}">${when || price}</span>
       </div>`;
   }).join("");
+}
+
+/** Pull storage + remote, then repaint chart / tape / % / quote. */
+async function refreshOpenTradeUi({ sync = false } = {}) {
+  if (!activeTrade?.mintAddress) return;
+  const modal = document.querySelector("[data-trade-modal]");
+  if (!modal || modal.hidden) return;
+  if (sync) {
+    try {
+      await syncPublicMarkets({ mode: "full", publish: false });
+    } catch { /* ignore */ }
+  }
+  const fresh = resolveTradeMarket(
+    readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress),
+  );
+  if (fresh) activeTrade = fresh;
+  renderTokenChart(activeTrade);
+  renderTradeTape(activeTrade);
+  try { updateTradeQuote(); } catch { /* ignore */ }
+}
+
+let tradeLiveTimer = 0;
+let tradeLiveBusy = false;
+
+function stopTradeLiveFeed() {
+  if (tradeLiveTimer) {
+    clearInterval(tradeLiveTimer);
+    tradeLiveTimer = 0;
+  }
+  tradeLiveBusy = false;
+}
+
+function startTradeLiveFeed() {
+  stopTradeLiveFeed();
+  // Immediate paint, then 1s live loop while the modal is open.
+  refreshOpenTradeUi({ sync: true }).catch(() => {});
+  tradeLiveTimer = window.setInterval(() => {
+    if (tradeLiveBusy) return;
+    const open = activeTrade
+      && document.querySelector("[data-trade-modal]")?.hidden === false;
+    if (!open) {
+      stopTradeLiveFeed();
+      return;
+    }
+    tradeLiveBusy = true;
+    refreshOpenTradeUi({ sync: true })
+      .catch(() => {})
+      .finally(() => { tradeLiveBusy = false; });
+  }, TRADE_LIVE_POLL_MS);
 }
 
 function asBigIntAmount(value) {
@@ -3868,12 +3990,15 @@ async function openTrade(index, side) {
   });
   document.querySelector("[data-trade-amount]").value = "";
   document.querySelector("[data-trade-quote]").textContent = "—";
+  lastTapeSignature = "";
   renderTokenChart(activeTrade);
   renderTradeTape(activeTrade);
+  startTradeLiveFeed();
   await refreshTradeBalances();
 }
 
 function closeTrade() {
+  stopTradeLiveFeed();
   tradeModal.hidden = true;
   document.body.classList.remove("modal-open");
 }
@@ -4089,6 +4214,7 @@ async function executeCurveTrade(amount, status) {
     renderMarkets();
     // Public board must get this print so the other wallet's chart/tape/price move.
     await publishTradeActivity(activeTrade, status);
+    await refreshOpenTradeUi({ sync: true });
     await refreshTradeBalances();
     await refreshBalance();
     return;
@@ -4130,6 +4256,7 @@ async function executeCurveTrade(amount, status) {
   renderTradeTape(activeTrade);
   renderMarkets();
   await publishTradeActivity(activeTrade, status);
+  await refreshOpenTradeUi({ sync: true });
   await refreshTradeBalances();
   await refreshBalance();
 }
@@ -4315,24 +4442,26 @@ async function bootMarkets() {
     } catch { /* ignore */ }
   }, 2000);
 
-  // Adaptive poll: stay hot while the board is changing or a trade modal is open
-  // (so friend buys show up on chart/tape quickly).
+  // Adaptive poll for Explore; trade modal has its own 1s live feed.
   let pollMs = REGISTRY_POLL_FAST_MS;
   const schedulePoll = () => {
     window.setTimeout(async () => {
       try {
         const tradeOpen = activeTrade
           && document.querySelector("[data-trade-modal]")?.hidden === false;
+        // Trade live feed already syncs every second — skip heavy double-poll.
+        if (tradeOpen) {
+          updateRegistryLiveBadge();
+          pollMs = TRADE_LIVE_POLL_MS;
+          schedulePoll();
+          return;
+        }
         const before = marketsSignature(readMarkets());
         await syncPublicMarkets({ mode: "full", publish: true });
         const after = marketsSignature(readMarkets());
         if (before !== after) {
           renderMarkets();
           pollMs = REGISTRY_POLL_FAST_MS;
-        } else if (tradeOpen) {
-          // Stay hot while watching a market so peer trades land fast.
-          pollMs = REGISTRY_POLL_FAST_MS;
-          updateRegistryLiveBadge();
         } else {
           updateRegistryLiveBadge();
           pollMs = Math.min(REGISTRY_POLL_SLOW_MS, pollMs + 1500);
@@ -4347,17 +4476,6 @@ async function bootMarkets() {
 
   // Live badge clock.
   setInterval(updateRegistryLiveBadge, 1000);
-  // Keep open chart/tape fresh while trading (pull storage + re-render).
-  setInterval(() => {
-    if (activeTrade && document.querySelector("[data-trade-modal]")?.hidden === false) {
-      const fresh = resolveTradeMarket(
-        readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress),
-      );
-      if (fresh) activeTrade = fresh;
-      renderTokenChart(activeTrade);
-      renderTradeTape(activeTrade);
-    }
-  }, 3_000);
 }
 
 bootMarkets();
