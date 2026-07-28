@@ -1660,6 +1660,8 @@ async function fetchPublicMarkets() {
 
 const GIST_ID = "1be3933a7f446c5279054e8113b6786a";
 const GIST_TOKEN_KEY = "genesis-gist-token";
+/** Public GitHub CLI OAuth app id — used only for device-flow gist scope. */
+const GITHUB_DEVICE_CLIENT_ID = "178c6fc778ccc68e1d6a";
 
 function getBrowserGistToken() {
   try {
@@ -1669,13 +1671,22 @@ function getBrowserGistToken() {
   }
 }
 
+function setBrowserGistToken(token) {
+  try {
+    if (token) localStorage.setItem(GIST_TOKEN_KEY, token);
+    else localStorage.removeItem(GIST_TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Allow ?boardToken=ghp_… once to enable durable browser-side gist publishes. */
 (function bootstrapBoardTokenFromUrl() {
   try {
     const url = new URL(location.href);
     const token = url.searchParams.get("boardToken") || url.searchParams.get("gistToken");
     if (token && token.length > 20) {
-      localStorage.setItem(GIST_TOKEN_KEY, token);
+      setBrowserGistToken(token);
       url.searchParams.delete("boardToken");
       url.searchParams.delete("gistToken");
       history.replaceState({}, "", url.pathname + url.search + url.hash);
@@ -1684,6 +1695,73 @@ function getBrowserGistToken() {
     /* ignore */
   }
 })();
+
+/**
+ * One-time GitHub device login (gist scope) so this browser can publish
+ * to the public board even when the server has no GENESIS_GITHUB_TOKEN.
+ */
+async function connectPublicBoard(setStatus = () => {}) {
+  setStatus("Requesting GitHub device login for the public board…");
+  const codeRes = await fetch("https://github.com/login/device/code", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      client_id: GITHUB_DEVICE_CLIENT_ID,
+      scope: "gist",
+    }),
+  });
+  if (!codeRes.ok) {
+    throw new Error("Could not start GitHub device login.");
+  }
+  const device = await codeRes.json();
+  const userCode = device.user_code;
+  const verifyUrl = device.verification_uri || "https://github.com/login/device";
+  const intervalMs = Math.max(5, Number(device.interval) || 5) * 1000;
+  const expiresAt = Date.now() + (Number(device.expires_in) || 900) * 1000;
+
+  setStatus(
+    `Authorize public board: open ${verifyUrl} and enter code ${userCode}. Waiting…`,
+  );
+  window.open(verifyUrl, "_blank", "noopener,noreferrer");
+
+  while (Date.now() < expiresAt) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: GITHUB_DEVICE_CLIENT_ID,
+        device_code: device.device_code,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      }),
+    });
+    if (!tokenRes.ok) continue;
+    const tokenJson = await tokenRes.json();
+    if (tokenJson.access_token) {
+      setBrowserGistToken(tokenJson.access_token);
+      setStatus("Public board connected. You can publish launches for everyone.");
+      return true;
+    }
+    if (tokenJson.error === "authorization_pending") continue;
+    if (tokenJson.error === "slow_down") {
+      await new Promise((r) => setTimeout(r, intervalMs));
+      continue;
+    }
+    if (tokenJson.error === "expired_token") {
+      throw new Error("GitHub login expired. Try Connect public board again.");
+    }
+    if (tokenJson.error === "access_denied") {
+      throw new Error("GitHub login was denied.");
+    }
+  }
+  throw new Error("Timed out waiting for GitHub authorization.");
+}
 
 /**
  * Durable browser-side write to the public GitHub Gist (CORS + token).
@@ -2477,6 +2555,29 @@ async function retryPublicPublishOnly(mintAddress, ticker = "Token") {
   }
 }
 
+function updateBoardConnectStatus() {
+  const el = document.querySelector("[data-board-connect-status]");
+  if (!el) return;
+  el.textContent = getBrowserGistToken()
+    ? "Public board connected — friends can see your launches."
+    : "Required so friends can see your launch (GitHub gist authorize, one time).";
+}
+
+document.querySelector("[data-connect-board]")?.addEventListener("click", async () => {
+  const status = document.querySelector("[data-board-connect-status]")
+    || document.querySelector("[data-create-status]");
+  const setStatus = (msg) => {
+    if (status) status.textContent = msg;
+  };
+  try {
+    await connectPublicBoard(setStatus);
+    updateBoardConnectStatus();
+  } catch (reason) {
+    setStatus(reason instanceof Error ? reason.message : "Could not connect public board.");
+  }
+});
+updateBoardConnectStatus();
+
 async function createToken() {
   if (!connectedAccount) {
     openWallet();
@@ -2491,6 +2592,22 @@ async function createToken() {
       existing?.ticker || "Token",
     );
     return;
+  }
+
+  // Ensure this browser can write the durable public gist before minting.
+  if (!getBrowserGistToken()) {
+    try {
+      createStatus.textContent = "Connect the public board first (one-time GitHub authorize)…";
+      await connectPublicBoard((msg) => {
+        createStatus.textContent = msg;
+      });
+      updateBoardConnectStatus();
+    } catch (reason) {
+      createStatus.textContent =
+        `${reason instanceof Error ? reason.message : "Public board not connected."} ` +
+        "Click “Connect public board”, authorize GitHub, then create again.";
+      return;
+    }
   }
 
   const name = document.querySelector("[data-token-name]").value.trim();
