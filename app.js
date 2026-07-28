@@ -60,6 +60,24 @@ const formatters = {
   tvl: (value) => formatThruDisplay(value),
 };
 
+const STAT_KEYS = ["markets", "trades", "graduated", "volume", "tvl"];
+const COUNT_DURATION_MS = 1400;
+const ZERO_STATS = Object.freeze({
+  markets: 0,
+  trades: 0,
+  graduated: 0,
+  volume: 0n,
+  tvl: 0n,
+});
+
+/** Target stats waiting for / used by the count-up. */
+let pendingProtocolStats = null;
+/** True after the 0 → N intro animation has finished once. */
+let protocolCountDone = false;
+/** True when the protocol stats card is (or has been) on screen. */
+let protocolStatsInView = false;
+let protocolCountRaf = 0;
+
 function formatThruDisplay(baseUnits) {
   try {
     const raw = typeof baseUnits === "bigint" ? baseUnits : BigInt(String(baseUnits || 0));
@@ -83,6 +101,108 @@ function toBig(value) {
   } catch {
     return 0n;
   }
+}
+
+function normalizeStats(stats = {}) {
+  return {
+    markets: Math.max(0, Number(stats.markets) || 0),
+    trades: Math.max(0, Number(stats.trades) || 0),
+    graduated: Math.max(0, Number(stats.graduated) || 0),
+    volume: toBig(stats.volume),
+    tvl: toBig(stats.tvl),
+  };
+}
+
+function easeOutCubic(t) {
+  return 1 - (1 - t) ** 3;
+}
+
+function lerpInt(from, to, t) {
+  return Math.round(from + (to - from) * t);
+}
+
+function lerpBig(from, to, t) {
+  const a = typeof from === "bigint" ? from : toBig(from);
+  const b = typeof to === "bigint" ? to : toBig(to);
+  if (a === b) return b;
+  const scale = 10_000n;
+  const ft = BigInt(Math.max(0, Math.min(10_000, Math.round(t * 10_000))));
+  return a + ((b - a) * ft) / scale;
+}
+
+function paintStatValue(key, value) {
+  const element = document.querySelector(`[data-stat="${key}"]`);
+  if (!element) return;
+  const format = formatters[key];
+  if (!format) return;
+  const next = format(value);
+  if (element.textContent !== next) element.textContent = next;
+}
+
+function paintStats(stats, { flash = false } = {}) {
+  const normalized = normalizeStats(stats);
+  STAT_KEYS.forEach((key) => {
+    paintStatValue(key, normalized[key]);
+    if (!flash) return;
+    const element = document.querySelector(`[data-stat="${key}"]`);
+    if (!element) return;
+    element.classList.add("stat-flash");
+    window.setTimeout(() => element.classList.remove("stat-flash"), 600);
+  });
+}
+
+function paintInterpolatedStats(from, to, t) {
+  paintStatValue("markets", lerpInt(from.markets, to.markets, t));
+  paintStatValue("trades", lerpInt(from.trades, to.trades, t));
+  paintStatValue("graduated", lerpInt(from.graduated, to.graduated, t));
+  paintStatValue("volume", lerpBig(from.volume, to.volume, t));
+  paintStatValue("tvl", lerpBig(from.tvl, to.tvl, t));
+}
+
+function stopProtocolCount() {
+  if (protocolCountRaf) {
+    cancelAnimationFrame(protocolCountRaf);
+    protocolCountRaf = 0;
+  }
+}
+
+/** One-shot 0 → target count. Later refreshes just snap to the new value. */
+function startProtocolCountUp(stats) {
+  const target = normalizeStats(stats);
+  pendingProtocolStats = target;
+  if (protocolCountDone) {
+    paintStats(target, { flash: true });
+    return;
+  }
+  if (!protocolStatsInView) {
+    // Hold zeros until the card is visible.
+    paintStats(ZERO_STATS);
+    return;
+  }
+
+  stopProtocolCount();
+  paintStats(ZERO_STATS);
+  const from = { ...ZERO_STATS };
+  const startedAt = performance.now();
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduceMotion) {
+    paintStats(target, { flash: true });
+    protocolCountDone = true;
+    return;
+  }
+
+  const tick = (now) => {
+    const progress = Math.min(1, (now - startedAt) / COUNT_DURATION_MS);
+    paintInterpolatedStats(from, target, easeOutCubic(progress));
+    if (progress < 1) {
+      protocolCountRaf = requestAnimationFrame(tick);
+      return;
+    }
+    protocolCountRaf = 0;
+    paintStats(target, { flash: true });
+    protocolCountDone = true;
+  };
+  protocolCountRaf = requestAnimationFrame(tick);
 }
 
 function summarizeMarkets(markets) {
@@ -132,16 +252,14 @@ function setProtocolLive(state, text) {
 }
 
 function applyStats(stats) {
-  Object.entries(formatters).forEach(([key, format]) => {
-    const element = document.querySelector(`[data-stat="${key}"]`);
-    if (!element) return;
-    const next = format(stats[key] ?? 0);
-    if (element.textContent !== next) {
-      element.textContent = next;
-      element.classList.add("stat-flash");
-      window.setTimeout(() => element.classList.remove("stat-flash"), 600);
-    }
-  });
+  const normalized = normalizeStats(stats);
+  pendingProtocolStats = normalized;
+  if (!protocolCountDone) {
+    startProtocolCountUp(normalized);
+    return;
+  }
+  // After the intro count, keep values updated without replaying 0 → N.
+  paintStats(normalized, { flash: true });
 }
 
 function readLocalMarkets() {
@@ -265,6 +383,30 @@ document.querySelectorAll(".nav-pill a").forEach((link) => {
     menuButton?.setAttribute("aria-expanded", "false");
   });
 });
+
+// Watch the stats card: count 0 → N the first time it enters the viewport.
+const protocolStatsEl = document.querySelector("[data-protocol-stats]");
+if (protocolStatsEl) {
+  // Show zeros until the intro animation runs.
+  paintStats(ZERO_STATS);
+  const statsObserver = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        protocolStatsInView = true;
+        if (pendingProtocolStats && !protocolCountDone) {
+          startProtocolCountUp(pendingProtocolStats);
+        } else if (!pendingProtocolStats && !protocolCountDone) {
+          // Data still loading — keep zeros until applyStats arrives.
+          paintStats(ZERO_STATS);
+        }
+        statsObserver.disconnect();
+      });
+    },
+    { threshold: 0.35 },
+  );
+  statsObserver.observe(protocolStatsEl);
+}
 
 // Instant local stats, then race the public boards in the background.
 refreshStatsInstant();
