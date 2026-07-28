@@ -507,7 +507,7 @@ span.wallet-token-avatar {
   min-width: 64px;
   padding: 0 12px;
   border: 1px solid var(--line);
-  background: var(--paper, #f4f4f2);
+  background: var(--paper, #eeeeec);
   color: var(--ink);
   font-size: 10px;
   font-weight: 700;
@@ -785,7 +785,7 @@ html[data-theme="dark"] .token-card-actions button[data-trade-side="sell"] {
   margin-top: 28px;
   padding: 28px 24px 24px;
   border: 1px solid var(--ink);
-  background: var(--paper, #f4f4f2);
+  background: var(--paper, #eeeeec);
   box-sizing: border-box;
 }
 
