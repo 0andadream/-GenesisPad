@@ -1076,13 +1076,10 @@ function ensureChartSeed(market) {
   if (!market?.curve) return market;
   const existing = readChart(market);
   if (existing.length > 0) return market;
-  // One flat seed tick so the chart can open; real trades create movement.
+  // One seed tick with the same 21dp scale as live trades (no integer truncation).
   try {
-    const c = readCurve(market);
-    const oneToken = 10n ** BigInt(market.decimals || 0);
-    const startPrice = c.virtualToken > 0n
-      ? (c.virtualThru * oneToken) / c.virtualToken
-      : 0n;
+    const startPrice = curveSpotPriceThruPerToken(market);
+    if (startPrice <= 0n) return market;
     const now = Date.now();
     const seed = [
       { t: now, price: startPrice.toString(), side: "seed", thru: "0", tokens: "0" },
@@ -2352,8 +2349,12 @@ async function createBondingCurve({ mint, creatorTokenAccount, decimals, supplyW
 
   const virtualThru = CURVE_VIRTUAL_THRU;
   const virtualToken = curveTokens;
+  // Same 21dp fixed-point scale as curveSpotPriceThruPerToken (extra 12 digits
+  // so micro prices are non-zero integers and the chart can move).
   const oneToken = 10n ** BigInt(decimals);
-  const startPrice = virtualToken > 0n ? (virtualThru * oneToken) / virtualToken : 0n;
+  const extra = 10n ** BigInt(PRICE_PRICE_EXTRA);
+  const startPrice =
+    virtualToken > 0n ? (virtualThru * oneToken * extra) / virtualToken : 0n;
   const now = Date.now();
 
   return {

@@ -240,6 +240,18 @@ export function useChart(options: ChartOptions = {}): UseChartResult {
       borderVisible: true,
       priceLineVisible: false,
       lastValueVisible: true,
+      // Match imperative API: micro bonding-curve prices need tiny minMove.
+      priceFormat: {
+        type: "custom",
+        minMove: 1e-8,
+        formatter: (price: number) => {
+          if (!Number.isFinite(price) || price === 0) return "0";
+          const abs = Math.abs(price);
+          if (abs >= 1) return price.toPrecision(6);
+          if (abs >= 1e-4) return price.toFixed(8);
+          return price.toExponential(4);
+        },
+      },
     });
 
     let volume: VolumeSeries | null = null;

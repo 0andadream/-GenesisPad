@@ -60,6 +60,13 @@ export class DexChart implements ChartController {
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private raf = 0;
   private opts: ChartOptions;
+  /**
+   * Multiply real THRU prices into a comfortable display range.
+   * Bonding-curve spots are often 1e-12..1e-6; LW Charts + default minMove
+   * 0.01 rounds those to 0 → a flat line with no red/green bodies.
+   * Axis labels divide by this scale so the user still sees real THRU.
+   */
+  private displayScale = 1;
 
   constructor(options: ChartOptions = {}) {
     this.opts = options;
@@ -133,6 +140,14 @@ export class DexChart implements ChartController {
       kineticScroll: { mouse: true, touch: true },
     });
 
+    // Display-scaled prices land ~1..100; minMove 1e-8 is plenty for body color.
+    // Formatter converts back to real THRU for axis labels.
+    const microPriceFormat = {
+      type: "custom" as const,
+      minMove: 1e-8,
+      formatter: (price: number) => this.formatRealPrice(price),
+    };
+
     const candleSeries = chart.addCandlestickSeries({
       upColor: theme.up,
       downColor: theme.down,
@@ -142,6 +157,7 @@ export class DexChart implements ChartController {
       wickDownColor: theme.down,
       priceLineVisible: false,
       lastValueVisible: true,
+      priceFormat: microPriceFormat,
     });
 
     let volumeSeries: VolumeSeries | null = null;
@@ -156,6 +172,13 @@ export class DexChart implements ChartController {
         scaleMargins: { top: 0.78, bottom: 0 },
       });
     }
+
+    // Autoscale so candle bodies fill the pane
+    chart.priceScale("right").applyOptions({
+      autoScale: true,
+      scaleMargins: { top: 0.12, bottom: this.showVolume ? 0.28 : 0.08 },
+      entireTextOnly: false,
+    });
 
     this.chart = chart;
     this.candles = candleSeries;
@@ -186,7 +209,9 @@ export class DexChart implements ChartController {
     });
     this.ro.observe(container);
 
-    this.tickTimer = setInterval(() => this.builder.tick(), 500);
+    // Do NOT auto-open empty flat buckets every interval — that paints
+    // rows of doji candles and makes the chart look "stuck flat".
+    this.tickTimer = null;
   }
 
   setHistoricalData(candles: Candle[]): void {
@@ -264,62 +289,130 @@ export class DexChart implements ChartController {
     this.builder.clear();
   }
 
+  /**
+   * Pick a scale so the latest price sits near 1..10. Rebuilds are cheap
+   * (history is tiny for bonding curves). Keeps LW internal math away from
+   * denormal / default-0.01 rounding.
+   */
+  private recomputeDisplayScale(data: Candle[]): void {
+    let ref = 0;
+    for (let i = data.length - 1; i >= 0; i--) {
+      const c = data[i];
+      if (c && c.close > 0 && Number.isFinite(c.close)) {
+        ref = c.close;
+        break;
+      }
+    }
+    if (!(ref > 0)) {
+      this.displayScale = 1;
+      return;
+    }
+    // ref = 6.25e-11 → exp = -11 → scale = 1e11 → display ≈ 6.25
+    const exp = Math.floor(Math.log10(ref));
+    const scale = 10 ** -exp;
+    this.displayScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  }
+
+  /** Axis / price-line label: display units → real THRU. */
+  private formatRealPrice(displayPrice: number): string {
+    if (!Number.isFinite(displayPrice) || displayPrice === 0) return "0";
+    const real = displayPrice / (this.displayScale || 1);
+    const abs = Math.abs(real);
+    if (abs >= 1) return real.toPrecision(6);
+    if (abs >= 1e-4) return real.toFixed(8);
+    return real.toExponential(4);
+  }
+
+  private toDisplayBar(c: Candle): {
+    time: UTCTimestamp;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+  } | null {
+    if (!Number.isFinite(c.open) || !Number.isFinite(c.close) || !(c.close > 0)) return null;
+    const s = this.displayScale || 1;
+    const open = c.open * s;
+    const close = c.close * s;
+    const high = Math.max(c.high, c.open, c.close) * s;
+    const lowRaw = Math.min(c.low > 0 ? c.low : Math.min(c.open, c.close), c.open, c.close);
+    const low = Math.max(0, lowRaw * s);
+    // Guarantee non-zero body height in display space so color always paints.
+    const minBody = Math.max(Math.abs(close) * 1e-4, 1e-6);
+    let o = open;
+    let cl = close;
+    if (Math.abs(cl - o) < minBody) {
+      // Preserve direction if any, else slight up doji
+      if (cl >= o) cl = o + minBody;
+      else o = cl + minBody;
+    }
+    return {
+      time: c.time as UTCTimestamp,
+      open: o,
+      high: Math.max(high, o, cl),
+      low: Math.min(low > 0 ? low : Math.min(o, cl), o, cl),
+      close: cl,
+    };
+  }
+
   private paintAll(data: Candle[]): void {
     if (!this.candles) return;
-    this.candles.setData(
-      data.map((c) => ({
-        time: c.time as UTCTimestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      })),
-    );
+    this.recomputeDisplayScale(data);
+    const bars = data
+      .map((c) => this.toDisplayBar(c))
+      .filter((b): b is NonNullable<typeof b> => b != null);
+    this.candles.setData(bars);
     if (this.volume) {
       this.volume.setData(
-        data.map((c) => ({
-          time: c.time as UTCTimestamp,
-          value: c.volume,
-          color: volumeColor(c, this.theme),
-        })),
+        data
+          .filter((c) => Number.isFinite(c.close) && c.close > 0)
+          .map((c) => ({
+            time: c.time as UTCTimestamp,
+            value: Math.max(0, c.volume || 0),
+            color: volumeColor(c, this.theme),
+          })),
       );
     }
-    if (data.length) {
-      this.setPriceLine(data[data.length - 1].close);
+    if (bars.length) {
+      this.setPriceLine(bars[bars.length - 1].close);
       this.chart?.timeScale().fitContent();
+      this.chart?.priceScale("right").applyOptions({ autoScale: true });
       this.pinned = true;
     }
-    this.paintMarkers();
+    // Markers off by default for launchpad (arrows clutter micro charts)
+    if (this.showMarkers) this.paintMarkers();
+    else this.candles.setMarkers([]);
   }
 
   private applyCandle(candle: Candle, isNew: boolean): void {
     if (!this.candles) return;
-    this.candles.update({
-      time: candle.time as UTCTimestamp,
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-    });
+    if (!(candle.close > 0) || !Number.isFinite(candle.close)) return;
+    // Keep display scale in sync if this is a brand-new series or scale was 1
+    if (this.displayScale === 1 && candle.close < 1e-4) {
+      this.recomputeDisplayScale([candle]);
+    }
+    const bar = this.toDisplayBar(candle);
+    if (!bar) return;
+    this.candles.update(bar);
     this.volume?.update({
       time: candle.time as UTCTimestamp,
-      value: candle.volume,
+      value: Math.max(0, candle.volume || 0),
       color: volumeColor(candle, this.theme),
     });
-    this.setPriceLine(candle.close);
+    this.setPriceLine(bar.close);
     if ((isNew || this.pinned) && this.autoScroll) {
       this.chart?.timeScale().scrollToRealTime();
     }
   }
 
-  private setPriceLine(price: number): void {
-    if (!this.candles || !Number.isFinite(price)) return;
+  private setPriceLine(displayPrice: number): void {
+    if (!this.candles || !Number.isFinite(displayPrice)) return;
     if (this.priceLine) {
       this.candles.removePriceLine(this.priceLine);
       this.priceLine = null;
     }
     this.priceLine = this.candles.createPriceLine({
-      price,
+      price: displayPrice,
       color: this.theme.priceLine,
       lineWidth: 1,
       lineStyle: LineStyle.SparseDotted,

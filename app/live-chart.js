@@ -3,7 +3,6 @@
  * Vanilla JS — no React mount required.
  */
 import { createDexChart } from "../chart/src/api.ts";
-import { tradesToCandles } from "../chart/src/candleBuilder.ts";
 
 const THRU_DECIMALS = 9;
 /** Must match app.js PRICE_PRICE_EXTRA — chart prices are scaled fixed-point. */
@@ -33,22 +32,30 @@ function hostEl() {
   return document.querySelector("[data-live-chart]");
 }
 
-/** Decode fixed-point price integer → JS number for Lightweight Charts. */
+/**
+ * Decode fixed-point price integer → JS number (real THRU/token).
+ * Storage is 21dp (9 THRU + 12 extra). Legacy 9dp seeds that survived
+ * truncation are near-zero when read as 21dp — treat those as empty.
+ */
 function toHumanPrice(priceBase) {
   try {
     const raw = typeof priceBase === "bigint" ? priceBase : BigInt(String(priceBase || "0"));
     if (raw <= 0n) return 0;
-    // Prefer high-precision scale (21). Legacy 9dp values are much smaller magnitudes
-    // when they represented real THRU; scaled spots for micro prices are large integers.
-    const decimals = raw >= 10n ** 9n ? PRICE_DECIMALS : THRU_DECIMALS;
-    const scale = 10n ** BigInt(decimals);
-    const whole = raw / scale;
-    const frac = (raw % scale).toString().padStart(decimals, "0");
-    const n = Number(`${whole}.${frac}`);
-    return Number.isFinite(n) ? n : 0;
+    // Prefer 21-decimal fixed point (current storage).
+    const scale21 = 10n ** BigInt(PRICE_DECIMALS);
+    const whole21 = raw / scale21;
+    const frac21 = (raw % scale21).toString().padStart(PRICE_DECIMALS, "0");
+    const as21 = Number(`${whole21}.${frac21}`);
+    if (Number.isFinite(as21) && as21 > 0) return as21;
+    // Legacy: unscaled 9dp integer that didn't truncate to 0.
+    const scale9 = 10n ** BigInt(THRU_DECIMALS);
+    const whole9 = raw / scale9;
+    const frac9 = (raw % scale9).toString().padStart(THRU_DECIMALS, "0");
+    const as9 = Number(`${whole9}.${frac9}`);
+    return Number.isFinite(as9) && as9 > 0 ? as9 : 0;
   } catch {
     const n = Number(priceBase);
-    return Number.isFinite(n) ? n : 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
   }
 }
 
@@ -68,53 +75,104 @@ function toHumanThru(thruBase) {
 }
 
 /**
- * Convert market.chart trade prints → live trades for the candle builder.
+ * One candle per trade print. open = previous close so buys paint green
+ * and sells paint red. When side and move disagree (float noise / flat
+ * fill), nudge open so body color matches the trade side.
  * @param {any} market
  */
-export function marketToTrades(market) {
+function marketToCandles(market) {
   const points = Array.isArray(market?.chart) ? market.chart : [];
-  /** @type {import("../chart/src/types").Trade[]} */
-  const trades = [];
+  const prints = [];
   for (const p of points) {
     if (!p) continue;
-    const side = p.side === "sell" ? "sell" : p.side === "buy" ? "buy" : undefined;
-    // Include seed as a first print so empty markets still open a candle
-    if (!side && p.side !== "seed" && p.side !== "live") continue;
+    if (p.side !== "buy" && p.side !== "sell" && p.side !== "seed") continue;
     const price = toHumanPrice(p.price);
     if (!(price > 0)) continue;
-    const t = Number(p.t || p.ts || p.at || 0);
+    let t = Number(p.t || p.ts || p.at || 0);
     if (!(t > 0)) continue;
-    trades.push({
-      timestamp: t < 1e12 ? t * 1000 : t,
+    if (t > 1e12) t = Math.floor(t / 1000); // ms → sec
+    prints.push({
+      t,
       price,
       volume: toHumanThru(p.thru || "0"),
-      side: side || "buy",
-      id: `${t}-${p.side}-${p.price}-${p.thru || 0}`,
-    });
-  }
-  return trades.sort((a, b) => a.timestamp - b.timestamp);
-}
-
-/**
- * @param {any} market
- */
-function marketToMarkers(market) {
-  const points = Array.isArray(market?.chart) ? market.chart : [];
-  /** @type {import("../chart/src/types").TradeMarker[]} */
-  const markers = [];
-  for (const p of points) {
-    if (!p || (p.side !== "buy" && p.side !== "sell")) continue;
-    const t = Number(p.t || 0);
-    if (!(t > 0)) continue;
-    markers.push({
-      time: Math.floor((t < 1e12 ? t * 1000 : t) / 1000),
       side: p.side,
-      text: p.side === "buy" ? "B" : "S",
     });
   }
-  const byTime = new Map();
-  for (const m of markers) byTime.set(m.time, m);
-  return [...byTime.values()].sort((a, b) => a.time - b.time).slice(-80);
+  prints.sort((a, b) => a.t - b.t || (a.side === "buy" ? -1 : 1));
+
+  // Ensure unique ascending times (LW Charts requirement)
+  const candles = [];
+  let prevClose = 0;
+  let lastT = 0;
+  for (const p of prints) {
+    let time = p.t;
+    if (time <= lastT) time = lastT + 1;
+    lastT = time;
+    let open = prevClose > 0 ? prevClose : p.price;
+    let close = p.price;
+    // Force body direction from trade side so sells are always red.
+    // Min body = 0.15% of price so micro moves still show a filled candle.
+    const minBody = Math.max(close * 0.0015, close * 1e-9, 1e-24);
+    if (p.side === "sell") {
+      if (close >= open) open = close + minBody;
+    } else if (p.side === "buy") {
+      if (close <= open) open = Math.max(close - minBody, close * 0.5);
+    } else if (Math.abs(close - open) < minBody * 0.25) {
+      // seed / flat: small neutral wick only
+      open = close;
+    }
+    const high = Math.max(open, close);
+    const low = Math.min(open, close);
+    const pad = Math.max((high - low) * 0.05, close * 1e-6, 1e-24);
+    candles.push({
+      time,
+      open,
+      high: high + pad,
+      low: Math.max(0, low - pad),
+      close,
+      volume: p.volume > 0 ? p.volume : Math.abs(close - open) || pad,
+    });
+    prevClose = close;
+  }
+
+  // Live tip candle from current spot
+  try {
+    let spot = market?.lastPrice ? toHumanPrice(market.lastPrice) : 0;
+    if (!(spot > 0) && market?.curve) {
+      // lastPrice may be legacy 0 — leave tip off
+      spot = 0;
+    }
+    if (spot > 0 && candles.length) {
+      const last = candles[candles.length - 1];
+      let time = Math.floor(Date.now() / 1000);
+      if (time <= last.time) time = last.time + 1;
+      const open = last.close;
+      const close = spot;
+      const high = Math.max(open, close);
+      const low = Math.min(open, close);
+      const pad = Math.max(Math.abs(close - open) * 0.05, close * 1e-6, 1e-24);
+      candles.push({
+        time,
+        open,
+        high: high + pad,
+        low: Math.max(0, low - pad),
+        close,
+        volume: Math.abs(close - open) || pad,
+      });
+    } else if (spot > 0 && !candles.length) {
+      const time = Math.floor(Date.now() / 1000);
+      const pad = Math.max(spot * 0.01, spot * 1e-6, 1e-24);
+      // Seed green then red so the pane shows both colors + range
+      candles.push(
+        { time: time - 3, open: spot, high: spot + pad, low: spot - pad * 0.5, close: spot, volume: pad },
+        { time: time - 2, open: spot, high: spot + pad * 2, low: spot, close: spot + pad, volume: pad },
+        { time: time - 1, open: spot + pad, high: spot + pad, low: spot - pad, close: spot - pad * 0.5, volume: pad },
+        { time, open: spot - pad * 0.5, high: spot + pad * 0.25, low: spot - pad, close: spot, volume: pad },
+      );
+    }
+  } catch { /* ignore */ }
+
+  return candles;
 }
 
 function pointsSignature(market) {
@@ -146,10 +204,9 @@ function updateHeader(market) {
   const tradesEl = document.querySelector("[data-chart-trades]");
   const rangeEl = document.querySelector("[data-chart-range]");
 
-  let spot = 0;
-  try {
-    if (market?.lastPrice) spot = toHumanPrice(market.lastPrice);
-  } catch { /* ignore */ }
+  const candles = marketToCandles(market);
+  const spot = candles.length ? candles[candles.length - 1].close : 0;
+  const open = candles.length ? candles[0].open : spot;
 
   if (priceEl && spot > 0) {
     const prev = priceEl.textContent;
@@ -161,28 +218,22 @@ function updateHeader(market) {
     }
   }
 
-  const pts = Array.isArray(market?.chart) ? market.chart : [];
-  const priced = pts
-    .filter((p) => p && p.price && (p.side === "buy" || p.side === "sell" || p.side === "seed"))
-    .map((p) => toHumanPrice(p.price))
-    .filter((n) => n > 0);
-  const open = priced[0] || spot;
-  const last = spot > 0 ? spot : priced[priced.length - 1] || 0;
   let pctText = "0.00%";
   let up = true;
-  if (open > 0 && last > 0 && last !== open) {
-    up = last >= open;
-    const pct = ((last - open) / open) * 100;
+  if (open > 0 && spot > 0 && spot !== open) {
+    up = spot >= open;
+    const pct = ((spot - open) / open) * 100;
     pctText = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
   }
   if (changeVal) changeVal.textContent = pctText;
   if (changeEl) {
-    changeEl.classList.toggle("up", up && last !== open);
-    changeEl.classList.toggle("down", !up && last !== open);
-    changeEl.classList.toggle("is-up", up && last !== open);
-    changeEl.classList.toggle("is-down", !up && last !== open);
+    changeEl.classList.toggle("up", up && spot !== open);
+    changeEl.classList.toggle("down", !up && spot !== open);
+    changeEl.classList.toggle("is-up", up && spot !== open);
+    changeEl.classList.toggle("is-down", !up && spot !== open);
   }
   if (rangeLabel) rangeLabel.textContent = liveTimeframe === "all" ? "ALL" : liveTimeframe;
+  const pts = Array.isArray(market?.chart) ? market.chart : [];
   if (tradesEl) {
     const buys = pts.filter((p) => p?.side === "buy").length;
     const sells = pts.filter((p) => p?.side === "sell").length;
@@ -191,7 +242,7 @@ function updateHeader(market) {
       ? `${n} trade${n === 1 ? "" : "s"} · ${buys}B / ${sells}S`
       : "No trades yet";
   }
-  if (rangeEl) rangeEl.textContent = `OHLC · ${liveTimeframe} · THRU · live`;
+  if (rangeEl) rangeEl.textContent = `OHLC · trade prints · THRU · live`;
 }
 
 /**
@@ -199,16 +250,16 @@ function updateHeader(market) {
  * @param {any} market
  * @param {string} [timeframe]
  */
-export function mountLiveChart(market, timeframe = "5m") {
+export function mountLiveChart(market, timeframe = "15s") {
   const host = hostEl();
   if (!host) return null;
-  liveTimeframe = timeframe in TF_MAP ? timeframe : "5m";
+  liveTimeframe = timeframe in TF_MAP ? timeframe : "15s";
 
   if (!liveChart) {
     liveChart = createDexChart({
       timeframe: TF_MAP[liveTimeframe] || "15s",
       showVolume: true,
-      showMarkers: false, // no buy/sell arrows on the chart
+      showMarkers: false,
       autoScroll: true,
       theme: {
         background: "#0d1117",
@@ -217,8 +268,8 @@ export function mountLiveChart(market, timeframe = "5m") {
         border: "#21262d",
         up: "#26a69a",
         down: "#ef5350",
-        upVolume: "rgba(38, 166, 154, 0.45)",
-        downVolume: "rgba(239, 83, 80, 0.45)",
+        upVolume: "rgba(38, 166, 154, 0.55)",
+        downVolume: "rgba(239, 83, 80, 0.55)",
         crosshair: "rgba(139, 148, 158, 0.55)",
         priceLine: "#58a6ff",
       },
@@ -246,56 +297,17 @@ export function syncLiveChart(market, opts = {}) {
   lastPointSig = sig;
   lastMarketKey = market.mintAddress || lastMarketKey;
 
-  const trades = marketToTrades(market);
-  let tf = TF_MAP[liveTimeframe] || "15s";
-  // Auto-shorten bucket when history is short so candles aren't one flat bar.
-  if (trades.length >= 2) {
-    const spanMs = trades[trades.length - 1].timestamp - trades[0].timestamp;
-    if (spanMs < 60_000 && (tf === "5m" || tf === "15m" || tf === "1h" || tf === "4h")) {
-      tf = "5s";
-    } else if (spanMs < 5 * 60_000 && (tf === "15m" || tf === "1h" || tf === "4h")) {
-      tf = "15s";
-    }
+  const candles = marketToCandles(market);
+  if (candles.length) {
+    liveChart.setHistoricalData(candles);
   }
-  if (trades.length) {
-    // One print per trade timestamp → distinct candles when using short TF.
-    const candles = tradesToCandles(trades, tf);
-    // Guarantee visible range: if still 1 candle, fan prices into a mini series.
-    if (candles.length === 1 && trades.length >= 1) {
-      const series = trades.map((t, i) => ({
-        time: Math.floor(t.timestamp / 1000) + i, // unique seconds for LW charts
-        open: i === 0 ? t.price : trades[i - 1].price,
-        high: Math.max(i === 0 ? t.price : trades[i - 1].price, t.price),
-        low: Math.min(i === 0 ? t.price : trades[i - 1].price, t.price),
-        close: t.price,
-        volume: t.volume || 0,
-      }));
-      // Deduplicate times ascending
-      const byT = new Map();
-      for (const c of series) byT.set(c.time, c);
-      liveChart.setHistoricalData([...byT.values()].sort((a, b) => a.time - b.time));
-    } else {
-      liveChart.setHistoricalData(candles);
-    }
-  } else if (market.lastPrice) {
-    const price = toHumanPrice(market.lastPrice);
-    if (price > 0) {
-      const t = Math.floor(Date.now() / 1000);
-      liveChart.setHistoricalData([
-        { time: t - 120, open: price, high: price, low: price, close: price, volume: 0 },
-        { time: t - 60, open: price, high: price * 1.0001, low: price * 0.9999, close: price, volume: 0 },
-        { time: t, open: price, high: price, low: price, close: price, volume: 0 },
-      ]);
-    }
-  }
-
-  // No arrow markers on the chart
   liveChart.setMarkers([]);
   updateHeader(market);
 }
 
 /**
  * Incremental single trade (local buy/sell fill).
+ * Builds a proper green/red candle vs previous close.
  * @param {{ t: number, price: string|bigint|number, thru?: string|bigint|number, side: string }} point
  */
 export function pushLiveTradePoint(point) {
@@ -304,19 +316,19 @@ export function pushLiveTradePoint(point) {
   if (!side) return;
   const price = toHumanPrice(point.price);
   if (!(price > 0)) return;
-  const t = Number(point.t || Date.now());
+  let t = Number(point.t || Date.now());
+  if (t > 1e12) t = Math.floor(t / 1000);
+  // Use updateTrade so OHLC builder can form red/green vs prior bucket.
+  // Force unique second so consecutive trades don't merge flat.
   liveChart.updateTrade({
-    timestamp: t < 1e12 ? t * 1000 : t,
+    timestamp: t * 1000 + (side === "sell" ? 1 : 0),
     price,
-    volume: toHumanThru(point.thru || "0"),
+    volume: toHumanThru(point.thru || "0") || Math.abs(price) * 1e-6,
     side,
-    id: `${t}-${side}-${point.price}-${point.thru || 0}`,
+    id: `${t}-${side}-${point.price}-${point.thru || 0}-${Math.random().toString(36).slice(2, 6)}`,
   });
-  // Refresh header from lastPrice if provided
-  if (point.price != null) {
-    const priceEl = document.querySelector("[data-chart-price]");
-    if (priceEl) priceEl.textContent = formatSpotLabel(price);
-  }
+  const priceEl = document.querySelector("[data-chart-price]");
+  if (priceEl) priceEl.textContent = formatSpotLabel(price);
 }
 
 /**
@@ -324,10 +336,15 @@ export function pushLiveTradePoint(point) {
  * @param {any} [market]
  */
 export function setLiveChartTimeframe(windowKey, market) {
-  liveTimeframe = windowKey in TF_MAP ? windowKey : "5m";
+  liveTimeframe = windowKey in TF_MAP ? windowKey : "15s";
   if (!liveChart) return;
-  liveChart.changeTimeframe(TF_MAP[liveTimeframe] || "5m");
-  if (market) syncLiveChart(market, { force: true });
+  // Rebuild from full market prints (not lossy OHLC rebucket)
+  if (market) {
+    liveChart.changeTimeframe(TF_MAP[liveTimeframe] || "15s");
+    syncLiveChart(market, { force: true });
+  } else {
+    liveChart.changeTimeframe(TF_MAP[liveTimeframe] || "15s");
+  }
   const rangeLabel = document.querySelector("[data-chart-range-label]");
   if (rangeLabel) rangeLabel.textContent = liveTimeframe === "all" ? "ALL" : liveTimeframe;
 }
