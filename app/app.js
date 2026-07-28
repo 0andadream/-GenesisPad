@@ -2922,19 +2922,39 @@ async function executeTrade() {
 }
 
 function onMarketActionClick(event) {
-  const openMarket = event.target.closest("[data-open-market]");
-  if (openMarket) {
-    // Clicking the token opens chart + stats (default buy side for trading controls).
-    openTrade(Number(openMarket.dataset.openMarket), "buy");
+  // Buy / Sell / Pool take priority over the card hit target.
+  const tradeButton = event.target.closest("[data-trade]");
+  if (tradeButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    openTrade(Number(tradeButton.dataset.trade), tradeButton.dataset.tradeSide || "buy");
     return;
   }
-  const button = event.target.closest("[data-trade]");
-  if (button) openTrade(Number(button.dataset.trade), button.dataset.tradeSide);
   const liquidityButton = event.target.closest("[data-liquidity]");
-  if (liquidityButton) openLiquidity(Number(liquidityButton.dataset.liquidity));
+  if (liquidityButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    openLiquidity(Number(liquidityButton.dataset.liquidity));
+    return;
+  }
+  const openMarket = event.target.closest("[data-open-market]");
+  if (openMarket) {
+    // Clicking the token card opens chart + stats (default buy side).
+    openTrade(Number(openMarket.dataset.openMarket), "buy");
+  }
 }
-document.querySelector(".token-table")?.addEventListener("click", onMarketActionClick);
-document.querySelector("[data-graduated-list]")?.addEventListener("click", onMarketActionClick);
+// Token boards are re-rendered often — bind once on the page containers.
+document.querySelectorAll(".token-board").forEach((board) => {
+  board.addEventListener("click", onMarketActionClick);
+});
+// Fallback: any future market list hosts.
+document.querySelector("main")?.addEventListener("click", (event) => {
+  if (event.target.closest(".token-board, .token-grid, .market-list")) {
+    // Already handled by board listener when inside .token-board; skip double-fire.
+    if (event.target.closest(".token-board")) return;
+    onMarketActionClick(event);
+  }
+});
 document.querySelectorAll("[data-trade-close]").forEach((button) => button.addEventListener("click", closeTrade));
 document.querySelectorAll("[data-side]").forEach((button) => button.addEventListener("click", () => {
   if (activeTrade) openTrade(readMarkets().findIndex((market) => market.mintAddress === activeTrade.mintAddress), button.dataset.side);

@@ -730,25 +730,29 @@ span.wallet-token-avatar {
 
 .wrap-desk-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
+  grid-template-columns: minmax(280px, 1.2fr) minmax(280px, 420px);
   gap: 28px;
   align-items: start;
   margin-top: 28px;
+  width: 100%;
 }
 
 .wrap-desk-balances {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  gap: 16px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 18px 20px;
+  align-items: stretch;
   padding: 28px 24px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.55);
+  min-width: 0;
 }
 
 .wrap-desk-balances > div:not(.wrap-desk-arrow) {
   display: grid;
-  gap: 8px;
+  gap: 10px;
+  min-width: 0;
+  align-content: start;
 }
 
 .wrap-desk-balances span {
@@ -760,19 +764,28 @@ span.wallet-token-avatar {
 }
 
 .wrap-desk-balances strong {
-  font: 400 28px/1.1 var(--serif);
+  display: block;
+  width: 100%;
+  min-width: 0;
+  font: 400 clamp(18px, 2.2vw, 28px)/1.25 var(--serif);
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
   word-break: break-word;
+  white-space: normal;
 }
 
 .wrap-desk-arrow {
+  align-self: center;
   color: var(--muted);
   font: 28px var(--serif);
+  flex: 0 0 auto;
 }
 
 .wrap-desk-card {
   padding: 22px 20px 20px;
   border: 1px solid var(--ink);
   background: var(--paper, #f4f4f2);
+  min-width: 0;
 }
 
 .wrap-desk-card .wrap-switch {
@@ -834,6 +847,13 @@ span.wallet-token-avatar {
 @media (max-width: 900px) {
   .wrap-desk-grid {
     grid-template-columns: 1fr;
+  }
+  .wrap-desk-balances {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .wrap-desk-arrow {
+    display: none;
   }
   .wrap-desk-balances strong {
     font-size: 22px;
