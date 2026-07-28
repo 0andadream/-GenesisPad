@@ -1778,12 +1778,15 @@ async function publishToBlobMirrors(markets) {
     wipedAt: 0,
   };
   const body = JSON.stringify(payload);
-  const results = await Promise.all(
-    MARKET_BLOB_URLS.map(async (url, index) => {
+  // Sequential writes — parallel PUTs hit JSONBlob 429s and leave mirrors empty,
+  // which made tokens flash on Explore then disappear on the next poll.
+  let anyOk = false;
+  for (let index = 0; index < MARKET_BLOB_URLS.length; index += 1) {
+    const url = MARKET_BLOB_URLS[index];
+    if (index > 0) await new Promise((r) => setTimeout(r, 400));
+    let ok = false;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
       try {
-        if (index > 0) {
-          await new Promise((r) => setTimeout(r, 90 * index));
-        }
         const response = await fetch(url, {
           method: "PUT",
           headers: {
@@ -1794,27 +1797,22 @@ async function publishToBlobMirrors(markets) {
           mode: "cors",
           cache: "no-store",
         });
-        if (response.status === 429) {
-          await new Promise((r) => setTimeout(r, 500 * (index + 1)));
-          const retry = await fetch(url, {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-            body,
-            mode: "cors",
-            cache: "no-store",
-          });
-          return retry.ok;
+        if (response.ok) {
+          ok = true;
+          break;
         }
-        return response.ok;
+        if (response.status === 429) {
+          await new Promise((r) => setTimeout(r, 700 * attempt * attempt));
+          continue;
+        }
+        break;
       } catch {
-        return false;
+        await new Promise((r) => setTimeout(r, 400 * attempt));
       }
-    }),
-  );
-  return results.some(Boolean);
+    }
+    if (ok) anyOk = true;
+  }
+  return anyOk;
 }
 
 /**

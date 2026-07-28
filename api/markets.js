@@ -205,8 +205,9 @@ async function putBlob(id, payload, attempt = 1) {
     },
     body: JSON.stringify(payload),
   });
-  if (response.status === 429 && attempt < 5) {
-    await sleep(400 * attempt * attempt);
+  // JSONBlob free tier 429s easily — back off hard so publishes stick.
+  if (response.status === 429 && attempt < 8) {
+    await sleep(600 * attempt * attempt);
     return putBlob(id, payload, attempt + 1);
   }
   if (response.status === 404) {
@@ -354,31 +355,31 @@ async function writeBoard(markets, { wipe = false } = {}) {
   const gistResult = await writeGist(payload);
   outcomes.push({ store: "gist", ok: gistResult.ok, error: gistResult.error || null });
 
-  // JSONBlob mirrors — parallel with staggered retries for 429s.
-  const blobResults = await Promise.all(
-    SEED_MIRROR_IDS.map(async (id, index) => {
+  // JSONBlob mirrors — sequential to avoid free-tier 429 storms that leave
+  // partial boards (tokens flash then vanish when some mirrors lag).
+  const blobResults = [];
+  for (let index = 0; index < SEED_MIRROR_IDS.length; index += 1) {
+    const id = SEED_MIRROR_IDS[index];
+    if (index > 0) await sleep(350);
+    try {
+      await putBlob(id, payload);
+      blobResults.push({ store: `blob:${id.slice(0, 8)}`, ok: true });
+    } catch (reason) {
       try {
-        if (index > 0) await sleep(80 * index);
+        await sleep(800 + 400 * index);
         await putBlob(id, payload);
-        return { store: `blob:${id.slice(0, 8)}`, ok: true };
-      } catch (reason) {
-        // One more delayed retry per mirror.
-        try {
-          await sleep(300 + 120 * index);
-          await putBlob(id, payload);
-          return { store: `blob:${id.slice(0, 8)}`, ok: true, retried: true };
-        } catch (retryReason) {
-          return {
-            store: `blob:${id.slice(0, 8)}`,
-            ok: false,
-            error: retryReason instanceof Error
-              ? retryReason.message
-              : reason instanceof Error ? reason.message : "blob write failed",
-          };
-        }
+        blobResults.push({ store: `blob:${id.slice(0, 8)}`, ok: true, retried: true });
+      } catch (retryReason) {
+        blobResults.push({
+          store: `blob:${id.slice(0, 8)}`,
+          ok: false,
+          error: retryReason instanceof Error
+            ? retryReason.message
+            : reason instanceof Error ? reason.message : "blob write failed",
+        });
       }
-    }),
-  );
+    }
+  }
   outcomes.push(...blobResults);
   let anyBlobOk = blobResults.some((r) => r.ok);
 
