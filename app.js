@@ -29,7 +29,7 @@ function applyTheme(theme) {
     /* ignore */
   }
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = next === "dark" ? "#121211" : "#f4f4f2";
+  if (meta) meta.content = next === "dark" ? "#121211" : "#eeeeec";
   document.querySelectorAll("[data-theme-icon]").forEach((el) => {
     el.textContent = next === "dark" ? "☀" : "☾";
   });

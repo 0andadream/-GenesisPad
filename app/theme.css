@@ -1,47 +1,58 @@
+/* Match main marketing page palette (styles.css). */
 :root {
   color-scheme: light;
-  --paper: #f4f4f2;
+  --stone: #eeeeec;
+  --paper: #eeeeec;
+  --white: #fafafa;
   --light: #fafafa;
   --dark: #eaeaea;
   --ink: #171717;
   --muted: #777;
   --line: rgba(23, 23, 23, 0.2);
-  --accent: #1a1a1a;
-  --header-bg: rgba(238, 238, 236, 0.82);
-  --header-warm: rgba(216, 198, 162, 0.93);
-  --surface: rgba(250, 250, 250, 0.42);
-  --nav-active: rgba(231, 216, 186, 0.48);
-  --dot: rgba(53, 42, 27, 0.09);
-  --panel-shadow: rgba(18, 18, 18, 0.18);
+  --accent: #171717;
+  --header-bg: rgba(244, 244, 242, 0.76);
+  --header-warm: rgba(244, 244, 242, 0.76);
+  --surface: rgba(250, 250, 250, 0.55);
+  --nav-active: rgba(23, 23, 23, 0.05);
+  --dot: transparent;
+  --panel-shadow: rgba(18, 18, 18, 0.14);
+  --serif: "Iowan Old Style", "Baskerville", "Times New Roman", serif;
+  --sans: Arial, "Helvetica Neue", sans-serif;
+  --script: "Snell Roundhand", "Apple Chancery", cursive;
 }
 
 html[data-theme="dark"] {
   color-scheme: dark;
+  --stone: #121211;
   --paper: #121211;
+  --white: #1c1c1a;
   --light: #1c1c1a;
   --dark: #0e0e0d;
   --ink: #f0efe9;
   --muted: #9b9a92;
   --line: rgba(240, 239, 233, 0.16);
-  --accent: #e8e4d9;
-  --header-bg: rgba(18, 18, 16, 0.9);
-  --header-warm: rgba(28, 26, 22, 0.94);
-  --surface: rgba(32, 32, 30, 0.72);
-  --nav-active: rgba(56, 50, 42, 0.75);
-  --dot: rgba(200, 190, 170, 0.07);
+  --accent: #f0efe9;
+  --header-bg: rgba(18, 18, 16, 0.86);
+  --header-warm: rgba(18, 18, 16, 0.86);
+  --surface: rgba(255, 255, 255, 0.04);
+  --nav-active: rgba(255, 255, 255, 0.06);
+  --dot: transparent;
   --panel-shadow: rgba(0, 0, 0, 0.45);
 }
 
 body {
-  background-color: var(--paper);
-  background-image: radial-gradient(var(--dot) 0.6px, transparent 0.6px);
+  margin: 0;
+  background: var(--stone);
+  background-image: none;
   color: var(--ink);
+  font: 14px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
 }
 
 .app-header {
   height: 78px;
   border-color: var(--line);
-  background: var(--header-warm);
+  background: var(--header-bg);
   backdrop-filter: blur(16px);
 }
 
@@ -61,17 +72,20 @@ html[data-theme="dark"] .app-brand > img {
   color: var(--ink);
 }
 
-nav a.active,
-.command-bar label,
-.empty-ledger,
-.token-table {
-  background: var(--surface);
+nav a {
+  color: var(--muted);
 }
 
 nav a.active {
   color: var(--ink);
   border-color: var(--line);
   background: var(--nav-active);
+}
+
+.command-bar label,
+.empty-ledger,
+.token-table {
+  background: var(--surface);
 }
 
 .app-intro {
@@ -119,6 +133,10 @@ nav a.active {
   outline-offset: 2px;
 }
 
+html[data-theme="dark"] .theme-toggle:hover {
+  background: rgba(240, 239, 233, 0.08);
+}
+
 .create-drawer form {
   background: var(--light);
   overflow-y: auto;
@@ -131,7 +149,7 @@ nav a.active {
 
 .create-drawer input,
 .create-drawer textarea {
-  background: var(--paper);
+  background: var(--stone);
   color: var(--ink);
   border-color: var(--line);
 }
@@ -152,36 +170,59 @@ html[data-theme="dark"] .wallet-backdrop {
 }
 
 .trade-panel,
-.liquidity-panel {
+.liquidity-panel,
+.trade-panel-launch {
   background: var(--paper);
   color: var(--ink);
+  border-color: var(--ink);
+}
+
+.token-card,
+.command-bar,
+.filters button,
+.wrap-panel,
+.activity-list,
+.section-heading,
+.token-board,
+.create-drawer {
+  border-color: var(--line);
+}
+
+.token-card {
+  background: var(--light);
+}
+
+.filters button.selected,
+.ink-button {
+  border-color: var(--ink);
+}
+
+.ink-button {
+  background: var(--ink);
+  color: var(--light);
+}
+
+.plain-button,
+.create-button {
+  border-color: var(--line);
+  color: var(--ink);
+  background: transparent;
+}
+
+input,
+textarea,
+select {
+  color: var(--ink);
+  background: var(--light);
   border-color: var(--line);
 }
 
 html[data-theme="dark"] .token-card,
-html[data-theme="dark"] .command-bar,
-html[data-theme="dark"] .filters button,
-html[data-theme="dark"] .wrap-panel,
-html[data-theme="dark"] .activity-list,
-html[data-theme="dark"] .section-heading {
-  border-color: var(--line);
-}
-
-html[data-theme="dark"] .filters button.selected,
-html[data-theme="dark"] .ink-button {
-  border-color: var(--ink);
-}
-
-html[data-theme="dark"] input,
-html[data-theme="dark"] textarea,
-html[data-theme="dark"] select {
-  color: var(--ink);
+html[data-theme="dark"] .trade-launch-side,
+html[data-theme="dark"] .trade-about,
+html[data-theme="dark"] .trade-tape-section {
   background: var(--light);
   border-color: var(--line);
-}
-
-html[data-theme="dark"] .token-card {
-  background: var(--light);
 }
 
 html[data-theme="dark"] .registry-live[data-state="live"] {
