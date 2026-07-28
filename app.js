@@ -1,11 +1,14 @@
 /** Same public registries the launchpad app publishes to. */
 const MARKET_REGISTRY_URLS = [
+  "/api/markets",
+  "https://jsonblob.com/api/jsonBlob/019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
+  "https://jsonblob.com/api/jsonBlob/019fa906-1003-7f56-8791-16529d818eb5",
   "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70",
   "https://jsonblob.com/api/jsonBlob/019fa8d5-e68c-74ed-8f39-20591b09abce",
 ];
 const MARKET_REGISTRY_URL = MARKET_REGISTRY_URLS[0];
 const MARKETS_KEY = "genesis-markets";
-const REGISTRY_FETCH_TIMEOUT_MS = 2800;
+const REGISTRY_FETCH_TIMEOUT_MS = 4500;
 const NATIVE_THRU_DECIMALS = 9;
 const THEME_KEY = "genesis-theme";
 /** Home: light by default; Protocol section forces dark while in view. */
@@ -364,9 +367,10 @@ async function fetchRegistryFrom(url) {
     ? setTimeout(() => controller.abort(), REGISTRY_FETCH_TIMEOUT_MS)
     : null;
   try {
-    const response = await fetch(url, {
+    const bust = `${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
+    const response = await fetch(`${url}${bust}`, {
       headers: { Accept: "application/json" },
-      cache: "no-cache",
+      cache: "no-store",
       mode: "cors",
       signal: controller?.signal,
     });

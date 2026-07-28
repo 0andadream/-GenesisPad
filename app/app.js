@@ -151,15 +151,18 @@ let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
 const MARKETS_KEY = "genesis-markets";
 // Public shared registry (multi-URL so one bad write/fetch cannot hide markets).
-// Anyone can read/write these free JSONBlob boards from the browser (CORS open).
+// Prefer same-origin /api/markets (server merge) then JSONBlob mirrors.
 const MARKET_REGISTRY_URLS = [
+  "/api/markets",
+  "https://jsonblob.com/api/jsonBlob/019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
+  "https://jsonblob.com/api/jsonBlob/019fa906-1003-7f56-8791-16529d818eb5",
   "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70",
   "https://jsonblob.com/api/jsonBlob/019fa8d5-e68c-74ed-8f39-20591b09abce",
 ];
 // Back-compat single URL (home page stats still reference the first board).
 const MARKET_REGISTRY_URL = MARKET_REGISTRY_URLS[0];
 /** Abort slow mirrors so one hung board cannot block the UI. */
-const REGISTRY_FETCH_TIMEOUT_MS = 2800;
+const REGISTRY_FETCH_TIMEOUT_MS = 4500;
 /** First paint poll cadence; backs off when the board is quiet. */
 const REGISTRY_POLL_FAST_MS = 2500;
 const REGISTRY_POLL_SLOW_MS = 10000;
@@ -1551,7 +1554,7 @@ function saveMarkets(markets, { publish = true } = {}) {
 }
 
 /**
- * Fetch one registry URL with a hard timeout.
+ * Fetch one registry URL with a hard timeout + cache bust.
  * @returns {{ ok: boolean, markets: any[], error?: string, url: string }}
  */
 async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_MS } = {}) {
@@ -1560,11 +1563,12 @@ async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_
     ? setTimeout(() => controller.abort(), timeoutMs)
     : null;
   try {
-    const response = await fetch(url, {
+    const bust = `${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
+    const response = await fetch(`${url}${bust}`, {
       method: "GET",
       headers: { Accept: "application/json" },
-      // Prefer revalidation over forced bypass — faster repeat loads.
-      cache: "no-cache",
+      // Never serve a stale public board from browser/CDN cache.
+      cache: "no-store",
       mode: "cors",
       signal: controller?.signal,
     });
@@ -1659,6 +1663,7 @@ async function publishPublicMarketsTo(url, markets, { stripImages = false } = {}
   const payload = {
     markets: cleaned,
     updatedAt: Date.now(),
+    note: "GenesisPad public market registry",
   };
   const body = JSON.stringify(payload);
   const response = await fetch(url, {
@@ -1677,6 +1682,18 @@ async function publishPublicMarketsTo(url, markets, { stripImages = false } = {}
     }
     throw new Error(`Public board publish failed (${response.status}) on ${url}`);
   }
+  // Same-origin API returns the merged public set — prefer that as truth.
+  if (url.startsWith("/") || url.includes("/api/markets")) {
+    try {
+      const data = await response.json();
+      if (Array.isArray(data?.markets)) {
+        return { markets: data.markets, fromApi: true };
+      }
+    } catch {
+      /* some mirrors return empty body on PUT */
+    }
+  }
+  return { markets: cleaned, fromApi: false };
 }
 
 /** Write the same market list to every registry URL (best-effort all). */
@@ -1684,34 +1701,44 @@ async function publishPublicMarkets(markets, { stripImages = false } = {}) {
   const results = await Promise.allSettled(
     MARKET_REGISTRY_URLS.map((url) => publishPublicMarketsTo(url, markets, { stripImages })),
   );
-  const ok = results.some((r) => r.status === "fulfilled");
-  if (!ok) {
+  const fulfilled = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
+  if (!fulfilled.length) {
     const reason = results.find((r) => r.status === "rejected")?.reason;
     throw (reason instanceof Error
       ? reason
       : new Error("Public board publish failed on all mirrors."));
   }
+  // Prefer server-merged API payload when available.
+  const apiPayload = fulfilled.find((v) => v?.fromApi && Array.isArray(v.markets));
+  if (apiPayload) return stampMarkets(apiPayload.markets);
+  return stampMarkets(markets);
 }
 
 function mintSet(markets) {
   return new Set((markets || []).map((m) => m?.mintAddress).filter(Boolean));
 }
 
+function remoteHasMint(markets, mintAddress) {
+  if (!mintAddress) return true;
+  return (markets || []).some((m) => m?.mintAddress === mintAddress);
+}
+
 /**
- * Fetch remote → merge with local → publish → re-fetch verify.
+ * Fetch remote → merge with local → publish → re-fetch verify on REMOTE only.
  * Returns the merged public list.
  * NEVER treats a failed fetch as an empty board (that was wiping friends' views).
+ * CRITICAL: requireMint must be present on a remote re-read — local merge is not proof.
  */
-async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts = 4 } = {}) {
+async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts = 6 } = {}) {
   return withRegistryLock(async () => {
     let lastError = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        const remoteResult = await fetchPublicMarketsDetailed();
+        const remoteResult = await fetchPublicMarketsDetailed({ mode: "full" });
         if (!remoteResult.ok) {
           throw new Error(
             remoteResult.error
-              || "Could not reach the public board. Check network / ad-blockers (jsonblob.com).",
+              || "Could not reach the public board. Check network / ad-blockers.",
           );
         }
         const remote = remoteResult.markets;
@@ -1732,36 +1759,63 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
           return stampMarkets(remote);
         }
 
-        await publishPublicMarkets(merged);
-        await new Promise((r) => setTimeout(r, 120));
+        const published = await publishPublicMarkets(merged);
+        // Brief settle time so mirrors catch up before verify.
+        await new Promise((r) => setTimeout(r, 250 + attempt * 100));
 
-        const confirmedResult = await fetchPublicMarketsDetailed({ mode: "fast" });
+        // Re-read REMOTE only (full merge of all mirrors). Do NOT union with local
+        // before requireMint checks — that was a false "public" success.
+        const confirmedResult = await fetchPublicMarketsDetailed({ mode: "full" });
         if (!confirmedResult.ok) {
           throw new Error("Published, but could not re-read the public board.");
         }
-        const confirmed = confirmedResult.markets;
-        // Union confirmed + what we tried to publish (in case of lag on one mirror).
-        const confirmedMerged = stampMarkets(mergeMarketLists(confirmed, merged));
-        localStorage.setItem(MARKETS_KEY, JSON.stringify(confirmedMerged));
-        registryLiveAt = Date.now();
-        lastPublicBoard = { ok: true, count: confirmedMerged.length, error: "" };
+        let confirmedRemote = stampMarkets(confirmedResult.markets);
 
+        // If the API returned a merged body on PUT, union that in as a hint only after
+        // we still verify requireMint against a pure remote GET above.
+        if (Array.isArray(published) && published.length) {
+          confirmedRemote = stampMarkets(mergeMarketLists(confirmedRemote, published));
+        }
+
+        if (requireMint && !remoteHasMint(confirmedResult.markets, requireMint)
+          && !remoteHasMint(published, requireMint)) {
+          throw new Error(
+            "Token was not found on the public board after publish. Retrying…",
+          );
+        }
+
+        // Local view may keep creator extras, but public truth is remote∪published.
+        const publicView = stampMarkets(mergeMarketLists(confirmedRemote, merged));
+        localStorage.setItem(MARKETS_KEY, JSON.stringify(publicView));
+        registryLiveAt = Date.now();
+        lastPublicBoard = { ok: true, count: publicView.length, error: "" };
+
+        if (requireMint && !remoteHasMint(publicView, requireMint)) {
+          throw new Error(
+            "Token was not found on the public board after publish. Retry create publish.",
+          );
+        }
+        // Final strict remote-only check for create path.
         if (requireMint) {
-          const found = confirmedMerged.some((m) => m.mintAddress === requireMint);
-          if (!found) {
+          const strict = await fetchPublicMarketsDetailed({ mode: "full" });
+          if (!strict.ok || !remoteHasMint(strict.markets, requireMint)) {
+            // One more force publish of just ensuring merge includes the mint.
             throw new Error(
-              "Token was not found on the public board after publish. Retry create publish.",
+              "Public board still missing the new mint after verify. Retrying…",
             );
           }
+          const strictMerged = stampMarkets(mergeMarketLists(strict.markets, merged));
+          localStorage.setItem(MARKETS_KEY, JSON.stringify(strictMerged));
+          lastPublicBoard = { ok: true, count: strictMerged.length, error: "" };
+          return strictMerged;
         }
-        return confirmedMerged;
+
+        return publicView;
       } catch (reason) {
         lastError = reason;
-        await new Promise((r) => setTimeout(r, 400 * attempt));
+        await new Promise((r) => setTimeout(r, 500 * attempt));
       }
     }
-    // Don't flip the UI to "offline" on a single publish retry failure —
-    // visitors still load the shared board on their next sync.
     throw (lastError instanceof Error
       ? lastError
       : new Error("Could not publish markets to the public board."));
@@ -1781,11 +1835,18 @@ function marketsSignature(markets) {
  *  - mode "full": merge every mirror (authoritative poll)
  *  - publish: when true (default on full), soft-push local extras in background
  */
+/** If a sync is skipped because one is in-flight, run again after it finishes. */
+let registrySyncQueued = false;
+
 async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = {}) {
-  if (registrySyncing) return readMarkets();
+  if (registrySyncing) {
+    registrySyncQueued = true;
+    return readMarkets();
+  }
   registrySyncing = true;
   try {
     const local = readMarkets();
+    // Friends need the full multi-mirror merge; "fast" is only for first paint.
     const remoteResult = await fetchPublicMarketsDetailed({ mode });
 
     // If the public board is unreachable, keep local and DO NOT publish
@@ -1813,9 +1874,18 @@ async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = 
     lastPublicBoard = { ok: true, count: remote.length, error: "" };
 
     // Push only when local has something remote is missing — never block UI on publish.
-    const remoteSig = marketsSignature(mergeMarketLists(remote));
-    const localHasExtra = merged.length > remote.length || after !== remoteSig;
+    const remoteMints = mintSet(remote);
+    const localMints = mintSet(local);
+    let localHasExtra = false;
+    for (const mint of localMints) {
+      if (!remoteMints.has(mint)) {
+        localHasExtra = true;
+        break;
+      }
+    }
     if (publish && localHasExtra && merged.length) {
+      // Await create-critical publishes are handled by pushMarketsToPublic callers;
+      // background sync stays soft so the board never freezes.
       pushMarketsToPublic(merged).catch(() => { /* soft-fail background sync */ });
     }
 
@@ -1831,6 +1901,11 @@ async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = 
     return readMarkets();
   } finally {
     registrySyncing = false;
+    if (registrySyncQueued) {
+      registrySyncQueued = false;
+      // Catch up any poll that arrived mid-sync (friends see new launches faster).
+      syncPublicMarkets({ mode: "full", publish: true }).catch(() => {});
+    }
   }
 }
 
@@ -2288,9 +2363,42 @@ async function seedPool({ mint, tokenAccount, decimals, thruAmount, tokenAmount,
   };
 }
 
+/** When set, the create button retries board publish only (does not re-mint). */
+let pendingPublishRetryMint = null;
+
+async function retryPublicPublishOnly(mintAddress, ticker = "Token") {
+  createButton.disabled = true;
+  createStatus.textContent = "Retrying public board publish…";
+  try {
+    await pushMarketsToPublic(readMarkets(), { requireMint: mintAddress, attempts: 6 });
+    await syncPublicMarkets({ mode: "full", publish: false });
+    renderMarkets();
+    pendingPublishRetryMint = null;
+    createStatus.textContent =
+      `${ticker} is now public on the shared board. Mint: ${mintAddress}`;
+    createButton.textContent = "Token created on Thru";
+  } catch (retryError) {
+    createStatus.textContent =
+      `Still not public: ${retryError instanceof Error ? retryError.message : "unknown error"}. Tap retry again.`;
+    createButton.textContent = "Retry public publish";
+  } finally {
+    createButton.disabled = false;
+  }
+}
+
 async function createToken() {
   if (!connectedAccount) {
     openWallet();
+    return;
+  }
+
+  // Creator already minted; only the public board failed.
+  if (pendingPublishRetryMint) {
+    const existing = readMarkets().find((m) => m.mintAddress === pendingPublishRetryMint);
+    await retryPublicPublishOnly(
+      pendingPublishRetryMint,
+      existing?.ticker || "Token",
+    );
     return;
   }
 
@@ -2426,7 +2534,9 @@ async function createToken() {
     renderMarkets();
     createStatus.textContent = "Publishing to the public board so everyone can see it…";
     try {
-      await pushMarketsToPublic(markets, { requireMint: mint.address, attempts: 4 });
+      await pushMarketsToPublic(markets, { requireMint: mint.address, attempts: 6 });
+      // Force a full remote pull so creator UI matches what friends will load.
+      await syncPublicMarkets({ mode: "full", publish: false });
       renderMarkets();
       createStatus.textContent =
         `${ticker} is live on the public board. Anyone on Genesis can buy/sell. ` +
@@ -2434,20 +2544,24 @@ async function createToken() {
       createButton.textContent = "Token created on Thru";
     } catch (publishError) {
       // Keep the on-chain token; surface that the public board failed so the creator can retry.
+      pendingPublishRetryMint = mint.address;
       createStatus.textContent =
         `${ticker} is on-chain, but the public board publish failed: ` +
         `${publishError instanceof Error ? publishError.message : "unknown error"}. ` +
-        "Hard-refresh, then open Explore again — or create once more after the board is reachable. " +
+        "Tap “Retry public publish” — do not assume friends can see it yet. " +
         `Mint: ${mint.address}`;
       createButton.textContent = "Retry public publish";
-      // One more background attempt.
-      pushMarketsToPublic(readMarkets(), { requireMint: mint.address, attempts: 3 })
-        .then(() => {
+      // Background attempts while creator reads the message.
+      pushMarketsToPublic(readMarkets(), { requireMint: mint.address, attempts: 4 })
+        .then(async () => {
+          await syncPublicMarkets({ mode: "full", publish: false });
           renderMarkets();
+          pendingPublishRetryMint = null;
           if (createStatus) {
             createStatus.textContent =
               `${ticker} is now public on the shared board. Mint: ${mint.address}`;
           }
+          createButton.textContent = "Token created on Thru";
         })
         .catch(() => {});
     }
@@ -3742,7 +3856,7 @@ async function bootMarkets() {
     /* local cache still works offline */
   }
 
-  // 3) Full merge of every mirror (authoritative) without blocking card clicks.
+  // 3) Full merge of every mirror (authoritative) — friends need this to see new launches.
   try {
     const before = marketsSignature(readMarkets());
     await syncPublicMarkets({ mode: "full", publish: true });
@@ -3751,6 +3865,15 @@ async function bootMarkets() {
   } catch {
     /* ignore */
   }
+
+  // 4) One more delayed full pull (covers mirrors that lag right after someone launches).
+  window.setTimeout(async () => {
+    try {
+      const before = marketsSignature(readMarkets());
+      await syncPublicMarkets({ mode: "full", publish: true });
+      if (marketsSignature(readMarkets()) !== before) renderMarkets();
+    } catch { /* ignore */ }
+  }, 2000);
 
   // Adaptive poll: stay hot while the board is changing, back off when quiet.
   let pollMs = REGISTRY_POLL_FAST_MS;
