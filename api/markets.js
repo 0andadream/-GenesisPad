@@ -228,9 +228,14 @@ async function createBlob(payload, attempt = 1) {
 }
 
 /**
- * Read durable stores. Only honor an empty durable board when an explicit
- * wipe flag is present — never treat "only probes after filter" as a wipe,
- * which previously cleared warm memory and made friends see zero markets.
+ * Read durable stores.
+ *
+ * Clean-slate wipe is sticky: if any blob mirror has wipe+empty and that
+ * wipe is the newest durable event, ignore warm memory AND stale gist/blob
+ * copies that still hold deleted markets.
+ *
+ * Friend visibility still works via non-empty durable mirrors + warm memory
+ * when there is no newer wipe.
  */
 async function readBoard() {
   const [gist, ...blobs] = await Promise.all([
@@ -244,55 +249,95 @@ async function readBoard() {
   ].filter(Boolean);
 
   const durableOk = durableSources.length > 0;
-  const durableMarkets = mergeMarkets(
-    ...durableSources.map((s) => s.markets),
-  );
+  const blobSources = blobs.filter((b) => b.ok);
+
+  // Newest explicit wipe among durable sources (prefer blob mirrors — they
+  // are what the server actually writes without a GitHub token).
+  let newestWipeAt = 0;
+  for (const s of durableSources) {
+    const empty = !s.markets || mergeMarkets(s.markets).length === 0;
+    if (s.wipe && empty) {
+      newestWipeAt = Math.max(
+        newestWipeAt,
+        Number(s.wipedAt || s.updatedAt || 0),
+      );
+    }
+  }
+  // If only blobs were wiped (gist still has ghosts + no token to clear),
+  // blob wipe alone is enough to declare clean slate.
+  if (!newestWipeAt) {
+    for (const s of blobSources) {
+      const empty = !s.markets || mergeMarkets(s.markets).length === 0;
+      if (s.wipe && empty) {
+        newestWipeAt = Math.max(
+          newestWipeAt,
+          Number(s.wipedAt || s.updatedAt || 0),
+        );
+      }
+    }
+  }
+
+  // Markets from durable sources that are strictly newer than the wipe.
+  // Stale gist / lagging blobs older than the wipe are discarded.
+  const postWipeLists = durableSources
+    .filter((s) => {
+      if (!newestWipeAt) return true;
+      const ts = Number(s.updatedAt || s.wipedAt || 0);
+      // Keep source only if it was written after the wipe (new launches).
+      return ts > newestWipeAt && !(s.wipe && mergeMarkets(s.markets).length === 0);
+    })
+    .map((s) => s.markets);
+
+  const durableMarkets = mergeMarkets(...postWipeLists);
   const durableUpdatedAt = Math.max(
     0,
     ...durableSources.map((s) => Number(s.updatedAt || 0)),
   );
-  const durableWipedAt = Math.max(
-    0,
-    ...durableSources.map((s) => Number(s.wipedAt || 0)),
-  );
-  // Explicit wipe only: empty markets + wipe flag on at least one durable store.
-  const durableExplicitWipe = durableSources.some(
-    (s) => s.wipe && (!s.markets || mergeMarkets(s.markets).length === 0),
-  );
 
-  // Honor a clean-slate wipe when durable stores agree the board is empty.
-  if (
-    durableOk
-    && durableMarkets.length === 0
-    && durableExplicitWipe
-    && durableWipedAt >= memoryBoard.updatedAt
-  ) {
-    memoryBoard = { markets: [], updatedAt: Date.now(), wipedAt: durableWipedAt };
+  // Sticky wipe: wipe is the newest durable event and no post-wipe markets.
+  if (newestWipeAt > 0 && durableMarkets.length === 0) {
+    // Always clear warm memory — stale serverless instances must not resurrect
+    // deleted tokens after a clean slate.
+    memoryBoard = {
+      markets: [],
+      updatedAt: Math.max(newestWipeAt, Date.now()),
+      wipedAt: newestWipeAt,
+    };
     return {
       markets: [],
-      updatedAt: Date.now(),
+      updatedAt: memoryBoard.updatedAt,
       gistOk: gist.ok,
-      blobOk: blobs.filter((b) => b.ok).length,
+      blobOk: blobSources.length,
       durable: true,
       wiped: true,
     };
   }
 
-  // Always merge warm memory with durable. Cold instances with empty memory
-  // still serve durable markets; warm instances keep recent publishes while
-  // mirrors catch up.
-  const markets = mergeMarkets(memoryBoard.markets, durableMarkets);
+  // No active wipe (or new markets after wipe): merge warm memory + durable.
+  // Drop memory entries that predate an older wipe we already honored.
+  let memoryMarkets = memoryBoard.markets;
+  if (memoryBoard.wipedAt && memoryBoard.wipedAt >= memoryBoard.updatedAt) {
+    memoryMarkets = [];
+  }
+  if (newestWipeAt > 0) {
+    // Only keep in-memory markets that are newer than the wipe (just published).
+    memoryMarkets = memoryMarkets.filter(
+      (m) => Number(m?.updatedAt || m?.createdAt || 0) > newestWipeAt,
+    );
+  }
+
+  const markets = mergeMarkets(memoryMarkets, durableMarkets);
   memoryBoard = {
     markets,
     updatedAt: Math.max(memoryBoard.updatedAt, durableUpdatedAt, Date.now()),
-    wipedAt: memoryBoard.wipedAt || 0,
+    wipedAt: newestWipeAt || memoryBoard.wipedAt || 0,
   };
 
   return {
     markets,
     updatedAt: memoryBoard.updatedAt,
     gistOk: gist.ok,
-    blobOk: blobs.filter((b) => b.ok).length,
+    blobOk: blobSources.length,
     durable: durableOk,
     wiped: false,
   };
