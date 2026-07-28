@@ -813,10 +813,23 @@ function parseUnits(value, decimals) {
 }
 
 function formatUnits(raw, decimals, precision = 6) {
-  const scale = 10n ** BigInt(decimals);
-  const whole = raw / scale;
-  const fraction = (raw % scale).toString().padStart(decimals, "0").slice(0, precision).replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction}` : whole.toString();
+  const d = Number(decimals);
+  const places = Number.isFinite(d) && d >= 0 && d <= 18 ? Math.floor(d) : 6;
+  const value = typeof raw === "bigint"
+    ? raw
+    : BigInt(String(raw ?? 0).split(".")[0] || "0");
+  if (value < 0n) return "0";
+  const scale = 10n ** BigInt(places);
+  const whole = value / scale;
+  const fracPlaces = Number.isFinite(Number(precision))
+    ? Math.min(places, Math.max(0, Math.floor(Number(precision))))
+    : Math.min(places, 6);
+  const fraction = (value % scale)
+    .toString()
+    .padStart(places, "0")
+    .slice(0, fracPlaces)
+    .replace(/0+$/, "");
+  return fraction ? `${whole.toString()}.${fraction}` : whole.toString();
 }
 
 async function ensureTokenAccount(ownerAddress, mintAddress, seed = new Uint8Array(32)) {
@@ -3456,23 +3469,130 @@ function renderTradeTape(market) {
   }).join("");
 }
 
-function setTradeAmountFromPercent(percent) {
+function asBigIntAmount(value) {
+  if (typeof value === "bigint") return value >= 0n ? value : 0n;
+  try {
+    const n = BigInt(String(value ?? "0").split(".")[0] || "0");
+    return n >= 0n ? n : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+function tradeTokenDecimals(market = activeTrade) {
+  const d = Number(market?.decimals);
+  return Number.isFinite(d) && d >= 0 && d <= 18 ? Math.floor(d) : 6;
+}
+
+/** Update the receive quote from the current amount field. */
+function updateTradeQuote() {
+  const input = document.querySelector("[data-trade-amount]");
+  const quote = document.querySelector("[data-trade-quote]");
+  if (!quote) return;
+  if (!input || !activeTrade) {
+    quote.textContent = "—";
+    return;
+  }
+  const text = String(input.value || "").trim();
+  if (!text || text === "." || text === "0" || /^0\.0*$/.test(text)) {
+    quote.textContent = text && text !== "."
+      ? "Enter an amount greater than zero."
+      : "—";
+    return;
+  }
+  try {
+    const raw = parseUnits(
+      text,
+      activeSide === "buy" ? NATIVE_THRU_DECIMALS : tradeTokenDecimals(),
+    );
+    if (raw <= 0n) {
+      quote.textContent = "Enter an amount greater than zero.";
+      return;
+    }
+    if (isBondingMarket(activeTrade)) {
+      if (activeSide === "buy") {
+        const q = quoteCurveBuy(activeTrade, raw);
+        quote.textContent =
+          `≈ ${formatUnits(q.tokensOut, tradeTokenDecimals())} ${activeTrade.ticker} ` +
+          `(incl. ${Number(CURVE_TRADE_FEE_BPS) / 100}% fee)`;
+      } else {
+        const q = quoteCurveSell(activeTrade, raw);
+        quote.textContent =
+          `≈ ${formatUnits(q.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+          `(incl. ${Number(CURVE_TRADE_FEE_BPS) / 100}% fee)`;
+      }
+      return;
+    }
+    if (!activeTrade.liquidity) {
+      quote.textContent = "No live pool quote for this market.";
+      return;
+    }
+    const afterFees = raw * 9970n / 10000n;
+    quote.textContent = activeSide === "buy"
+      ? `≈ ${formatUnits(afterFees * PRICE_TOKENS_PER_THRU * (10n ** BigInt(tradeTokenDecimals())) / (10n ** BigInt(NATIVE_THRU_DECIMALS)), tradeTokenDecimals())} ${activeTrade.ticker}`
+      : `≈ ${formatUnits(afterFees * (10n ** BigInt(NATIVE_THRU_DECIMALS)) / (PRICE_TOKENS_PER_THRU * (10n ** BigInt(tradeTokenDecimals()))), NATIVE_THRU_DECIMALS, 9)} THRU`;
+  } catch (reason) {
+    quote.textContent = reason instanceof Error ? reason.message : "—";
+  }
+}
+
+/**
+ * Fill the trade amount from wallet balance × percent.
+ * Refreshes balances first so 25–100% never run against a stale 0 balance
+ * (which left the quote stuck on "—").
+ */
+async function setTradeAmountFromPercent(percent) {
   if (!activeTrade) return;
   const input = document.querySelector("[data-trade-amount]");
+  const quote = document.querySelector("[data-trade-quote]");
   if (!input) return;
-  const pct = Math.max(0, Math.min(100, Number(percent) || 0));
-  if (activeSide === "buy") {
-    const spendable = tradeBalances.thru > NATIVE_TRANSFER_FEE
-      ? tradeBalances.thru - NATIVE_TRANSFER_FEE
-      : 0n;
-    const amount = (spendable * BigInt(pct)) / 100n;
-    input.value = formatUnits(amount, NATIVE_THRU_DECIMALS, 9);
-  } else {
-    const sellable = tradeBalances.sellable != null ? tradeBalances.sellable : tradeBalances.token;
-    const amount = (sellable * BigInt(pct)) / 100n;
-    input.value = formatUnits(amount, activeTrade.decimals);
+
+  if (!connectedAccount) {
+    input.value = "";
+    if (quote) quote.textContent = "Connect wallet to use % shortcuts.";
+    openWallet();
+    return;
   }
-  input.dispatchEvent(new Event("input", { bubbles: true }));
+
+  // Always re-read balances before applying % — openTrade may still be loading.
+  try {
+    await refreshTradeBalances();
+  } catch {
+    /* keep last known balances */
+  }
+
+  const pct = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  let amount = 0n;
+  let decimals = NATIVE_THRU_DECIMALS;
+
+  if (activeSide === "buy") {
+    const thru = asBigIntAmount(tradeBalances.thru);
+    // Leave native fee headroom so Max/100% can still submit.
+    const feeReserve = NATIVE_TRANSFER_FEE > 0n ? NATIVE_TRANSFER_FEE : 1n;
+    const spendable = thru > feeReserve ? thru - feeReserve : 0n;
+    amount = (spendable * BigInt(pct)) / 100n;
+    decimals = NATIVE_THRU_DECIMALS;
+  } else {
+    const sellable = asBigIntAmount(
+      tradeBalances.sellable != null ? tradeBalances.sellable : tradeBalances.token,
+    );
+    amount = (sellable * BigInt(pct)) / 100n;
+    decimals = tradeTokenDecimals();
+  }
+
+  if (amount <= 0n) {
+    input.value = "";
+    if (quote) {
+      quote.textContent = activeSide === "buy"
+        ? "No spendable THRU for this %."
+        : `No sellable ${activeTrade.ticker || "tokens"} for this %.`;
+    }
+    return;
+  }
+
+  // type=text field — avoid type=number clearing long/precise values to empty ("—").
+  input.value = formatUnits(amount, decimals, decimals);
+  updateTradeQuote();
 }
 
 async function refreshTradeBalances() {
@@ -4001,49 +4121,15 @@ document.querySelectorAll("[data-side]").forEach((button) => button.addEventList
   if (activeTrade) openTrade(readMarkets().findIndex((market) => market.mintAddress === activeTrade.mintAddress), button.dataset.side);
 }));
 document.querySelector("[data-trade-max]")?.addEventListener("click", () => {
-  setTradeAmountFromPercent(100);
+  setTradeAmountFromPercent(100).catch(() => {});
 });
 document.querySelectorAll("[data-trade-pct]").forEach((button) => {
   button.addEventListener("click", () => {
-    setTradeAmountFromPercent(button.dataset.tradePct);
+    setTradeAmountFromPercent(button.dataset.tradePct).catch(() => {});
   });
 });
-document.querySelector("[data-trade-amount]")?.addEventListener("input", (event) => {
-  const quote = document.querySelector("[data-trade-quote]");
-  if (!event.target.value || !activeTrade) {
-    quote.textContent = "—";
-    return;
-  }
-  try {
-    const raw = parseUnits(
-      event.target.value,
-      activeSide === "buy" ? NATIVE_THRU_DECIMALS : activeTrade.decimals,
-    );
-    if (isBondingMarket(activeTrade)) {
-      if (activeSide === "buy") {
-        const q = quoteCurveBuy(activeTrade, raw);
-        quote.textContent =
-          `≈ ${formatUnits(q.tokensOut, activeTrade.decimals)} ${activeTrade.ticker} ` +
-          `(incl. ${Number(CURVE_TRADE_FEE_BPS) / 100}% fee)`;
-      } else {
-        const q = quoteCurveSell(activeTrade, raw);
-        quote.textContent =
-          `≈ ${formatUnits(q.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
-          `(incl. ${Number(CURVE_TRADE_FEE_BPS) / 100}% fee)`;
-      }
-      return;
-    }
-    if (!activeTrade.liquidity) {
-      quote.textContent = "—";
-      return;
-    }
-    const afterFees = raw * 9970n / 10000n;
-    quote.textContent = activeSide === "buy"
-      ? `≈ ${formatUnits(afterFees * PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals)) / (10n ** BigInt(NATIVE_THRU_DECIMALS)), activeTrade.decimals)} ${activeTrade.ticker}`
-      : `≈ ${formatUnits(afterFees * (10n ** BigInt(NATIVE_THRU_DECIMALS)) / (PRICE_TOKENS_PER_THRU * (10n ** BigInt(activeTrade.decimals))), NATIVE_THRU_DECIMALS, 9)} THRU`;
-  } catch (reason) {
-    quote.textContent = reason instanceof Error ? reason.message : "—";
-  }
+document.querySelector("[data-trade-amount]")?.addEventListener("input", () => {
+  updateTradeQuote();
 });
 document.querySelector("[data-trade-submit]")?.addEventListener("click", executeTrade);
 
