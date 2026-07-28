@@ -1448,24 +1448,58 @@ function mergeMarketLists(...lists) {
     .slice(0, 100);
 }
 
+/** Serialize registry writes so concurrent tabs/visitors don't clobber each other. */
+let registryPublishChain = Promise.resolve();
+
+function withRegistryLock(fn) {
+  const run = registryPublishChain.then(fn, fn);
+  // Keep the chain alive even if fn rejects.
+  registryPublishChain = run.then(() => {}, () => {});
+  return run;
+}
+
+function sanitizeMarketForRegistry(market) {
+  if (!market?.mintAddress) return null;
+  // Keep curve private key — required for public bonding-curve fills on alphanet.
+  const copy = { ...market };
+  // Cap chart history for payload size.
+  if (Array.isArray(copy.chart) && copy.chart.length > CHART_HISTORY) {
+    copy.chart = copy.chart.slice(-CHART_HISTORY);
+  }
+  // Cap image size (base64) so the shared board stays under free-tier limits.
+  if (typeof copy.image === "string" && copy.image.length > TOKEN_IMAGE_MAX_CHARS) {
+    copy.image = "";
+  }
+  return copy;
+}
+
+function stampMarkets(markets) {
+  return (markets || [])
+    .map((market) => sanitizeMarketForRegistry({
+      ...market,
+      updatedAt: market.updatedAt || market.createdAt || Date.now(),
+    }))
+    .filter(Boolean)
+    .slice(0, 100);
+}
+
 function saveMarkets(markets, { publish = true } = {}) {
-  const stamped = markets.slice(0, 100).map((market) => ({
-    ...market,
-    updatedAt: market.updatedAt || market.createdAt || Date.now(),
-  }));
+  const stamped = stampMarkets(markets);
   localStorage.setItem(MARKETS_KEY, JSON.stringify(stamped));
-  // Fire-and-forget public publish so other visitors can trade.
   if (publish) {
-    publishPublicMarkets(stamped).catch(() => { /* offline / registry optional */ });
+    // Always merge with remote before PUT so we never wipe others' launches.
+    pushMarketsToPublic(stamped).catch(() => { /* non-create paths stay soft-fail */ });
   }
   return stamped;
 }
 
 async function fetchPublicMarkets() {
   try {
-    const response = await fetch(MARKET_REGISTRY_URL, {
+    const response = await fetch(`${MARKET_REGISTRY_URL}?t=${Date.now()}`, {
+      method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",
+      mode: "cors",
     });
     if (!response.ok) return [];
     const data = await response.json();
@@ -1475,20 +1509,77 @@ async function fetchPublicMarkets() {
   }
 }
 
-async function publishPublicMarkets(markets) {
+async function publishPublicMarkets(markets, { stripImages = false } = {}) {
+  const cleaned = stampMarkets(markets).map((market) => {
+    if (!stripImages) return market;
+    const { image, ...rest } = market;
+    return rest;
+  });
   const payload = {
-    markets: markets.slice(0, 100),
+    markets: cleaned,
     updatedAt: Date.now(),
   };
+  const body = JSON.stringify(payload);
   const response = await fetch(MARKET_REGISTRY_URL, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify(payload),
+    body,
+    mode: "cors",
+    cache: "no-store",
   });
-  if (!response.ok) throw new Error(`publish ${response.status}`);
+  if (!response.ok) {
+    // Retry once without images if payload was too large.
+    if (!stripImages && body.length > 200_000) {
+      return publishPublicMarkets(markets, { stripImages: true });
+    }
+    throw new Error(`Public board publish failed (${response.status}).`);
+  }
+}
+
+/**
+ * Fetch remote → merge with local → publish → re-fetch verify.
+ * Returns the merged public list.
+ */
+async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts = 3 } = {}) {
+  return withRegistryLock(async () => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        const remote = await fetchPublicMarkets();
+        const merged = stampMarkets(mergeMarketLists(remote, localMarkets));
+        // Never publish an empty board over a non-empty remote (prevents wipe races).
+        if (!merged.length && remote.length) {
+          localStorage.setItem(MARKETS_KEY, JSON.stringify(stampMarkets(remote)));
+          return stampMarkets(remote);
+        }
+        await publishPublicMarkets(merged);
+        // Confirm the board actually has our markets (and optional mint).
+        await new Promise((r) => setTimeout(r, 250));
+        const confirmed = await fetchPublicMarkets();
+        const confirmedMerged = stampMarkets(mergeMarketLists(confirmed, merged));
+        localStorage.setItem(MARKETS_KEY, JSON.stringify(confirmedMerged));
+        registryLiveAt = Date.now();
+        if (requireMint) {
+          const found = confirmed.some((m) => m.mintAddress === requireMint)
+            || confirmedMerged.some((m) => m.mintAddress === requireMint);
+          if (!found) {
+            throw new Error("Publish succeeded but mint not visible on public board yet.");
+          }
+        }
+        return confirmedMerged;
+      } catch (reason) {
+        lastError = reason;
+        // Backoff briefly and retry (handles concurrent writers).
+        await new Promise((r) => setTimeout(r, 300 * attempt));
+      }
+    }
+    throw (lastError instanceof Error
+      ? lastError
+      : new Error("Could not publish markets to the public board."));
+  });
 }
 
 function marketsSignature(markets) {
@@ -1504,7 +1595,7 @@ async function syncPublicMarkets() {
     const local = readMarkets();
     const remote = await fetchPublicMarkets();
     // Always merge local + remote so every visitor sees all deployed tokens.
-    const merged = mergeMarketLists(remote, local);
+    const merged = stampMarkets(mergeMarketLists(remote, local));
     const before = marketsSignature(local);
     const after = marketsSignature(merged);
     localStorage.setItem(MARKETS_KEY, JSON.stringify(merged));
@@ -1512,9 +1603,13 @@ async function syncPublicMarkets() {
     // Push merge upstream when we have markets remote lacks (or richer history).
     const remoteSig = marketsSignature(mergeMarketLists(remote));
     if (merged.length && after !== remoteSig) {
-      try { await publishPublicMarkets(merged); } catch { /* ignore */ }
+      try {
+        await pushMarketsToPublic(merged);
+      } catch { /* soft-fail background sync */ }
     } else if (merged.length && !remote.length) {
-      try { await publishPublicMarkets(merged); } catch { /* ignore */ }
+      try {
+        await pushMarketsToPublic(merged);
+      } catch { /* soft-fail */ }
     }
     // Keep open trade modal + chart live when remote activity lands.
     if (before !== after && activeTrade?.mintAddress) {
@@ -1524,7 +1619,7 @@ async function syncPublicMarkets() {
         renderTokenChart(activeTrade);
       }
     }
-    return merged;
+    return readMarkets();
   } finally {
     registrySyncing = false;
   }
@@ -2118,13 +2213,37 @@ async function createToken() {
     };
     const markets = readMarkets();
     markets.unshift(market);
-    saveMarkets(markets);
+    // Save locally first so the creator always sees the market.
+    saveMarkets(markets, { publish: false });
     renderMarkets();
+    createStatus.textContent = "Publishing to the public board so everyone can see it…";
+    try {
+      await pushMarketsToPublic(markets, { requireMint: mint.address, attempts: 4 });
+      renderMarkets();
+      createStatus.textContent =
+        `${ticker} is live on the public board. Anyone on Genesis can buy/sell. ` +
+        `Graduation at ${formatUnits(GRADUATION_REAL_THRU, NATIVE_THRU_DECIMALS, 9)} THRU raised. Mint: ${mint.address}`;
+      createButton.textContent = "Token created on Thru";
+    } catch (publishError) {
+      // Keep the on-chain token; surface that the public board failed so the creator can retry.
+      createStatus.textContent =
+        `${ticker} is on-chain, but the public board publish failed: ` +
+        `${publishError instanceof Error ? publishError.message : "unknown error"}. ` +
+        "Hard-refresh, then open Explore again — or create once more after the board is reachable. " +
+        `Mint: ${mint.address}`;
+      createButton.textContent = "Retry public publish";
+      // One more background attempt.
+      pushMarketsToPublic(readMarkets(), { requireMint: mint.address, attempts: 3 })
+        .then(() => {
+          renderMarkets();
+          if (createStatus) {
+            createStatus.textContent =
+              `${ticker} is now public on the shared board. Mint: ${mint.address}`;
+          }
+        })
+        .catch(() => {});
+    }
     clearTokenImagePicker();
-    createStatus.textContent =
-      `${ticker} is live on the public bonding curve. Anyone on Genesis can buy/sell. ` +
-      `Graduation at ${formatUnits(GRADUATION_REAL_THRU, NATIVE_THRU_DECIMALS, 9)} THRU raised. Mint: ${mint.address}`;
-    createButton.textContent = "Token created on Thru";
   } catch (reason) {
     createStatus.textContent = reason instanceof Error ? reason.message : "Token creation failed.";
   } finally {
