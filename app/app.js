@@ -3203,8 +3203,14 @@ async function openTrade(index, side) {
     tradeFallback.hidden = hasImage;
   }
 
-  document.querySelector("[data-trade-submit]").textContent =
-    side === "buy" ? "Buy with THRU" : `Sell ${ticker}`;
+  const submit = document.querySelector("[data-trade-submit]");
+  if (submit) {
+    submit.textContent = side === "buy" ? "Buy with THRU" : `Sell ${ticker}`;
+    submit.classList.toggle("is-buy", side === "buy");
+    submit.classList.toggle("is-sell", side === "sell");
+  }
+  const sidePanel = document.querySelector(".trade-launch-side");
+  if (sidePanel) sidePanel.dataset.side = side;
   document.querySelector("[data-trade-input-label]").textContent = "You receive";
   const amountLabel = document.querySelector("[data-trade-amount-label]");
   if (amountLabel) amountLabel.textContent = side === "buy" ? "You pay" : "You sell";
@@ -3233,8 +3239,10 @@ async function openTrade(index, side) {
       "This mint is live, but has no bonding curve yet.";
   }
 
-  document.querySelectorAll("[data-side]").forEach((button) => {
-    button.classList.toggle("selected", button.dataset.side === side);
+  document.querySelectorAll(".trade-switch [data-side]").forEach((button) => {
+    const on = button.dataset.side === side;
+    button.classList.toggle("selected", on);
+    button.setAttribute("aria-selected", on ? "true" : "false");
   });
   document.querySelector("[data-trade-amount]").value = "";
   document.querySelector("[data-trade-quote]").textContent = "—";

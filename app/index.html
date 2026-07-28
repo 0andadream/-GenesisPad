@@ -259,10 +259,10 @@
             </section>
           </div>
 
-          <aside class="trade-launch-side" aria-label="Buy and sell">
-            <div class="trade-switch">
-              <button class="selected" type="button" data-side="buy">Buy</button>
-              <button type="button" data-side="sell">Sell</button>
+          <aside class="trade-launch-side" data-side="buy" aria-label="Buy and sell">
+            <div class="trade-switch" role="tablist" aria-label="Trade side">
+              <button class="selected" type="button" role="tab" aria-selected="true" data-side="buy">Buy</button>
+              <button type="button" role="tab" aria-selected="false" data-side="sell">Sell</button>
             </div>
             <label class="trade-amount-field">
               <span data-trade-amount-label>You pay</span>
@@ -286,7 +286,7 @@
               <span data-trade-input-label>You receive</span>
               <strong data-trade-quote>—</strong>
             </div>
-            <button class="ink-button wallet-primary trade-submit" type="button" data-trade-submit>Buy with THRU</button>
+            <button class="trade-submit is-buy" type="button" data-trade-submit>Buy with THRU</button>
           </aside>
         </div>
       </section>

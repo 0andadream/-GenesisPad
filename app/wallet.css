@@ -678,30 +678,36 @@ span.wallet-token-avatar {
 .token-card-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0;
+  gap: 8px;
+  padding: 10px;
   border-top: 1px solid var(--line);
+  background: var(--paper);
 }
 
 .token-card-actions button {
-  min-height: 36px;
-  border: 0;
-  border-right: 1px solid var(--line);
+  min-height: 38px;
+  border: 1px solid transparent;
+  border-radius: 2px;
   background: transparent;
   color: var(--ink);
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: .08em;
+  letter-spacing: .1em;
   text-transform: uppercase;
   cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
 }
 
-.token-card-actions button:last-child {
-  border-right: 0;
+.token-card-actions button[data-trade-side="buy"] {
+  border-color: rgba(22, 122, 58, 0.35);
+  background: rgba(22, 122, 58, 0.08);
+  color: #146334;
 }
 
-.token-card-actions button:hover {
-  background: var(--ink);
-  color: var(--light);
+.token-card-actions button[data-trade-side="sell"] {
+  border-color: rgba(163, 58, 58, 0.35);
+  background: rgba(163, 58, 58, 0.08);
+  color: #8f2f2f;
 }
 
 .token-card-actions button[data-trade-side="buy"]:hover {
@@ -714,6 +720,18 @@ span.wallet-token-avatar {
   background: #a33a3a;
   border-color: #a33a3a;
   color: #fff;
+}
+
+html[data-theme="dark"] .token-card-actions button[data-trade-side="buy"] {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.1);
+  color: #4ade80;
+}
+
+html[data-theme="dark"] .token-card-actions button[data-trade-side="sell"] {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
 }
 
 .token-card.is-graduated {
@@ -1121,20 +1139,6 @@ span.wallet-token-avatar {
   gap: 6px;
 }
 
-.trade-actions button,
-.trade-switch button {
-  min-width: 62px;
-  padding: 8px 12px;
-  border: 1px solid var(--ink);
-  background: transparent;
-  color: var(--ink);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-
 
 
 .trade-modal[hidden] {
@@ -1367,8 +1371,47 @@ span.wallet-token-avatar {
 
 .trade-submit {
   width: 100%;
-  min-height: 50px;
-  margin-top: 4px;
+  min-height: 52px;
+  margin-top: 6px;
+  border: 0;
+  border-radius: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background .15s ease, transform .12s ease, box-shadow .15s ease;
+}
+
+.trade-submit.is-buy,
+.trade-launch-side[data-side="buy"] .trade-submit {
+  background: #167a3a;
+  color: #fff;
+  box-shadow: 0 8px 18px rgba(22, 122, 58, 0.22);
+}
+
+.trade-submit.is-sell,
+.trade-launch-side[data-side="sell"] .trade-submit {
+  background: #a33a3a;
+  color: #fff;
+  box-shadow: 0 8px 18px rgba(163, 58, 58, 0.22);
+}
+
+.trade-submit:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.05);
+}
+
+.trade-submit:active {
+  transform: translateY(0);
+  filter: brightness(0.98);
+}
+
+.trade-submit:disabled {
+  opacity: 0.55;
+  cursor: wait;
+  transform: none;
+  box-shadow: none;
 }
 
 .trade-panel h2 {
@@ -1599,37 +1642,83 @@ span.wallet-token-avatar {
   }
 }
 
+/* Buy / Sell segmented control — designed as one control, not overlaid paints */
 .trade-switch {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  margin-bottom: 4px;
-  border: 1px solid var(--ink);
+  gap: 4px;
+  margin-bottom: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--light);
 }
 
 .trade-switch button {
+  position: relative;
+  z-index: 0;
   min-height: 44px;
-  border: 0;
+  min-width: 0;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 3px;
   background: transparent;
-  color: var(--ink);
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: .12em;
+  letter-spacing: .14em;
   text-transform: uppercase;
   cursor: pointer;
+  transition: background .15s ease, color .15s ease, border-color .15s ease, box-shadow .15s ease;
 }
 
-.trade-switch button + button {
-  border-left: 1px solid var(--ink);
+.trade-switch button:hover:not(.selected) {
+  color: var(--ink);
+  background: rgba(23, 23, 23, 0.04);
 }
 
 .trade-switch button.selected[data-side="buy"] {
   background: #167a3a;
+  border-color: #146334;
   color: #fff;
+  box-shadow: 0 6px 14px rgba(22, 122, 58, 0.28);
 }
 
 .trade-switch button.selected[data-side="sell"] {
   background: #a33a3a;
+  border-color: #8f2f2f;
   color: #fff;
+  box-shadow: 0 6px 14px rgba(163, 58, 58, 0.28);
+}
+
+html[data-theme="dark"] .trade-switch {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--line);
+}
+
+html[data-theme="dark"] .trade-switch button:hover:not(.selected) {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .trade-switch button.selected[data-side="buy"] {
+  background: #1f9d4a;
+  border-color: #22c55e;
+}
+
+html[data-theme="dark"] .trade-switch button.selected[data-side="sell"] {
+  background: #c44545;
+  border-color: #ef4444;
+}
+
+html[data-theme="dark"] .trade-submit.is-buy,
+html[data-theme="dark"] .trade-launch-side[data-side="buy"] .trade-submit {
+  background: #1f9d4a;
+}
+
+html[data-theme="dark"] .trade-submit.is-sell,
+html[data-theme="dark"] .trade-launch-side[data-side="sell"] .trade-submit {
+  background: #c44545;
 }
 
 .trade-panel > label {
