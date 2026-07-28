@@ -1767,6 +1767,7 @@ async function syncPublicMarkets() {
       if (fresh) {
         activeTrade = fresh;
         renderTokenChart(activeTrade);
+        renderTradeTape(activeTrade);
       }
     }
     return readMarkets();
@@ -2459,7 +2460,6 @@ function renderMarketCard(market, index) {
       <div class="token-card-actions trade-actions">
         <button type="button" data-trade="${index}" data-trade-side="buy">Buy</button>
         <button type="button" data-trade="${index}" data-trade-side="sell">Sell</button>
-        <button type="button" data-liquidity="${index}">Pool</button>
       </div>
     </article>`;
 }
@@ -3032,6 +3032,63 @@ let activeSide = "buy";
 /** Cached raw balances for the open trade modal (base units). */
 let tradeBalances = { thru: 0n, token: 0n, sellable: 0n };
 
+function shortAddress(value, head = 6, tail = 4) {
+  const text = String(value || "");
+  if (text.length <= head + tail + 1) return text || "—";
+  return `${text.slice(0, head)}…${text.slice(-tail)}`;
+}
+
+function renderTradeTape(market) {
+  const tape = document.querySelector("[data-trade-tape]");
+  if (!tape) return;
+  const points = Array.isArray(market?.chart) ? market.chart.slice() : [];
+  const trades = points
+    .filter((p) => p && (p.side === "buy" || p.side === "sell"))
+    .slice(-12)
+    .reverse();
+  if (!trades.length) {
+    tape.innerHTML = `<p class="trade-tape-empty">No trades yet.</p>`;
+    return;
+  }
+  tape.innerHTML = trades.map((point) => {
+    const side = point.side === "sell" ? "sell" : "buy";
+    const thru = point.thru != null ? formatUnits(BigInt(String(point.thru)), NATIVE_THRU_DECIMALS, 6) : "—";
+    const tokens = point.tokens != null
+      ? formatUnits(BigInt(String(point.tokens)), market.decimals || 6)
+      : "—";
+    const price = point.price != null ? formatSpotPrice(BigInt(String(point.price))) : "—";
+    const when = point.t || point.ts || point.at
+      ? new Date(Number(point.t || point.ts || point.at)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : "";
+    return `
+      <div class="trade-tape-row">
+        <span class="side-${side}">${side.toUpperCase()}</span>
+        <span>${tokens} ${market.ticker || ""}</span>
+        <span class="tape-muted">${thru} THRU</span>
+        <span class="tape-muted" title="${price}">${when || price}</span>
+      </div>`;
+  }).join("");
+}
+
+function setTradeAmountFromPercent(percent) {
+  if (!activeTrade) return;
+  const input = document.querySelector("[data-trade-amount]");
+  if (!input) return;
+  const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+  if (activeSide === "buy") {
+    const spendable = tradeBalances.thru > NATIVE_TRANSFER_FEE
+      ? tradeBalances.thru - NATIVE_TRANSFER_FEE
+      : 0n;
+    const amount = (spendable * BigInt(pct)) / 100n;
+    input.value = formatUnits(amount, NATIVE_THRU_DECIMALS, 9);
+  } else {
+    const sellable = tradeBalances.sellable != null ? tradeBalances.sellable : tradeBalances.token;
+    const amount = (sellable * BigInt(pct)) / 100n;
+    input.value = formatUnits(amount, activeTrade.decimals);
+  }
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 async function refreshTradeBalances() {
   const balanceEl = document.querySelector("[data-trade-balance]");
   const labelEl = document.querySelector("[data-trade-balance-label]");
@@ -3098,11 +3155,42 @@ async function openTrade(index, side) {
   if (!activeTrade) return;
   tradeModal.hidden = false;
   document.body.classList.add("modal-open");
-  document.querySelector("[data-trade-title]").textContent = `${side === "buy" ? "Buy" : "Sell"} ${activeTrade.ticker}`;
+
+  const name = activeTrade.name || activeTrade.ticker || "Token";
+  const ticker = activeTrade.ticker || "TOKEN";
+  document.querySelector("[data-trade-title]").textContent = name;
+  const nameEl = document.querySelector("[data-trade-name]");
+  if (nameEl) nameEl.textContent = name;
+  const tickerEl = document.querySelector("[data-trade-ticker]");
+  if (tickerEl) tickerEl.textContent = `$${ticker}`;
+
+  const mint = activeTrade.mintAddress || "";
+  const mintEl = document.querySelector("[data-trade-mint]");
+  if (mintEl) mintEl.textContent = shortAddress(mint, 8, 6);
+  const mintLink = document.querySelector("[data-trade-mint-link]");
+  if (mintLink) {
+    if (mint) {
+      mintLink.href = `https://scan.thru.org/account/${mint}`;
+      mintLink.hidden = false;
+      mintLink.title = mint;
+    } else {
+      mintLink.removeAttribute("href");
+      mintLink.hidden = true;
+    }
+  }
+
+  const aboutEl = document.querySelector("[data-trade-about]");
+  if (aboutEl) {
+    const desc = typeof activeTrade.description === "string" ? activeTrade.description.trim() : "";
+    aboutEl.textContent = desc || "No description yet.";
+  }
+
   const tradeImg = document.querySelector("[data-trade-image]");
+  const tradeFallback = document.querySelector("[data-trade-image-fallback]");
+  const src = typeof activeTrade.image === "string" ? activeTrade.image.trim() : "";
+  const hasImage = Boolean(src && (src.startsWith("data:image/") || /^https?:\/\//i.test(src)));
   if (tradeImg) {
-    const src = typeof activeTrade.image === "string" ? activeTrade.image.trim() : "";
-    if (src && (src.startsWith("data:image/") || /^https?:\/\//i.test(src))) {
+    if (hasImage) {
       tradeImg.src = src;
       tradeImg.hidden = false;
     } else {
@@ -3110,35 +3198,48 @@ async function openTrade(index, side) {
       tradeImg.hidden = true;
     }
   }
-  document.querySelector("[data-trade-submit]").textContent = side === "buy" ? "Buy with THRU" : `Sell ${activeTrade.ticker}`;
-  document.querySelector("[data-trade-input-label]").textContent = side === "buy" ? "You receive" : "You receive";
+  if (tradeFallback) {
+    tradeFallback.textContent = ticker.slice(0, 1).toUpperCase();
+    tradeFallback.hidden = hasImage;
+  }
+
+  document.querySelector("[data-trade-submit]").textContent =
+    side === "buy" ? "Buy with THRU" : `Sell ${ticker}`;
+  document.querySelector("[data-trade-input-label]").textContent = "You receive";
+  const amountLabel = document.querySelector("[data-trade-amount-label]");
+  if (amountLabel) amountLabel.textContent = side === "buy" ? "You pay" : "You sell";
+  const amountAsset = document.querySelector("[data-trade-amount-asset]");
+  if (amountAsset) amountAsset.textContent = side === "buy" ? "THRU" : ticker;
+
   const progress = activeTrade.curve ? curveProgress(activeTrade) : null;
   if (isBondingMarket(activeTrade)) {
     activeTrade = await syncCurveVaultFromChain(activeTrade);
     const c = readCurve(activeTrade);
     if (activeTrade.graduated) {
       document.querySelector("[data-trade-status]").textContent =
-        `Graduated · vault ${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} THRU. ` +
-        "Buy and sell stay available. Max uses vault-safe size.";
+        `Graduated · vault ${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} THRU. Buy and sell stay available.`;
     } else {
       document.querySelector("[data-trade-status]").textContent =
-        `Public bonding curve · ${progress.toFixed(1)}% to graduation ` +
-        `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU in vault). ` +
-        "Sells are paid from THRU buyers paid in — Max uses vault-safe size.";
+        `Bonding curve · ${progress.toFixed(1)}% to graduation ` +
+        `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU).`;
     }
   } else if (activeTrade.liquidity) {
-    document.querySelector("[data-trade-status]").textContent = "Quote updates from the Thru AMM pool.";
+    document.querySelector("[data-trade-status]").textContent = "AMM market · quotes from the live pool.";
   } else if (activeTrade.graduated) {
     document.querySelector("[data-trade-status]").textContent =
       activeTrade.liquidityPendingReason || "Graduated. Trading continues.";
   } else {
     document.querySelector("[data-trade-status]").textContent =
-      "This mint is live, but has no bonding curve or AMM pool yet.";
+      "This mint is live, but has no bonding curve yet.";
   }
-  document.querySelectorAll("[data-side]").forEach((button) => button.classList.toggle("selected", button.dataset.side === side));
+
+  document.querySelectorAll("[data-side]").forEach((button) => {
+    button.classList.toggle("selected", button.dataset.side === side);
+  });
   document.querySelector("[data-trade-amount]").value = "";
   document.querySelector("[data-trade-quote]").textContent = "—";
   renderTokenChart(activeTrade);
+  renderTradeTape(activeTrade);
   await refreshTradeBalances();
 }
 
@@ -3147,21 +3248,12 @@ function closeTrade() {
   document.body.classList.remove("modal-open");
 }
 
-function openLiquidity(index) {
-  activeLiquidityMarket = readMarkets()[index];
-  if (!activeLiquidityMarket) return;
-  liquidityModal.hidden = false;
-  document.body.classList.add("modal-open");
-  document.querySelector("[data-liquidity-title]").textContent =
-    `Provide ${activeLiquidityMarket.ticker} liquidity`;
-  document.querySelector("[data-liquidity-status]").textContent = activeLiquidityMarket.liquidity
-    ? "Your deposit will join the live on-chain pool and mint LP tokens to your wallet."
-    : "The creator must successfully initialize this pool before public deposits can begin.";
+function openLiquidity() {
+  // Public pool UI removed — buy/sell only.
 }
 
 function closeLiquidity() {
-  liquidityModal.hidden = true;
-  document.body.classList.remove("modal-open");
+  if (liquidityModal) liquidityModal.hidden = true;
 }
 
 async function provideLiquidity() {
@@ -3363,6 +3455,7 @@ async function executeCurveTrade(amount, status) {
     }
     activeTrade = updated || readMarkets().find((m) => m.mintAddress === market.mintAddress);
     renderTokenChart(activeTrade);
+    renderTradeTape(activeTrade);
     renderMarkets();
     await refreshTradeBalances();
     await refreshBalance();
@@ -3402,6 +3495,7 @@ async function executeCurveTrade(amount, status) {
     `Sold for ${formatUnits(quote.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
     `(fee ${formatUnits(quote.fee, NATIVE_THRU_DECIMALS, 9)} THRU).`;
   renderTokenChart(activeTrade);
+  renderTradeTape(activeTrade);
   renderMarkets();
   await refreshTradeBalances();
   await refreshBalance();
@@ -3482,7 +3576,7 @@ async function executeTrade() {
 }
 
 function onMarketActionClick(event) {
-  // Buy / Sell / Pool take priority over the card hit target.
+  // Buy / Sell take priority over the card hit target.
   const tradeButton = event.target.closest("[data-trade]");
   if (tradeButton) {
     event.preventDefault();
@@ -3490,16 +3584,9 @@ function onMarketActionClick(event) {
     openTrade(Number(tradeButton.dataset.trade), tradeButton.dataset.tradeSide || "buy");
     return;
   }
-  const liquidityButton = event.target.closest("[data-liquidity]");
-  if (liquidityButton) {
-    event.preventDefault();
-    event.stopPropagation();
-    openLiquidity(Number(liquidityButton.dataset.liquidity));
-    return;
-  }
   const openMarket = event.target.closest("[data-open-market]");
   if (openMarket) {
-    // Clicking the token card opens chart + stats (default buy side).
+    // Clicking the token card opens the launchpad-style trade panel.
     openTrade(Number(openMarket.dataset.openMarket), "buy");
   }
 }
@@ -3520,21 +3607,12 @@ document.querySelectorAll("[data-side]").forEach((button) => button.addEventList
   if (activeTrade) openTrade(readMarkets().findIndex((market) => market.mintAddress === activeTrade.mintAddress), button.dataset.side);
 }));
 document.querySelector("[data-trade-max]")?.addEventListener("click", () => {
-  if (!activeTrade) return;
-  const input = document.querySelector("[data-trade-amount]");
-  if (!input) return;
-  if (activeSide === "buy") {
-    // Leave NATIVE_TRANSFER_FEE so amount + fee fits on-chain (avoids -38).
-    const spendable = tradeBalances.thru > NATIVE_TRANSFER_FEE
-      ? tradeBalances.thru - NATIVE_TRANSFER_FEE
-      : 0n;
-    input.value = formatUnits(spendable, NATIVE_THRU_DECIMALS, 9);
-  } else {
-    // Cap by vault THRU depth so Max never quotes an unfundable sell.
-    const sellable = tradeBalances.sellable != null ? tradeBalances.sellable : tradeBalances.token;
-    input.value = formatUnits(sellable, activeTrade.decimals);
-  }
-  input.dispatchEvent(new Event("input", { bubbles: true }));
+  setTradeAmountFromPercent(100);
+});
+document.querySelectorAll("[data-trade-pct]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setTradeAmountFromPercent(button.dataset.tradePct);
+  });
 });
 document.querySelector("[data-trade-amount]")?.addEventListener("input", (event) => {
   const quote = document.querySelector("[data-trade-quote]");
@@ -3574,10 +3652,6 @@ document.querySelector("[data-trade-amount]")?.addEventListener("input", (event)
   }
 });
 document.querySelector("[data-trade-submit]")?.addEventListener("click", executeTrade);
-document.querySelectorAll("[data-liquidity-close]").forEach((button) => {
-  button.addEventListener("click", closeLiquidity);
-});
-document.querySelector("[data-liquidity-submit]")?.addEventListener("click", provideLiquidity);
 
 async function bootMarkets() {
   try {
@@ -3603,6 +3677,7 @@ async function bootMarkets() {
       const fresh = readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress);
       if (fresh) activeTrade = fresh;
       renderTokenChart(activeTrade);
+      renderTradeTape(activeTrade);
     }
   }, 15_000);
 }
