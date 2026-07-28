@@ -203,12 +203,25 @@ async function readBoard() {
     ...SEED_MIRROR_IDS.map((id) => readBlob(id)),
   ]);
 
-  const markets = mergeMarkets(
-    memoryBoard.markets,
+  const durableOk = gist.ok || blobs.some((b) => b.ok);
+  const durableMarkets = mergeMarkets(
     gist.ok ? gist.markets : [],
     ...blobs.filter((b) => b.ok).map((b) => b.markets),
   );
 
+  // If durable stores are reachable and empty, trust that over stale warm memory
+  // (otherwise a wiped board keeps reappearing on old serverless instances).
+  if (durableOk && durableMarkets.length === 0) {
+    memoryBoard = { markets: [], updatedAt: Date.now() };
+    return {
+      markets: [],
+      updatedAt: Date.now(),
+      gistOk: gist.ok,
+      blobOk: blobs.filter((b) => b.ok).length,
+    };
+  }
+
+  const markets = mergeMarkets(memoryBoard.markets, durableMarkets);
   memoryBoard = { markets, updatedAt: Date.now() };
 
   return {
@@ -322,14 +335,19 @@ module.exports = async function handler(req, res) {
         : mergeMarkets(existing.markets, incoming);
       const written = await writeBoard(markets);
 
-      // Prefer re-read merge, but never drop the board we just accepted.
+      // After an explicit wipe, do not re-merge stale durable/memory into the response.
       let confirmed = written.markets;
-      try {
-        const reread = await readBoard();
-        confirmed = mergeMarkets(written.markets, reread.markets);
-        memoryBoard = { markets: confirmed, updatedAt: Date.now() };
-      } catch {
-        confirmed = written.markets;
+      if (!forceEmpty || incoming.length) {
+        try {
+          const reread = await readBoard();
+          confirmed = mergeMarkets(written.markets, reread.markets);
+          memoryBoard = { markets: confirmed, updatedAt: Date.now() };
+        } catch {
+          confirmed = written.markets;
+        }
+      } else {
+        memoryBoard = { markets: [], updatedAt: Date.now() };
+        confirmed = [];
       }
 
       res.status(200).json({
@@ -339,6 +357,7 @@ module.exports = async function handler(req, res) {
         mirrors: written.outcomes.filter((o) => o.ok).length,
         writeOk: true,
         durable: written.durable,
+        wiped: Boolean(forceEmpty && !incoming.length),
         source: "api",
         writes: written.outcomes,
       });

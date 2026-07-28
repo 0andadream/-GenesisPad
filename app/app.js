@@ -150,7 +150,7 @@ let connectedAccount = null;
 let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
 // Bumped at public-launch clean slate so old local test boards are abandoned.
-const MARKETS_KEY = "genesis-markets-v2";
+const MARKETS_KEY = "genesis-markets-v3";
 // Public board: SAME-ORIGIN API only.
 // Hitting free JSONBlob from every browser tab caused 429 rate-limits and false
 // "not public" / friends-can't-see failures. The API merges + fans out server-side.
@@ -1812,29 +1812,26 @@ async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = 
     }
 
     const remote = remoteResult.markets;
-    // Always merge local + remote so every visitor sees all deployed tokens.
-    const merged = stampMarkets(mergeMarketLists(remote, local));
+    const remoteMints = mintSet(remote);
+    const now = Date.now();
+    // Public board is source of truth. Only keep local-only markets created in the
+    // last few minutes (in-flight launches). Older local ghosts must not reappear
+    // after a public wipe or on friends' machines.
+    const recentLocalOnly = (local || []).filter((market) => {
+      if (!market?.mintAddress || remoteMints.has(market.mintAddress)) return false;
+      const created = Number(market.createdAt || market.updatedAt || 0);
+      return created > 0 && now - created < 5 * 60 * 1000;
+    });
+    const merged = stampMarkets(mergeMarketLists(remote, recentLocalOnly));
     const before = marketsSignature(local);
     const after = marketsSignature(merged);
     localStorage.setItem(MARKETS_KEY, JSON.stringify(merged));
     registryLiveAt = Date.now();
     lastPublicBoard = { ok: true, count: remote.length, error: "" };
 
-    // Push only when local has something remote is missing — never block UI on publish.
-    const remoteMints = mintSet(remote);
-    const localMints = mintSet(local);
-    let localHasExtra = false;
-    for (const mint of localMints) {
-      if (!remoteMints.has(mint)) {
-        localHasExtra = true;
-        break;
-      }
-    }
-    if (publish && localHasExtra && merged.length) {
-      // Await create-critical publishes are handled by pushMarketsToPublic callers;
-      // background sync stays soft so the board never freezes.
-      pushMarketsToPublic(merged).catch(() => { /* soft-fail background sync */ });
-    }
+    // Do NOT background-republish stale local-only markets (that re-infected the board
+    // after clean-slate). Explicit create/retry still calls pushMarketsToPublic.
+    void publish;
 
     // Keep open trade modal + chart live when remote activity lands.
     if (before !== after && activeTrade?.mintAddress) {
