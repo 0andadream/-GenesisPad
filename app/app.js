@@ -150,19 +150,14 @@ let connectedAccount = null;
 let generatedAccount = null;
 const WALLET_SESSION_KEY = "genesis-thru-wallet-session";
 const MARKETS_KEY = "genesis-markets";
-// Public shared registry (multi-URL so one bad write/fetch cannot hide markets).
-// Prefer same-origin /api/markets (server merge) then JSONBlob mirrors.
-const MARKET_REGISTRY_URLS = [
-  "/api/markets",
-  "https://jsonblob.com/api/jsonBlob/019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
-  "https://jsonblob.com/api/jsonBlob/019fa906-1003-7f56-8791-16529d818eb5",
-  "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70",
-  "https://jsonblob.com/api/jsonBlob/019fa8d5-e68c-74ed-8f39-20591b09abce",
-];
-// Back-compat single URL (home page stats still reference the first board).
-const MARKET_REGISTRY_URL = MARKET_REGISTRY_URLS[0];
-/** Abort slow mirrors so one hung board cannot block the UI. */
-const REGISTRY_FETCH_TIMEOUT_MS = 4500;
+// Public board: SAME-ORIGIN API only.
+// Hitting free JSONBlob from every browser tab caused 429 rate-limits and false
+// "not public" / friends-can't-see failures. The API merges + fans out server-side.
+const MARKET_REGISTRY_API = "/api/markets";
+const MARKET_REGISTRY_URLS = [MARKET_REGISTRY_API];
+const MARKET_REGISTRY_URL = MARKET_REGISTRY_API;
+/** Abort slow registry calls so one hung request cannot block the UI. */
+const REGISTRY_FETCH_TIMEOUT_MS = 12000;
 /** First paint poll cadence; backs off when the board is quiet. */
 const REGISTRY_POLL_FAST_MS = 2500;
 const REGISTRY_POLL_SLOW_MS = 10000;
@@ -1596,57 +1591,26 @@ async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_
 }
 
 /**
- * First successful mirror wins — used for snappy first paint.
- * Does not wait on a slow second board.
- */
-async function fetchPublicMarketsFast() {
-  return new Promise((resolve) => {
-    let pending = MARKET_REGISTRY_URLS.length;
-    let settled = false;
-    let lastError = "Public board unreachable";
-
-    MARKET_REGISTRY_URLS.forEach((url) => {
-      fetchPublicMarketsFrom(url).then((result) => {
-        if (settled) return;
-        if (result.ok) {
-          settled = true;
-          const markets = stampMarkets(mergeMarketLists(result.markets));
-          lastPublicBoard = { ok: true, count: markets.length, error: "" };
-          resolve({ ok: true, markets, partial: true, url: result.url });
-          return;
-        }
-        lastError = result.error || lastError;
-        pending -= 1;
-        if (pending <= 0) {
-          settled = true;
-          lastPublicBoard = { ok: false, count: 0, error: lastError };
-          resolve({ ok: false, markets: [], error: lastError });
-        }
-      });
-    });
-  });
-}
-
-/**
- * Read ALL public boards and merge.
- * ok=true only if at least one board responded successfully.
+ * Read the public board (same-origin API).
+ * mode is kept for call-site compatibility; both paths hit the API once.
  * CRITICAL: failed fetches must NOT be treated as empty boards.
- * @param {{ mode?: "fast" | "full" }} [opts]
  */
 async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
-  if (mode === "fast") return fetchPublicMarketsFast();
-
-  const results = await Promise.all(
-    MARKET_REGISTRY_URLS.map((url) => fetchPublicMarketsFrom(url)),
-  );
-  const okResults = results.filter((r) => r.ok);
-  if (!okResults.length) {
-    lastPublicBoard = { ok: false, count: 0, error: results[0]?.error || "Public board unreachable" };
+  void mode;
+  const result = await fetchPublicMarketsFrom(MARKET_REGISTRY_API, {
+    timeoutMs: REGISTRY_FETCH_TIMEOUT_MS,
+  });
+  if (!result.ok) {
+    lastPublicBoard = {
+      ok: false,
+      count: 0,
+      error: result.error || "Public board unreachable",
+    };
     return { ok: false, markets: [], error: lastPublicBoard.error };
   }
-  const merged = stampMarkets(mergeMarketLists(...okResults.map((r) => r.markets)));
-  lastPublicBoard = { ok: true, count: merged.length, error: "" };
-  return { ok: true, markets: merged };
+  const markets = stampMarkets(result.markets);
+  lastPublicBoard = { ok: true, count: markets.length, error: "" };
+  return { ok: true, markets };
 }
 
 async function fetchPublicMarkets() {
@@ -1654,64 +1618,47 @@ async function fetchPublicMarkets() {
   return result.markets;
 }
 
-async function publishPublicMarketsTo(url, markets, { stripImages = false } = {}) {
-  const cleaned = stampMarkets(markets).map((market) => {
-    if (!stripImages) return market;
-    const { image, ...rest } = market;
-    return rest;
-  });
+/**
+ * Publish markets through the same-origin API (server merges + fans out).
+ * Returns the authoritative public market list from the API response body.
+ */
+async function publishPublicMarkets(markets, { stripImages = false } = {}) {
+  let cleaned = stampMarkets(markets);
+  if (stripImages) {
+    cleaned = cleaned.map(({ image, ...rest }) => rest);
+  }
   const payload = {
     markets: cleaned,
     updatedAt: Date.now(),
     note: "GenesisPad public market registry",
   };
   const body = JSON.stringify(payload);
-  const response = await fetch(url, {
+  const response = await fetch(MARKET_REGISTRY_API, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
     },
     body,
-    mode: "cors",
     cache: "no-store",
   });
   if (!response.ok) {
-    if (!stripImages && body.length > 150_000) {
-      return publishPublicMarketsTo(url, markets, { stripImages: true });
+    // Payload may be too large with base64 images — retry stripped.
+    if (!stripImages && body.length > 120_000) {
+      return publishPublicMarkets(markets, { stripImages: true });
     }
-    throw new Error(`Public board publish failed (${response.status}) on ${url}`);
-  }
-  // Same-origin API returns the merged public set — prefer that as truth.
-  if (url.startsWith("/") || url.includes("/api/markets")) {
+    let detail = "";
     try {
-      const data = await response.json();
-      if (Array.isArray(data?.markets)) {
-        return { markets: data.markets, fromApi: true };
-      }
-    } catch {
-      /* some mirrors return empty body on PUT */
-    }
+      const err = await response.json();
+      detail = err?.error ? `: ${err.error}` : "";
+    } catch { /* ignore */ }
+    throw new Error(`Public board publish failed (${response.status})${detail}`);
   }
-  return { markets: cleaned, fromApi: false };
-}
-
-/** Write the same market list to every registry URL (best-effort all). */
-async function publishPublicMarkets(markets, { stripImages = false } = {}) {
-  const results = await Promise.allSettled(
-    MARKET_REGISTRY_URLS.map((url) => publishPublicMarketsTo(url, markets, { stripImages })),
-  );
-  const fulfilled = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
-  if (!fulfilled.length) {
-    const reason = results.find((r) => r.status === "rejected")?.reason;
-    throw (reason instanceof Error
-      ? reason
-      : new Error("Public board publish failed on all mirrors."));
+  const data = await response.json();
+  if (!Array.isArray(data?.markets)) {
+    throw new Error("Public board publish returned an invalid payload.");
   }
-  // Prefer server-merged API payload when available.
-  const apiPayload = fulfilled.find((v) => v?.fromApi && Array.isArray(v.markets));
-  if (apiPayload) return stampMarkets(apiPayload.markets);
-  return stampMarkets(markets);
+  return stampMarkets(data.markets);
 }
 
 function mintSet(markets) {
@@ -1724,96 +1671,71 @@ function remoteHasMint(markets, mintAddress) {
 }
 
 /**
- * Fetch remote → merge with local → publish → re-fetch verify on REMOTE only.
- * Returns the merged public list.
- * NEVER treats a failed fetch as an empty board (that was wiping friends' views).
- * CRITICAL: requireMint must be present on a remote re-read — local merge is not proof.
+ * Fetch remote → merge with local → publish via /api/markets → verify API body.
+ * NEVER treats a failed fetch as an empty board.
+ * requireMint must appear on the API response (not only in localStorage).
  */
-async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts = 6 } = {}) {
+async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts = 5 } = {}) {
   return withRegistryLock(async () => {
     let lastError = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        const remoteResult = await fetchPublicMarketsDetailed({ mode: "full" });
-        if (!remoteResult.ok) {
-          throw new Error(
-            remoteResult.error
-              || "Could not reach the public board. Check network / ad-blockers.",
-          );
-        }
-        const remote = remoteResult.markets;
+        const remoteResult = await fetchPublicMarketsDetailed();
+        // If GET fails, still try to publish local (API will merge with its memory/mirrors).
+        const remote = remoteResult.ok ? remoteResult.markets : [];
         const merged = stampMarkets(mergeMarketLists(remote, localMarkets));
 
-        // Safety: never publish a set that drops mints already on the public board.
-        const remoteMints = mintSet(remote);
-        const mergedMints = mintSet(merged);
-        for (const mint of remoteMints) {
-          if (!mergedMints.has(mint)) {
-            throw new Error("Refusing to publish: would drop a public market.");
+        if (remoteResult.ok) {
+          const remoteMints = mintSet(remote);
+          const mergedMints = mintSet(merged);
+          for (const mint of remoteMints) {
+            if (!mergedMints.has(mint)) {
+              throw new Error("Refusing to publish: would drop a public market.");
+            }
+          }
+          if (!merged.length && remote.length) {
+            localStorage.setItem(MARKETS_KEY, JSON.stringify(stampMarkets(remote)));
+            lastPublicBoard = { ok: true, count: remote.length, error: "" };
+            return stampMarkets(remote);
           }
         }
-        // Never publish empty over non-empty remote.
-        if (!merged.length && remote.length) {
-          localStorage.setItem(MARKETS_KEY, JSON.stringify(stampMarkets(remote)));
-          lastPublicBoard = { ok: true, count: remote.length, error: "" };
-          return stampMarkets(remote);
+
+        if (!merged.length) {
+          throw new Error("Nothing to publish to the public board.");
         }
 
+        // API response is the public truth for this write.
         const published = await publishPublicMarkets(merged);
-        // Brief settle time so mirrors catch up before verify.
-        await new Promise((r) => setTimeout(r, 250 + attempt * 100));
 
-        // Re-read REMOTE only (full merge of all mirrors). Do NOT union with local
-        // before requireMint checks — that was a false "public" success.
-        const confirmedResult = await fetchPublicMarketsDetailed({ mode: "full" });
-        if (!confirmedResult.ok) {
-          throw new Error("Published, but could not re-read the public board.");
-        }
-        let confirmedRemote = stampMarkets(confirmedResult.markets);
-
-        // If the API returned a merged body on PUT, union that in as a hint only after
-        // we still verify requireMint against a pure remote GET above.
-        if (Array.isArray(published) && published.length) {
-          confirmedRemote = stampMarkets(mergeMarketLists(confirmedRemote, published));
-        }
-
-        if (requireMint && !remoteHasMint(confirmedResult.markets, requireMint)
-          && !remoteHasMint(published, requireMint)) {
+        if (requireMint && !remoteHasMint(published, requireMint)) {
           throw new Error(
-            "Token was not found on the public board after publish. Retrying…",
+            "Token was not present in the public board response. Retrying…",
           );
         }
 
-        // Local view may keep creator extras, but public truth is remote∪published.
-        const publicView = stampMarkets(mergeMarketLists(confirmedRemote, merged));
+        // Confirm with a fresh GET (same API — no multi-blob race).
+        await new Promise((r) => setTimeout(r, 150));
+        const confirmed = await fetchPublicMarketsDetailed();
+        let publicView = published;
+        if (confirmed.ok) {
+          publicView = stampMarkets(mergeMarketLists(confirmed.markets, published));
+          if (requireMint && !remoteHasMint(confirmed.markets, requireMint)
+            && !remoteHasMint(published, requireMint)) {
+            throw new Error("Public board GET still missing the new mint. Retrying…");
+          }
+        } else if (requireMint && !remoteHasMint(published, requireMint)) {
+          throw new Error("Could not confirm public board after publish.");
+        }
+
+        // Keep any local-only fields the API might have stripped, but prefer public.
+        publicView = stampMarkets(mergeMarketLists(publicView, merged));
         localStorage.setItem(MARKETS_KEY, JSON.stringify(publicView));
         registryLiveAt = Date.now();
         lastPublicBoard = { ok: true, count: publicView.length, error: "" };
-
-        if (requireMint && !remoteHasMint(publicView, requireMint)) {
-          throw new Error(
-            "Token was not found on the public board after publish. Retry create publish.",
-          );
-        }
-        // Final strict remote-only check for create path.
-        if (requireMint) {
-          const strict = await fetchPublicMarketsDetailed({ mode: "full" });
-          if (!strict.ok || !remoteHasMint(strict.markets, requireMint)) {
-            // One more force publish of just ensuring merge includes the mint.
-            throw new Error(
-              "Public board still missing the new mint after verify. Retrying…",
-            );
-          }
-          const strictMerged = stampMarkets(mergeMarketLists(strict.markets, merged));
-          localStorage.setItem(MARKETS_KEY, JSON.stringify(strictMerged));
-          lastPublicBoard = { ok: true, count: strictMerged.length, error: "" };
-          return strictMerged;
-        }
-
         return publicView;
       } catch (reason) {
         lastError = reason;
-        await new Promise((r) => setTimeout(r, 500 * attempt));
+        await new Promise((r) => setTimeout(r, 400 * attempt));
       }
     }
     throw (lastError instanceof Error

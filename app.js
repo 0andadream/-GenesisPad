@@ -1,14 +1,8 @@
-/** Same public registries the launchpad app publishes to. */
-const MARKET_REGISTRY_URLS = [
-  "/api/markets",
-  "https://jsonblob.com/api/jsonBlob/019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
-  "https://jsonblob.com/api/jsonBlob/019fa906-1003-7f56-8791-16529d818eb5",
-  "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70",
-  "https://jsonblob.com/api/jsonBlob/019fa8d5-e68c-74ed-8f39-20591b09abce",
-];
-const MARKET_REGISTRY_URL = MARKET_REGISTRY_URLS[0];
+/** Same-origin public board (server merge). Do not hammer free JSONBlob from the browser. */
+const MARKET_REGISTRY_URLS = ["/api/markets"];
+const MARKET_REGISTRY_URL = "/api/markets";
 const MARKETS_KEY = "genesis-markets";
-const REGISTRY_FETCH_TIMEOUT_MS = 4500;
+const REGISTRY_FETCH_TIMEOUT_MS = 12000;
 const NATIVE_THRU_DECIMALS = 9;
 const THEME_KEY = "genesis-theme";
 /** Home: light by default; Protocol section forces dark while in view. */
@@ -382,27 +376,8 @@ async function fetchRegistryFrom(url) {
   }
 }
 
-/** Race both public mirrors — first success wins for speed. */
 async function fetchRegistryMarkets() {
-  return new Promise((resolve, reject) => {
-    let pending = MARKET_REGISTRY_URLS.length;
-    let settled = false;
-    let lastError = new Error("registry unreachable");
-
-    MARKET_REGISTRY_URLS.forEach((url) => {
-      fetchRegistryFrom(url)
-        .then((markets) => {
-          if (settled) return;
-          settled = true;
-          resolve(markets);
-        })
-        .catch((reason) => {
-          lastError = reason instanceof Error ? reason : lastError;
-          pending -= 1;
-          if (!settled && pending <= 0) reject(lastError);
-        });
-    });
-  });
+  return fetchRegistryFrom(MARKET_REGISTRY_URL);
 }
 
 async function fetchStaticStats() {
