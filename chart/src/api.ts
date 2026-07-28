@@ -9,7 +9,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import { CandleBuilder, normalizeHistorical } from "./candleBuilder";
-import { TradeWebSocket, type WsStatus } from "./useWebSocket";
+import { TradeWebSocket, type WsStatus } from "./tradeSocket";
 import type {
   Candle,
   ChartController,

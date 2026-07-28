@@ -15,6 +15,17 @@ import {
   createSwapInstruction,
   deriveAmmPoolAddresses,
 } from "@thru/programs/amm";
+import {
+  mountLiveChart,
+  syncLiveChart,
+  pushLiveTradePoint,
+  setLiveChartTimeframe,
+  destroyLiveChart,
+  isLiveChartMounted,
+  getLiveTimeframe,
+} from "./live-chart.js";
+
+
 
 /** Explore board state — sort / age / search are live. */
 let marketSort = "recent";
@@ -1064,191 +1075,32 @@ function ensureChartSeed(market) {
   }
 }
 
-/** Candle interval: 1m | 5m | 15m | 1h | all — DexScreener-style. */
+/** Candle interval for Lightweight Charts host. */
 let chartWindow = "5m";
 
-function chartIntervalMs(windowKey = chartWindow) {
-  if (windowKey === "1m") return 60 * 1000;
-  if (windowKey === "5m") return 5 * 60 * 1000;
-  if (windowKey === "15m") return 15 * 60 * 1000;
-  if (windowKey === "1h") return 60 * 60 * 1000;
-  // ALL: adaptive bucket from data span
-  return 0;
-}
-
-function compactChartPrice(priceBaseUnits) {
-  if (priceBaseUnits <= 0n) return "0";
-  const full = formatUnits(priceBaseUnits, NATIVE_THRU_DECIMALS, 8);
-  if (full.includes("e") || full.includes("E")) return full;
-  const [w, f = ""] = full.split(".");
-  if (!f) return w;
-  const trimmed = f.replace(/0+$/, "").slice(0, 6);
-  return trimmed ? `${w}.${trimmed}` : w;
-}
-
 /**
- * Bucket trade prints into OHLC candles (DexScreener-style).
- * @returns {{ t: number, o: bigint, h: bigint, l: bigint, c: bigint, vol: bigint, buys: number, sells: number }[]}
- */
-function buildCandles(points, intervalMs, spot = 0n) {
-  const trades = (points || [])
-    .filter((p) => p && (p.side === "buy" || p.side === "sell" || p.side === "seed" || p.side === "live"))
-    .map((p) => ({
-      t: Number(p.t) || 0,
-      price: BigInt(p.price || "0"),
-      vol: BigInt(p.thru || "0"),
-      side: p.side || "seed",
-    }))
-    .filter((p) => p.price > 0n && p.t > 0)
-    .sort((a, b) => a.t - b.t);
-
-  if (!trades.length && spot > 0n) {
-    const now = Date.now();
-    return [{
-      t: now,
-      o: spot,
-      h: spot,
-      l: spot,
-      c: spot,
-      vol: 0n,
-      buys: 0,
-      sells: 0,
-    }];
-  }
-  if (!trades.length) return [];
-
-  let bucket = intervalMs;
-  if (!bucket) {
-    const span = Math.max(60_000, (trades[trades.length - 1].t - trades[0].t) || 60_000);
-    // Aim for ~40–60 candles across ALL
-    bucket = Math.max(60_000, Math.floor(span / 48));
-  }
-
-  const map = new Map();
-  for (const tr of trades) {
-    const key = Math.floor(tr.t / bucket) * bucket;
-    let c = map.get(key);
-    if (!c) {
-      c = {
-        t: key,
-        o: tr.price,
-        h: tr.price,
-        l: tr.price,
-        c: tr.price,
-        vol: 0n,
-        buys: 0,
-        sells: 0,
-      };
-      map.set(key, c);
-    }
-    if (tr.price > c.h) c.h = tr.price;
-    if (tr.price < c.l) c.l = tr.price;
-    c.c = tr.price;
-    c.vol += tr.vol;
-    if (tr.side === "buy") c.buys += 1;
-    if (tr.side === "sell") c.sells += 1;
-  }
-
-  // Fill empty buckets through now so the chart extends live
-  const candles = [...map.values()].sort((a, b) => a.t - b.t);
-  if (!candles.length) return candles;
-  const last = candles[candles.length - 1];
-  const nowBucket = Math.floor(Date.now() / bucket) * bucket;
-  if (spot > 0n) {
-    if (last.t === nowBucket) {
-      if (spot > last.h) last.h = spot;
-      if (spot < last.l) last.l = spot;
-      last.c = spot;
-    } else if (nowBucket > last.t) {
-      candles.push({
-        t: nowBucket,
-        o: last.c,
-        h: spot > last.c ? spot : last.c,
-        l: spot < last.c ? spot : last.c,
-        c: spot,
-        vol: 0n,
-        buys: 0,
-        sells: 0,
-      });
-    }
-  }
-  // Cap candles for SVG density
-  return candles.slice(-80);
-}
-
-/**
- * DexScreener-style OHLC candlesticks + volume histogram.
- * Green up / red down bodies, wicks, volume bars, live price + %.
+ * Drive the production DexScreener-style Lightweight Charts instance.
+ * Chart is mounted once per trade modal open; subsequent calls only sync data.
  */
 function renderTokenChart(market) {
-  const root = document.querySelector("[data-token-chart]");
-  const svg = document.querySelector("[data-chart-svg]");
-  const priceEl = document.querySelector("[data-chart-price]");
-  const changeEl = document.querySelector("[data-chart-change]");
-  const changeVal = document.querySelector("[data-chart-change-value]");
-  const rangeLabel = document.querySelector("[data-chart-range-label]");
-  const tradesEl = document.querySelector("[data-chart-trades]");
-  const rangeEl = document.querySelector("[data-chart-range]");
-  if (!svg || !market) return;
-
+  if (!market) return;
   let m = ensureChartSeed(market);
-  const rawPoints = readChart(m).filter((p) => p.side !== "hold");
-  const stats = readTradeStats(m);
-
-  let spot = 0n;
+  // Keep lastPrice in sync with curve spot for the chart header + live tip.
   try {
-    spot = curveSpotPriceThruPerToken(m);
-  } catch {
-    spot = 0n;
-  }
-  if (spot <= 0n && m.lastPrice) {
-    try { spot = BigInt(m.lastPrice); } catch { spot = 0n; }
-  }
-
-  const intervalMs = chartIntervalMs();
-  const candles = buildCandles(rawPoints, intervalMs, spot);
-  const openPrice = candles.length ? candles[0].o : spot;
-  const last = candles.length ? candles[candles.length - 1].c : spot;
-  const up = last >= openPrice;
-
-  if (root) {
-    root.classList.toggle("up", up);
-    root.classList.toggle("down", !up);
-  }
-  if (priceEl) {
-    const prevText = priceEl.textContent;
-    priceEl.textContent = formatSpotPrice(last);
-    if (prevText && prevText !== priceEl.textContent) {
-      priceEl.classList.remove("price-flash");
-      void priceEl.offsetWidth;
-      priceEl.classList.add("price-flash");
+    const spot = curveSpotPriceThruPerToken(m);
+    if (spot > 0n) {
+      m = { ...m, lastPrice: spot.toString() };
     }
-  }
-  let pctText = "0.00%";
-  if (openPrice > 0n && last !== openPrice) {
-    const delta = up ? last - openPrice : openPrice - last;
-    const bps = (delta * 10000n) / openPrice;
-    pctText = `${up ? "+" : "−"}${(Number(bps) / 100).toFixed(2)}%`;
-  }
-  if (changeVal) changeVal.textContent = pctText;
-  else if (changeEl) changeEl.textContent = pctText;
-  if (changeEl) {
-    changeEl.classList.toggle("up", up && last !== openPrice);
-    changeEl.classList.toggle("down", !up && last !== openPrice);
-    changeEl.classList.toggle("is-up", up && last !== openPrice);
-    changeEl.classList.toggle("is-down", !up && last !== openPrice);
-  }
-  if (rangeLabel) {
-    rangeLabel.textContent = chartWindow === "all" ? "ALL" : chartWindow;
-  }
-  if (tradesEl) {
-    const realTrades = stats.buys + stats.sells;
-    tradesEl.textContent = realTrades
-      ? `${realTrades} trade${realTrades === 1 ? "" : "s"} · ${stats.buys}B / ${stats.sells}S`
-      : "No trades yet";
-  }
-  if (rangeEl) rangeEl.textContent = `OHLC · ${chartWindow === "all" ? "auto" : chartWindow} candles · THRU`;
+  } catch { /* ignore */ }
 
+  if (!isLiveChartMounted()) {
+    mountLiveChart(m, chartWindow);
+  } else {
+    syncLiveChart(m);
+  }
+
+  // Keep classic stats tiles updated (buys/sells/vol/vault).
+  const stats = readTradeStats(m);
   const setStat = (sel, text, cls) => {
     const el = document.querySelector(sel);
     if (!el) return;
@@ -1260,14 +1112,16 @@ function renderTokenChart(market) {
   setStat("[data-stat-sells]", String(stats.sells), "stat-sell");
   setStat("[data-stat-buy-vol]", `${formatUnits(stats.buyThru, NATIVE_THRU_DECIMALS, 6)} THRU`, "stat-buy");
   setStat("[data-stat-sell-vol]", `${formatUnits(stats.sellThru, NATIVE_THRU_DECIMALS, 6)} THRU`, "stat-sell");
-  let hi = 0n;
-  let lo = 0n;
-  for (const c of candles) {
-    if (hi === 0n || c.h > hi) hi = c.h;
-    if (lo === 0n || c.l < lo) lo = c.l;
+  try {
+    const last = BigInt(m.lastPrice || "0");
+    const high = stats.high > last ? stats.high : last;
+    const low = stats.low > 0n && stats.low < last ? stats.low : (last > 0n ? last : stats.low);
+    setStat("[data-stat-high]", formatSpotPrice(high || last));
+    setStat("[data-stat-low]", formatSpotPrice(low || last));
+  } catch {
+    setStat("[data-stat-high]", "—");
+    setStat("[data-stat-low]", "—");
   }
-  setStat("[data-stat-high]", formatSpotPrice(hi || last));
-  setStat("[data-stat-low]", formatSpotPrice(lo || last));
   try {
     const c = readCurve(m);
     setStat("[data-stat-vault]", `${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 6)} THRU`);
@@ -1275,156 +1129,6 @@ function renderTokenChart(market) {
   } catch {
     setStat("[data-stat-vault]", "—");
     setStat("[data-stat-progress]", "—");
-  }
-
-  // DexScreener layout: price pane + volume pane
-  const W = 720;
-  const H = 360;
-  const padL = 8;
-  const padR = 68;
-  const padT = 12;
-  const volH = 64;
-  const gap = 10;
-  const priceH = H - padT - volH - gap - 8;
-  const priceBottom = padT + priceH;
-  const volTop = priceBottom + gap;
-  const plotW = W - padL - padR;
-
-  let minP = lo || last || 1n;
-  let maxP = hi || last || 1n;
-  if (maxP === minP) maxP = minP + 1n;
-  const pad = (maxP - minP) / 10n || 1n;
-  minP = minP > pad ? minP - pad : 0n;
-  maxP += pad;
-  const span = maxP - minP || 1n;
-
-  let maxVol = 1n;
-  for (const c of candles) {
-    if (c.vol > maxVol) maxVol = c.vol;
-  }
-
-  const n = Math.max(candles.length, 1);
-  const slot = plotW / n;
-  const bodyW = Math.max(2, Math.min(14, slot * 0.62));
-
-  const yPrice = (p) => {
-    const yRatio = Number(((p - minP) * 10000n) / span) / 10000;
-    return padT + priceH * (1 - Math.min(1, Math.max(0, yRatio)));
-  };
-
-  // Grid + y ticks
-  const yTicks = [];
-  for (let i = 0; i < 5; i += 1) {
-    const y = padT + (priceH * i) / 4;
-    const priceAt = maxP - ((maxP - minP) * BigInt(i)) / 4n;
-    yTicks.push({ y, label: compactChartPrice(priceAt) });
-  }
-  const grid = yTicks.map((t) =>
-    `<line class="dex-grid" x1="${padL}" x2="${padL + plotW}" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}"></line>`
-    + `<text class="dex-ytick" x="${W - 4}" y="${(t.y + 3).toFixed(1)}" text-anchor="end">${t.label}</text>`,
-  ).join("");
-
-  let candleSvg = "";
-  let volSvg = "";
-  candles.forEach((c, i) => {
-    const cx = padL + slot * i + slot / 2;
-    const bull = c.c >= c.o;
-    const cls = bull ? "up" : "down";
-    const yO = yPrice(c.o);
-    const yC = yPrice(c.c);
-    const yH = yPrice(c.h);
-    const yL = yPrice(c.l);
-    const bodyTop = Math.min(yO, yC);
-    const bodyBot = Math.max(yO, yC);
-    const bodyHeight = Math.max(1.2, bodyBot - bodyTop);
-    // Wick
-    candleSvg +=
-      `<line class="dex-wick ${cls}" x1="${cx.toFixed(2)}" x2="${cx.toFixed(2)}" `
-      + `y1="${yH.toFixed(2)}" y2="${yL.toFixed(2)}"></line>`;
-    // Body
-    candleSvg +=
-      `<rect class="dex-body ${cls}" x="${(cx - bodyW / 2).toFixed(2)}" y="${bodyTop.toFixed(2)}" `
-      + `width="${bodyW.toFixed(2)}" height="${bodyHeight.toFixed(2)}" rx="0.5"></rect>`;
-    // Volume
-    const vH = maxVol > 0n
-      ? Math.max(1, Number((c.vol * 1000n) / maxVol) / 1000) * (volH - 4)
-      : 1;
-    const vy = volTop + volH - vH;
-    volSvg +=
-      `<rect class="dex-vol ${cls}" x="${(cx - bodyW / 2).toFixed(2)}" y="${vy.toFixed(2)}" `
-      + `width="${bodyW.toFixed(2)}" height="${vH.toFixed(2)}"></rect>`;
-  });
-
-  // Volume baseline
-  const volBase =
-    `<line class="dex-grid" x1="${padL}" x2="${padL + plotW}" y1="${(volTop + volH).toFixed(1)}" y2="${(volTop + volH).toFixed(1)}"></line>`
-    + `<text class="dex-ytick" x="${W - 4}" y="${(volTop + 10).toFixed(1)}" text-anchor="end">Vol</text>`;
-
-  // Separator between price & volume
-  const sep =
-    `<line class="dex-sep" x1="${padL}" x2="${padL + plotW}" y1="${priceBottom.toFixed(1)}" y2="${priceBottom.toFixed(1)}"></line>`;
-
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.innerHTML = `
-    ${grid}
-    ${sep}
-    ${volBase}
-    <g class="dex-volumes">${volSvg}</g>
-    <g class="dex-candles">${candleSvg}</g>
-    <g class="dex-cursor" hidden>
-      <line class="dex-cursor-v" x1="0" x2="0" y1="${padT}" y2="${volTop + volH}"></line>
-      <line class="dex-cursor-h" x1="${padL}" x2="${padL + plotW}" y1="0" y2="0"></line>
-    </g>
-    <rect class="dex-scrub" x="${padL}" y="${padT}" width="${plotW}" height="${priceH + gap + volH}"></rect>
-  `;
-
-  // Hover: snap to candle, show OHLC in price
-  const cursor = svg.querySelector(".dex-cursor");
-  const scrub = svg.querySelector(".dex-scrub");
-  const onMove = (clientX) => {
-    if (!cursor || !candles.length) return;
-    const rect = svg.getBoundingClientRect();
-    const scaleX = W / Math.max(rect.width, 1);
-    const xSvg = (clientX - rect.left) * scaleX;
-    let idx = Math.floor((xSvg - padL) / slot);
-    idx = Math.max(0, Math.min(candles.length - 1, idx));
-    const c = candles[idx];
-    const cx = padL + slot * idx + slot / 2;
-    const cy = yPrice(c.c);
-    cursor.hidden = false;
-    const v = cursor.querySelector(".dex-cursor-v");
-    const h = cursor.querySelector(".dex-cursor-h");
-    if (v) {
-      v.setAttribute("x1", cx.toFixed(2));
-      v.setAttribute("x2", cx.toFixed(2));
-    }
-    if (h) {
-      h.setAttribute("y1", cy.toFixed(2));
-      h.setAttribute("y2", cy.toFixed(2));
-    }
-    if (priceEl) {
-      priceEl.textContent = formatSpotPrice(c.c);
-    }
-    if (changeVal || changeEl) {
-      const o = c.o;
-      const bull = c.c >= c.o;
-      let tip = `O ${compactChartPrice(c.o)}  H ${compactChartPrice(c.h)}  L ${compactChartPrice(c.l)}  C ${compactChartPrice(c.c)}`;
-      if (o > 0n && c.c !== o) {
-        const d = bull ? c.c - o : o - c.c;
-        const bps = (d * 10000n) / o;
-        tip = `${bull ? "+" : "−"}${(Number(bps) / 100).toFixed(2)}% · ${tip}`;
-      }
-      if (changeVal) changeVal.textContent = tip;
-    }
-  };
-  if (scrub) {
-    scrub.onpointermove = (e) => onMove(e.clientX);
-    scrub.onpointerleave = () => {
-      if (cursor) cursor.hidden = true;
-      if (priceEl) priceEl.textContent = formatSpotPrice(last);
-      if (changeVal) changeVal.textContent = pctText;
-      else if (changeEl) changeEl.textContent = pctText;
-    };
   }
 }
 
@@ -1439,7 +1143,10 @@ function bindChartRangePills() {
         b.classList.toggle("is-active", on);
         b.setAttribute("aria-selected", on ? "true" : "false");
       });
-      if (activeTrade) renderTokenChart(activeTrade);
+      if (activeTrade) {
+        setLiveChartTimeframe(chartWindow, activeTrade);
+        renderTokenChart(activeTrade);
+      }
     });
   });
 }
@@ -4178,6 +3885,8 @@ async function openTrade(index, side) {
   document.querySelector("[data-trade-quote]").textContent = "—";
   lastTapeSignature = "";
   bindChartRangePills();
+  // Fresh Lightweight Charts host per market open (avoids stale series).
+  destroyLiveChart();
   renderTokenChart(activeTrade);
   renderTradeTape(activeTrade);
   startTradeLiveFeed();
@@ -4186,6 +3895,7 @@ async function openTrade(index, side) {
 
 function closeTrade() {
   stopTradeLiveFeed();
+  destroyLiveChart();
   tradeModal.hidden = true;
   document.body.classList.remove("modal-open");
 }
@@ -4396,6 +4106,14 @@ async function executeCurveTrade(amount, status) {
         : " Market graduated.";
     }
     activeTrade = updated || readMarkets().find((m) => m.mintAddress === market.mintAddress);
+    try {
+      pushLiveTradePoint({
+        t: Date.now(),
+        price: activeTrade?.lastPrice || curveSpotPriceThruPerToken(activeTrade),
+        thru: amount,
+        side: "buy",
+      });
+    } catch { /* ignore */ }
     renderTokenChart(activeTrade);
     renderTradeTape(activeTrade);
     renderMarkets();
@@ -4439,6 +4157,14 @@ async function executeCurveTrade(amount, status) {
   status.textContent =
     `Sold for ${formatUnits(quote.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
     `(fee ${formatUnits(quote.fee, NATIVE_THRU_DECIMALS, 9)} THRU).`;
+  try {
+    pushLiveTradePoint({
+      t: Date.now(),
+      price: activeTrade?.lastPrice || curveSpotPriceThruPerToken(activeTrade),
+      thru: quote.netThru,
+      side: "sell",
+    });
+  } catch { /* ignore */ }
   renderTokenChart(activeTrade);
   renderTradeTape(activeTrade);
   renderMarkets();

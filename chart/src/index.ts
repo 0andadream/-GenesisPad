@@ -21,12 +21,13 @@ export type { ChartProps } from "./Chart";
 export { useChart } from "./useChart";
 export type { OhlcTooltip, UseChartResult } from "./useChart";
 
-export { useWebSocket, TradeWebSocket } from "./useWebSocket";
+export { useWebSocket } from "./useWebSocket";
 export type {
   TradeMessageParser,
   UseWebSocketOptions,
   WsStatus,
 } from "./useWebSocket";
+export { TradeWebSocket } from "./tradeSocket";
 
 export {
   CandleBuilder,

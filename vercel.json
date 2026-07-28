@@ -1,6 +1,6 @@
 {
   "framework": null,
-  "installCommand": "corepack enable && corepack prepare pnpm@9.15.0 --activate && pnpm install --no-frozen-lockfile",
+  "installCommand": "corepack enable && corepack prepare pnpm@9.15.0 --activate && pnpm install --no-frozen-lockfile && cd chart && npm install --omit=dev --no-audit --no-fund",
   "buildCommand": "pnpm run build",
   "outputDirectory": "dist",
   "regions": ["iad1"],

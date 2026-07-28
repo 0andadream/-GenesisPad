@@ -231,22 +231,25 @@
                   <p class="dex-chart-price" data-chart-price>—</p>
                   <p class="dex-chart-change" data-chart-change>
                     <span data-chart-change-value>0.00%</span>
-                    <span class="dex-chart-interval-label" data-chart-range-label>5M</span>
+                    <span class="dex-chart-interval-label" data-chart-range-label>5m</span>
                   </p>
                 </div>
                 <div class="dex-chart-intervals" role="tablist" aria-label="Candle interval" data-chart-ranges>
+                  <button type="button" role="tab" class="dex-interval" data-chart-window="1s" aria-selected="false">1s</button>
+                  <button type="button" role="tab" class="dex-interval" data-chart-window="5s" aria-selected="false">5s</button>
+                  <button type="button" role="tab" class="dex-interval" data-chart-window="15s" aria-selected="false">15s</button>
                   <button type="button" role="tab" class="dex-interval" data-chart-window="1m" aria-selected="false">1m</button>
                   <button type="button" role="tab" class="dex-interval is-active" data-chart-window="5m" aria-selected="true">5m</button>
                   <button type="button" role="tab" class="dex-interval" data-chart-window="15m" aria-selected="false">15m</button>
                   <button type="button" role="tab" class="dex-interval" data-chart-window="1h" aria-selected="false">1H</button>
-                  <button type="button" role="tab" class="dex-interval" data-chart-window="all" aria-selected="false">ALL</button>
+                  <button type="button" role="tab" class="dex-interval" data-chart-window="4h" aria-selected="false">4H</button>
                 </div>
               </div>
               <div class="dex-chart-stage">
-                <svg class="dex-chart-svg" data-chart-svg viewBox="0 0 720 360" preserveAspectRatio="none" aria-label="Candlestick price chart"></svg>
+                <div class="dex-live-host" data-live-chart aria-label="Live candlestick chart"></div>
               </div>
               <div class="token-chart-axis">
-                <span data-chart-range>OHLC · THRU per token</span>
+                <span data-chart-range>OHLC · THRU per token · live</span>
                 <span data-chart-trades>No trades yet</span>
               </div>
               <div class="token-stats" data-token-stats>

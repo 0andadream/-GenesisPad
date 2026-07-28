@@ -1,11 +1,25 @@
 import { cp, mkdir, rm, writeFile, access } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { build } from "esbuild";
 
 const output = new URL("../dist/", import.meta.url);
 const root = new URL("../", import.meta.url);
 const rootDir = fileURLToPath(root);
 const outDir = fileURLToPath(output);
+
+/** Prefer chart/ package install; fall back to root node_modules. */
+function resolveLightweightCharts() {
+  const candidates = [
+    path.join(rootDir, "chart/node_modules/lightweight-charts"),
+    path.join(rootDir, "node_modules/lightweight-charts"),
+  ];
+  for (const c of candidates) {
+    if (existsSync(path.join(c, "package.json"))) return c;
+  }
+  return "lightweight-charts";
+}
 
 async function exists(url) {
   try {
@@ -44,6 +58,12 @@ await build({
   target: "es2020",
   minify: true,
   logLevel: "info",
+  // Resolve the chart package TypeScript sources + lightweight-charts.
+  loader: { ".ts": "ts", ".tsx": "tsx", ".css": "empty" },
+  // app/live-chart.js imports ../chart/src/*.ts (imperative API, no React).
+  alias: {
+    "lightweight-charts": resolveLightweightCharts(),
+  },
 });
 
 // Public static assets (logo, favicon, stats.json, markets-board.json, …)
