@@ -82,7 +82,9 @@ function mergeChartPoints(a, b) {
   const map = new Map();
   for (const p of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
     if (!p) continue;
-    const key = `${Number(p.t) || 0}|${p.side || ""}|${p.price || ""}|${p.thru || ""}|${p.tokens || ""}`;
+    const key = p.id
+      ? `id:${p.id}`
+      : `${Number(p.t) || 0}|${p.side || ""}|${p.price || ""}|${p.thru || ""}|${p.tokens || ""}`;
     if (!map.has(key)) map.set(key, p);
   }
   return [...map.values()]
@@ -90,26 +92,38 @@ function mergeChartPoints(a, b) {
     .slice(-120);
 }
 
+function countTrades(market) {
+  const chart = Array.isArray(market?.chart) ? market.chart : [];
+  let n = 0;
+  for (const p of chart) {
+    if (p && (p.side === "buy" || p.side === "sell")) n += 1;
+  }
+  return n;
+}
+
 /**
- * Prefer the more-traded curve snapshot as a coherent set (virtualThru +
- * virtualToken must stay paired). Never drop privateKeyHex / tokenAccount.
+ * Prefer a coherent curve snapshot. realThru alone is wrong for sells
+ * (vault shrinks) — that re-applied the pre-sell curve for other clients.
+ * Order: more trade prints → newer updatedAt → deeper vault as last resort.
  */
-function mergeCurveRecords(a, b) {
+function mergeCurveRecords(a, b, preferA = null) {
   if (!a) return b || null;
   if (!b) return a;
-  let realThruA = 0n;
-  let realThruB = 0n;
-  let virtThruA = 0n;
-  let virtThruB = 0n;
-  try { realThruA = BigInt(a.realThru || "0"); } catch { /* ignore */ }
-  try { realThruB = BigInt(b.realThru || "0"); } catch { /* ignore */ }
-  try { virtThruA = BigInt(a.virtualThru || "0"); } catch { /* ignore */ }
-  try { virtThruB = BigInt(b.virtualThru || "0"); } catch { /* ignore */ }
-  // Most advanced state = deepest vault, then highest virtual THRU (more buys).
-  const preferA = realThruA > realThruB
-    || (realThruA === realThruB && virtThruA >= virtThruB);
-  const advanced = preferA ? a : b;
-  const base = preferA ? b : a;
+  let pickA = preferA;
+  if (pickA == null) {
+    let realThruA = 0n;
+    let realThruB = 0n;
+    let virtThruA = 0n;
+    let virtThruB = 0n;
+    try { realThruA = BigInt(a.realThru || "0"); } catch { /* ignore */ }
+    try { realThruB = BigInt(b.realThru || "0"); } catch { /* ignore */ }
+    try { virtThruA = BigInt(a.virtualThru || "0"); } catch { /* ignore */ }
+    try { virtThruB = BigInt(b.virtualThru || "0"); } catch { /* ignore */ }
+    pickA = realThruA > realThruB
+      || (realThruA === realThruB && virtThruA >= virtThruB);
+  }
+  const advanced = pickA ? a : b;
+  const base = pickA ? b : a;
   return {
     ...base,
     ...advanced,
@@ -133,7 +147,12 @@ function mergeCurveRecords(a, b) {
 function mergeTwoMarkets(prev, next) {
   if (!prev) return next;
   if (!next) return prev;
-  const newer = score(next) >= score(prev) ? next : prev;
+  const ta = score(prev);
+  const tb = score(next);
+  const tradesA = countTrades(prev);
+  const tradesB = countTrades(next);
+  const preferACurve = tradesA !== tradesB ? tradesA > tradesB : ta >= tb;
+  const newer = tb >= ta ? next : prev;
   const older = newer === next ? prev : next;
   const chart = mergeChartPoints(prev.chart, next.chart);
   let lastPrice = newer.lastPrice || older.lastPrice;
@@ -143,17 +162,36 @@ function mergeTwoMarkets(prev, next) {
   else if (chart.length && chart[chart.length - 1]?.price) {
     lastPrice = String(chart[chart.length - 1].price);
   }
+  let buys = 0;
+  let sells = 0;
+  let buyThru = 0n;
+  let sellThru = 0n;
+  for (const p of chart) {
+    if (p.side === "buy") {
+      buys += 1;
+      try { buyThru += BigInt(p.thru || "0"); } catch { /* ignore */ }
+    } else if (p.side === "sell") {
+      sells += 1;
+      try { sellThru += BigInt(p.thru || "0"); } catch { /* ignore */ }
+    }
+  }
   return {
     ...older,
     ...newer,
     createdAt: older.createdAt || newer.createdAt,
-    updatedAt: Math.max(score(prev), score(next)),
+    updatedAt: Math.max(ta, tb),
     image: newer.image || older.image || "",
-    curve: mergeCurveRecords(prev.curve, next.curve),
+    curve: mergeCurveRecords(prev.curve, next.curve, preferACurve),
     graduated: Boolean(prev.graduated || next.graduated),
     liquidity: prev.liquidity || next.liquidity || false,
     chart,
     lastPrice,
+    stats: {
+      buys,
+      sells,
+      buyThru: buyThru.toString(),
+      sellThru: sellThru.toString(),
+    },
   };
 }
 
