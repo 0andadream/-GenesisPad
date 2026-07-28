@@ -22,6 +22,8 @@ let marketAge = "all";
 let marketQuery = "";
 let registryLiveAt = 0;
 let registrySyncing = false;
+/** Wrap page: "wrap" | "unwrap" — hoisted so balance refresh always sees it. */
+let wrapSide = "wrap";
 
 document.querySelectorAll("[role='tablist'] button").forEach((button) => {
   button.addEventListener("click", () => {
@@ -328,12 +330,13 @@ async function refreshWalletTokenHoldings() {
 }
 
 async function refreshWrapAvailable() {
-  const availableEls = document.querySelectorAll("[data-wrap-available]");
-  const labelEls = document.querySelectorAll("[data-wrap-balance-label]");
+  const availableEls = [...document.querySelectorAll("[data-wrap-available]")];
+  const labelEls = [...document.querySelectorAll("[data-wrap-balance-label]")];
   if (!availableEls.length) return;
 
+  const side = wrapSide === "unwrap" ? "unwrap" : "wrap";
   labelEls.forEach((el) => {
-    el.textContent = wrapSide === "wrap" ? "Your THRU balance" : "Your wTHRU balance";
+    el.textContent = side === "wrap" ? "Your THRU balance" : "Your wTHRU balance";
   });
 
   if (!connectedAccount) {
@@ -341,24 +344,33 @@ async function refreshWrapAvailable() {
     return;
   }
 
+  availableEls.forEach((el) => { el.textContent = "Loading…"; });
   try {
-    if (wrapSide === "wrap") {
+    if (side === "wrap") {
       const snapshot = await getAccountSnapshot();
-      // Show full native balance (Max still reserves fee dust).
-      const label = `${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
+      const raw = snapshot?.balance ?? 0n;
+      const label = `${formatUnits(raw, NATIVE_THRU_DECIMALS, 9)} THRU`;
       availableEls.forEach((el) => { el.textContent = label; });
     } else {
       const amount = await readWthruBalance();
-      const label = `${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU`;
+      const label = `${formatUnits(amount ?? 0n, NATIVE_THRU_DECIMALS, 9)} wTHRU`;
       availableEls.forEach((el) => { el.textContent = label; });
     }
-  } catch {
-    availableEls.forEach((el) => { el.textContent = "Unavailable"; });
+  } catch (reason) {
+    const message = reason instanceof Error ? reason.message : "Unavailable";
+    availableEls.forEach((el) => {
+      el.textContent = message.includes("Connect") ? "Connect wallet" : "Unavailable";
+    });
   }
 }
 
 async function refreshBalance() {
-  if (!connectedAccount) return;
+  // Always refresh wrap page available line (even when disconnected).
+  const wrapRefresh = refreshWrapAvailable().catch(() => { /* ignore */ });
+  if (!connectedAccount) {
+    await wrapRefresh;
+    return;
+  }
   const balance = document.querySelector("[data-balance]");
   const wthruBalance = document.querySelector("[data-wthru-balance]");
   try {
@@ -376,8 +388,7 @@ async function refreshBalance() {
   } catch {
     if (wthruBalance) wthruBalance.textContent = "Unavailable";
   }
-  // Wrap page shows the active-side available balance next to Max.
-  refreshWrapAvailable().catch(() => { /* ignore */ });
+  await wrapRefresh;
   // Token holdings (async; don't block THRU/wTHRU display).
   refreshWalletTokenHoldings().catch(() => { /* ignore */ });
 }
@@ -2147,8 +2158,10 @@ function showAppPage(page) {
   document.querySelectorAll("[data-app-nav] [data-nav]").forEach((link) => {
     link.classList.toggle("active", link.dataset.nav === target);
   });
-  if (target === "wrap" && connectedAccount) {
+  if (target === "wrap") {
+    // Always load the wrap available balance when opening this page.
     refreshBalance().catch(() => { /* ignore */ });
+    refreshWrapAvailable().catch(() => { /* ignore */ });
   }
 }
 
@@ -2213,8 +2226,6 @@ async function claimFaucet() {
     button.disabled = false;
   }
 }
-
-let wrapSide = "wrap";
 
 function wrapPanels() {
   return [...document.querySelectorAll("[data-wrap-panel]")];
