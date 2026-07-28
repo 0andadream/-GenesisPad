@@ -2,9 +2,9 @@
 
 ![Genesis Ionic column mark](public/genesis-logo.png)
 
-Genesis is a self-custodial token launchpad and hybrid exchange interface built
-for the Thru Alphanet. It combines token issuance, wrapped-THRU liquidity pools,
-and AMM trading in a restrained classical interface.
+Genesis is a self-custodial **bonding-curve token launchpad** on Thru Alphanet.
+Anyone can launch a market, buy and sell on the public curve, and wrap or unwrap
+THRU — all from a restrained classical interface.
 
 **Live app:** [genesispad.vercel.app](https://genesispad.vercel.app/)
 
@@ -12,33 +12,41 @@ and AMM trading in a restrained classical interface.
 
 - Creates or imports a local Thru wallet from a 32-byte Ed25519 private key
 - Claims test THRU from the Alphanet faucet
-- Sends and receives native THRU
+- Sends and receives native THRU (and held tokens)
 - Deploys fungible token mints through the Thru token program
-- Optionally mints an initial token supply
-- Optionally seeds a wrapped-THRU AMM pool at launch
-- Provides Buy and Sell controls for markets with live liquidity
+- Launches **public bonding-curve markets** (80% of supply on the curve)
+- Buys and sells against the curve with a transparent **1%** trade fee
+- Marks graduation when the vault hits its THRU target (trading stays open on the curve)
+- **Wraps native THRU → wTHRU** and **unwraps wTHRU → THRU** at 1:1 base units
+- Lists markets on a shared public registry so every visitor sees the same board
 - Links accounts to the Thru explorer
 
-Private keys remain in browser memory for the current tab. Genesis does not
-upload or persist them.
+Private keys remain in browser memory for the current tab (with optional session
+restore in the same tab). Genesis does not upload private keys to a server.
 
 ## Launch economics
 
-The current launch configuration uses:
-
 | Setting | Value |
 | --- | ---: |
-| Opening price | 1 THRU = 500 launched tokens |
-| Creator/LP swap fee | 0.21% |
-| Genesis protocol fee | 0.09% |
-| Total trading fee | 0.30% |
+| Supply on curve | 80% of minted supply |
+| Curve trade fee | 1% |
+| Graduation target (Alphanet) | 0.002 THRU raised into the vault |
+| Quote asset for curve trades | Native THRU |
 
-The 0.21% AMM fee accrues to liquidity providers. At launch, the creator holds
-the initial LP position. The 0.09% protocol share routes to the configured
-Genesis treasury.
+Graduation is accounting progress on the curve. Buy and sell remain available on
+the public bonding curve after graduation. AMM pool seeding is not the primary
+path in the current product.
 
-Liquidity is optional. A creator can deploy a mint without creating a trading
-pool and add liquidity later.
+## Wrap & unwrap
+
+| Action | Result |
+| --- | --- |
+| **Wrap** | Lock native THRU → mint wTHRU 1:1 |
+| **Unwrap** | Burn wTHRU → receive native THRU 1:1 |
+
+Use **wrap** when a program expects wTHRU. Use **unwrap** (or keep native THRU)
+for faucet claims, network fees, and bonding-curve buys. Leave a little native
+THRU for fees when wrapping.
 
 ## Network
 
@@ -47,7 +55,7 @@ Genesis currently targets **Thru Alphanet**:
 - RPC: `https://rpc.alphanet.thru.org`
 - Token program: `taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKqq`
 - Wrapped-THRU program: `taAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcH`
-- AMM program: provided by `@thru/programs`
+- Explorer: [scan.thru.org](https://scan.thru.org)
 
 Alphanet THRU and launched tokens are test assets without monetary value.
 
@@ -55,24 +63,23 @@ Alphanet THRU and launched tokens are test assets without monetary value.
 
 - Static HTML and CSS
 - Browser JavaScript bundled with esbuild
-- `@thru/sdk`
-- `@thru/programs`
-- GSAP and Three.js for landing-page motion
+- `@thru/sdk` / `@thru/programs` / `@thru/wallet`
+- Shared public market board via `/api/markets` (+ optional durable mirrors)
 - pnpm lockfile for reproducible installs
 
-The project intentionally does not use Next.js.
+The project intentionally does not use Next.js for the live launchpad.
 
 ## Local development
 
 Requirements:
 
-- Node.js 22
-- pnpm 10 or newer
+- Node.js 20+
+- pnpm 9+
 
 Install and build:
 
 ```bash
-pnpm install --frozen-lockfile
+pnpm install
 pnpm build
 ```
 
@@ -87,28 +94,33 @@ pnpm dlx serve dist
 
 ```text
 .
-├── index.html          # Genesis landing page
-├── app.js              # Landing-page motion and statistics
+├── index.html            # Marketing homepage
+├── app.js                # Homepage stats, theme, protocol lanes
 ├── app/
-│   ├── index.html      # Launchpad application
-│   ├── app.js          # Wallet, faucet, mint, pool, and trade flows
-│   └── *.css           # Application and wallet styling
-├── public/             # Logo, sculpture, favicon, and public data
-├── scripts/build.mjs   # Static production build
-└── vercel.json         # Vercel build configuration
+│   ├── index.html        # Launchpad app (Explore, Wrap, Activity)
+│   ├── app.js            # Wallet, curve, wrap, registry, trades
+│   └── *.css             # App + wallet styling
+├── api/
+│   └── markets.js        # Public market registry (server merge)
+├── public/               # Logo, favicon, bootstrap board, stats
+├── scripts/
+│   ├── build.mjs         # Static production build
+│   └── cleanup-test-markets.mjs
+└── vercel.json           # Vercel build + API
 ```
 
-## Current data model
+## Data model
 
-Wallet keys are session-only. The local market registry is stored in browser
-`localStorage`, while token mints, balances, transfers, liquidity pools, and
-trades are submitted to Thru Alphanet.
+| Data | Where it lives |
+| --- | --- |
+| Wallet keys | Browser session / tab memory |
+| Local market cache | `localStorage` (`genesis-markets-v3`) |
+| Public market board | `/api/markets` (+ durable mirrors / gist) |
+| Mints, balances, curve fills, wrap/unwrap | Thru Alphanet |
 
-For a production mainnet release, the registry should be backed by a shared
-indexer so markets and statistics remain consistent across browsers.
+On-chain history is permanent. The public board only indexes markets for the UI.
 
 ## Security
 
-This is Alphanet software. Review and audit all transaction-building,
-fee-routing, wallet, and AMM code before using it with assets that have value.
-Never share a private key or wallet backup.
+This is Alphanet software. Review wallet handling, fee routing, and curve trade
+paths before using mainnet assets. Never share a private key or wallet backup.

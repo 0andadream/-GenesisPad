@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Genesis — public bonding-curve launchpad on Thru Alphanet. Launch, trade, and graduate markets on-chain." />
+    <meta name="description" content="Genesis — public bonding-curve launchpad on Thru Alphanet. Launch tokens, trade the curve, wrap THRU ↔ wTHRU." />
     <meta name="theme-color" content="#eeeeec" />
     <script>
       (function () {
@@ -23,7 +23,7 @@
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Genesis" />
     <meta property="og:title" content="Genesis — Launchpad on Thru" />
-    <meta property="og:description" content="Public bonding-curve markets on Thru Alphanet. Anyone can launch. Anyone can trade." />
+    <meta property="og:description" content="Public bonding-curve markets on Thru Alphanet. Launch, trade, wrap THRU. Anyone can participate." />
     <meta property="og:image" content="https://genesispad.vercel.app/og.png" />
     <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
@@ -31,7 +31,7 @@
     <meta property="og:url" content="https://genesispad.vercel.app/" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Genesis — Launchpad on Thru" />
-    <meta name="twitter:description" content="Public bonding-curve markets on Thru Alphanet. Anyone can launch. Anyone can trade." />
+    <meta name="twitter:description" content="Public bonding-curve markets on Thru Alphanet. Launch, trade, wrap THRU. Anyone can participate." />
     <meta name="twitter:image" content="https://genesispad.vercel.app/og.png" />
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/logo.css" />
@@ -56,13 +56,13 @@
     <main>
       <section class="hero panel" id="home" data-scene="0">
         <div class="hero-copy">
-          <p class="kicker">Public launchpad on Thru Alphanet</p>
+          <p class="kicker">Public bonding-curve launchpad on Thru Alphanet</p>
           <h1>Markets,<br />made <em>public.</em></h1>
-          <p class="lede">Bonding curves for discovery, graduation into AMM depth, and self-custodial settlement on ThruVM. Anyone can launch. Anyone can trade.</p>
+          <p class="lede">Launch tokens on a public bonding curve, buy and sell with THRU, and wrap or unwrap THRU when you need wTHRU. Self-custodial settlement on ThruVM. Anyone can launch. Anyone can trade.</p>
           <div class="hero-actions"><a class="solid-button" href="/app/">Enter Genesis</a><a class="line-link" href="#protocol">Read the protocol</a></div>
         </div>
         <div class="scroll-note"><span></span>Scroll to fracture</div>
-        <p class="scene-caption">Marble study № 01<br />Liquidity in equilibrium</p>
+        <p class="scene-caption">Marble study № 01<br />Curve in equilibrium</p>
       </section>
 
       <section class="manifest panel" id="protocol" data-scene="1" data-manifest>
@@ -78,15 +78,15 @@
         <div class="manifest-copy" data-manifest-reveal>
           <p class="kicker">How it works</p>
           <h2>Every market finds<br />its <em>true form.</em></h2>
-          <p>Tokens open on a public bonding curve priced in THRU. Buyers and sellers trade against virtual reserves until graduation — then liquidity can seed a constant-product AMM. Settlement is ThruVM. Custody stays with you.</p>
+          <p>Tokens open on a public bonding curve priced in THRU. Buyers and sellers trade against virtual reserves with a transparent curve fee. Graduation marks progress; trading stays open on the curve. Wrap native THRU to wTHRU (and back) when you need the wrapped asset. Settlement is ThruVM. Custody stays with you.</p>
           <div class="protocol-lanes" data-protocol-lanes>
-            <button type="button" class="is-active" data-lane="0"><b>A</b><span>Curve</span></button>
+            <button type="button" class="is-active" data-lane="0"><b>A</b><span>Launch</span></button>
             <button type="button" data-lane="1"><b>B</b><span>Trade</span></button>
             <button type="button" data-lane="2"><b>C</b><span>Graduate</span></button>
-            <button type="button" data-lane="3"><b>D</b><span>Settle</span></button>
+            <button type="button" data-lane="3"><b>D</b><span>Wrap</span></button>
           </div>
           <p class="protocol-lane-copy" data-protocol-lane-copy>
-            Discovery starts on a public bonding curve — price rises with demand, no pool required to launch.
+            Mint supply, seed 80% on a public bonding curve, and list the market so anyone can trade.
           </p>
         </div>
         <div class="protocol-stats" data-protocol-stats data-manifest-reveal>
@@ -107,13 +107,13 @@
         <div class="section-index">III — THE ENGINE</div>
         <div class="engine-layout">
           <div>
-            <p class="kicker">From curve to pool</p>
+            <p class="kicker">Curve-first by design</p>
             <h2>Discovery is<br />a <em>principle.</em></h2>
           </div>
           <div class="steps">
             <article><span>01</span><h3>Launch</h3><p>Mint supply, seed 80% on a bonding curve, and list the market on the public registry.</p></article>
             <article><span>02</span><h3>Trade the curve</h3><p>Buys and sells price against virtual THRU/token reserves with a transparent 1% curve fee.</p></article>
-            <article><span>03</span><h3>Graduate</h3><p>Hit the THRU target and open (or seed) AMM depth — still settled on Thru, still self-custodial.</p></article>
+            <article><span>03</span><h3>Wrap &amp; unwrap</h3><p>Convert native THRU ↔ wTHRU 1:1 for programs that expect wrapped THRU. Curve buys and fees use native THRU.</p></article>
           </div>
         </div>
       </section>
@@ -123,7 +123,7 @@
         <h2>Built like an institution.<br /><em>Owned by no institution.</em></h2>
         <div class="principle-grid">
           <article><h3>Lightning fast</h3><p>Responsiveness measured in intent, not waiting.</p></article>
-          <article><h3>Capital efficient</h3><p>Every unit of liquidity works across two engines.</p></article>
+          <article><h3>Curve-native</h3><p>Price discovery lives on the bonding curve from the first trade.</p></article>
           <article><h3>Self-custodial</h3><p>Your keys remain the final authority over your assets.</p></article>
           <article><h3>On-chain truth</h3><p>Every execution resolves into a permanent public record.</p></article>
         </div>
@@ -136,7 +136,7 @@
       </section>
     </main>
 
-    <footer><a class="brand" href="#home"><img src="/genesis-logo.png" alt="" /><strong>GENESIS</strong></a><p>Bonding curves + AMM. Built on ThruVM.</p><p>© 2026 Genesis</p></footer>
+    <footer><a class="brand" href="#home"><img src="/genesis-logo.png" alt="" /><strong>GENESIS</strong></a><p>Bonding curves · Wrap THRU. Built on ThruVM.</p><p>© 2026 Genesis</p></footer>
     <script src="/app.js"></script>
     <!-- Vercel Web Analytics (visitor stats in the project dashboard) -->
     <script>

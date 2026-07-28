@@ -470,10 +470,10 @@ setInterval(refreshStats, 6000);
 
 /** Protocol section — GTE-style black field + lane copy. */
 const PROTOCOL_LANES = [
-  "Discovery starts on a public bonding curve — price rises with demand, no pool required to launch.",
-  "Anyone can buy or sell against the curve with THRU. Fees stay transparent; custody stays in your wallet.",
-  "Hit the vault target and the market graduates — depth can seed without trapping curve liquidity.",
-  "Settlement is ThruVM. Every fill resolves into an on-chain public record you can verify.",
+  "Mint supply, seed 80% on a public bonding curve, and list the market so anyone can trade.",
+  "Anyone can buy or sell against the curve with THRU. A transparent 1% curve fee; custody stays in your wallet.",
+  "Hit the vault target and the market graduates. Buy and sell stay open on the public curve.",
+  "Wrap native THRU to wTHRU (and unwrap back) 1:1 when a program expects wrapped THRU. Curve trades use native THRU.",
 ];
 
 const manifestSection = document.querySelector("[data-manifest]");
