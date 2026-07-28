@@ -327,31 +327,57 @@ async function refreshWalletTokenHoldings() {
   `).join("");
 }
 
+async function refreshWrapAvailable() {
+  const availableEls = document.querySelectorAll("[data-wrap-available]");
+  const labelEls = document.querySelectorAll("[data-wrap-balance-label]");
+  if (!availableEls.length) return;
+
+  labelEls.forEach((el) => {
+    el.textContent = wrapSide === "wrap" ? "Your THRU balance" : "Your wTHRU balance";
+  });
+
+  if (!connectedAccount) {
+    availableEls.forEach((el) => { el.textContent = "Connect wallet"; });
+    return;
+  }
+
+  try {
+    if (wrapSide === "wrap") {
+      const snapshot = await getAccountSnapshot();
+      // Show full native balance (Max still reserves fee dust).
+      const label = `${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
+      availableEls.forEach((el) => { el.textContent = label; });
+    } else {
+      const amount = await readWthruBalance();
+      const label = `${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU`;
+      availableEls.forEach((el) => { el.textContent = label; });
+    }
+  } catch {
+    availableEls.forEach((el) => { el.textContent = "Unavailable"; });
+  }
+}
+
 async function refreshBalance() {
   if (!connectedAccount) return;
   const balance = document.querySelector("[data-balance]");
   const wthruBalance = document.querySelector("[data-wthru-balance]");
-  const wrapThruEls = document.querySelectorAll("[data-wrap-thru-balance]");
-  const wrapWthruEls = document.querySelectorAll("[data-wrap-wthru-balance]");
   try {
     const snapshot = await getAccountSnapshot();
     const thruLabel = `${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
     if (balance) balance.textContent = thruLabel;
-    wrapThruEls.forEach((el) => { el.textContent = thruLabel; });
   } catch {
     if (balance) balance.textContent = "Unavailable";
-    wrapThruEls.forEach((el) => { el.textContent = "Unavailable"; });
   }
   try {
     const amount = await readWthruBalance();
     // Base units are 1:1 with native THRU; show the same 9-decimal scale.
     const wthruLabel = `${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU`;
     if (wthruBalance) wthruBalance.textContent = wthruLabel;
-    wrapWthruEls.forEach((el) => { el.textContent = wthruLabel; });
   } catch {
     if (wthruBalance) wthruBalance.textContent = "Unavailable";
-    wrapWthruEls.forEach((el) => { el.textContent = "Unavailable"; });
   }
+  // Wrap page shows the active-side available balance next to Max.
+  refreshWrapAvailable().catch(() => { /* ignore */ });
   // Token holdings (async; don't block THRU/wTHRU display).
   refreshWalletTokenHoldings().catch(() => { /* ignore */ });
 }
@@ -2209,6 +2235,10 @@ function setWrapSide(side) {
   document.querySelectorAll("[data-wrap-submit]").forEach((el) => {
     el.textContent = submitText;
   });
+  document.querySelectorAll("[data-wrap-balance-label]").forEach((el) => {
+    el.textContent = wrapSide === "wrap" ? "Your THRU balance" : "Your wTHRU balance";
+  });
+  refreshWrapAvailable().catch(() => { /* ignore */ });
 }
 
 function setWrapStatuses(message) {
@@ -2412,8 +2442,7 @@ document.querySelector("[data-disconnect]")?.addEventListener("click", () => {
   const wthruBalance = document.querySelector("[data-wthru-balance]");
   if (balance) balance.textContent = "—";
   if (wthruBalance) wthruBalance.textContent = "—";
-  document.querySelectorAll("[data-wrap-thru-balance]").forEach((el) => { el.textContent = "—"; });
-  document.querySelectorAll("[data-wrap-wthru-balance]").forEach((el) => { el.textContent = "—"; });
+  document.querySelectorAll("[data-wrap-available]").forEach((el) => { el.textContent = "Connect wallet"; });
   const tokenHost = document.querySelector("[data-wallet-tokens]");
   if (tokenHost) {
     tokenHost.innerHTML = `<div class="wallet-token-empty">Connect a wallet to see token balances.</div>`;
