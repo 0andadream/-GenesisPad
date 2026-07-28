@@ -252,22 +252,26 @@ async function refreshBalance() {
   if (!connectedAccount) return;
   const balance = document.querySelector("[data-balance]");
   const wthruBalance = document.querySelector("[data-wthru-balance]");
+  const wrapThruEls = document.querySelectorAll("[data-wrap-thru-balance]");
+  const wrapWthruEls = document.querySelectorAll("[data-wrap-wthru-balance]");
   try {
     const snapshot = await getAccountSnapshot();
-    if (balance) {
-      balance.textContent = `${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
-    }
+    const thruLabel = `${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU`;
+    if (balance) balance.textContent = thruLabel;
+    wrapThruEls.forEach((el) => { el.textContent = thruLabel; });
   } catch {
     if (balance) balance.textContent = "Unavailable";
+    wrapThruEls.forEach((el) => { el.textContent = "Unavailable"; });
   }
   try {
     const amount = await readWthruBalance();
     // Base units are 1:1 with native THRU; show the same 9-decimal scale.
-    if (wthruBalance) {
-      wthruBalance.textContent = `${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU`;
-    }
+    const wthruLabel = `${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU`;
+    if (wthruBalance) wthruBalance.textContent = wthruLabel;
+    wrapWthruEls.forEach((el) => { el.textContent = wthruLabel; });
   } catch {
     if (wthruBalance) wthruBalance.textContent = "Unavailable";
+    wrapWthruEls.forEach((el) => { el.textContent = "Unavailable"; });
   }
 }
 
@@ -1989,40 +1993,76 @@ async function claimFaucet() {
 
 let wrapSide = "wrap";
 
+function wrapPanels() {
+  return [...document.querySelectorAll("[data-wrap-panel]")];
+}
+
 function setWrapSide(side) {
   wrapSide = side === "unwrap" ? "unwrap" : "wrap";
   document.querySelectorAll("[data-wrap-side]").forEach((button) => {
     button.classList.toggle("selected", button.dataset.wrapSide === wrapSide);
   });
-  const label = document.querySelector("[data-wrap-amount-label]");
-  const submit = document.querySelector("[data-wrap-submit]");
-  if (label) {
-    label.textContent = wrapSide === "wrap" ? "Amount in THRU" : "Amount in wTHRU";
-  }
-  if (submit) {
-    submit.textContent = wrapSide === "wrap"
-      ? "Wrap THRU → wTHRU"
-      : "Unwrap wTHRU → THRU";
+  const labelText = wrapSide === "wrap" ? "Amount in THRU" : "Amount in wTHRU";
+  const submitText = wrapSide === "wrap"
+    ? "Wrap THRU → wTHRU"
+    : "Unwrap wTHRU → THRU";
+  document.querySelectorAll("[data-wrap-amount-label]").forEach((el) => {
+    el.textContent = labelText;
+  });
+  document.querySelectorAll("[data-wrap-submit]").forEach((el) => {
+    el.textContent = submitText;
+  });
+}
+
+function setWrapStatuses(message) {
+  document.querySelectorAll("[data-wrap-status]").forEach((el) => {
+    el.textContent = message;
+  });
+}
+
+async function fillWrapMax(event) {
+  if (!connectedAccount) return openWallet();
+  const panel = event?.target?.closest("[data-wrap-panel]") || document;
+  const input = panel.querySelector("[data-wrap-amount]");
+  if (!input) return;
+  try {
+    if (wrapSide === "wrap") {
+      const snapshot = await getAccountSnapshot();
+      // Leave fee headroom for native transfer + deposit.
+      const spendable = snapshot.balance > 2n ? snapshot.balance - 2n : 0n;
+      input.value = formatUnits(spendable, NATIVE_THRU_DECIMALS, 9);
+    } else {
+      const amount = await readWthruBalance();
+      input.value = formatUnits(amount, NATIVE_THRU_DECIMALS, 9);
+    }
+  } catch {
+    setWrapStatuses("Could not load balance for Max.");
   }
 }
 
-async function swapThruWthru() {
+async function swapThruWthru(event) {
   if (!connectedAccount) return openWallet();
-  const button = document.querySelector("[data-wrap-submit]");
-  const status = document.querySelector("[data-wrap-status]");
-  const amountText = document.querySelector("[data-wrap-amount]")?.value.trim() || "";
+  const panel = event?.target?.closest("[data-wrap-panel]") || document;
+  const button = panel.querySelector("[data-wrap-submit]") || event?.target;
+  const status = panel.querySelector("[data-wrap-status]");
+  const amountText = panel.querySelector("[data-wrap-amount]")?.value.trim() || "";
+  const setStatus = (message) => {
+    if (status) status.textContent = message;
+    else setWrapStatuses(message);
+  };
   let amount;
   try {
     amount = parseUnits(amountText, NATIVE_THRU_DECIMALS);
     if (amount <= 0n) throw new Error("Enter an amount greater than zero.");
   } catch (reason) {
-    status.textContent = reason instanceof Error ? reason.message : "Enter a valid amount.";
+    setStatus(reason instanceof Error ? reason.message : "Enter a valid amount.");
     return;
   }
 
-  button.disabled = true;
+  if (button) button.disabled = true;
+  document.querySelectorAll("[data-wrap-submit]").forEach((el) => { el.disabled = true; });
   try {
-    await ensureAccountExists((message) => { status.textContent = message; });
+    await ensureAccountExists((message) => { setStatus(message); });
     if (wrapSide === "wrap") {
       const snapshot = await getAccountSnapshot();
       // Reserve 2 base units for wrap transfer fee + deposit fee headroom.
@@ -2032,28 +2072,40 @@ async function swapThruWthru() {
           "(keep a little for fees).",
         );
       }
-      status.textContent = `Wrapping ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU…`;
+      setStatus(`Wrapping ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU…`);
       const destination = await getWthruTokenAccount(true);
       await wrapThru(amount, destination);
-      status.textContent =
+      setStatus(
         `Wrapped ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU → wTHRU. ` +
-        "Native balance drops; wTHRU balance rises.";
+        "Native balance drops; wTHRU balance rises.",
+      );
+      setWrapStatuses(
+        `Wrapped ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU → wTHRU. ` +
+        "Native balance drops; wTHRU balance rises.",
+      );
     } else {
       const source = await getWthruTokenAccount(false);
       if (!(await getAccountSnapshot(source.address)).exists) {
         throw new Error("No wTHRU token account yet. Wrap some THRU first.");
       }
-      status.textContent = `Unwrapping ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU…`;
+      setStatus(`Unwrapping ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU…`);
       await unwrapThru(amount, source);
-      status.textContent =
+      setStatus(
         `Unwrapped ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU → THRU. ` +
-        "Native balance rises; wTHRU balance drops.";
+        "Native balance rises; wTHRU balance drops.",
+      );
+      setWrapStatuses(
+        `Unwrapped ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} wTHRU → THRU. ` +
+        "Native balance rises; wTHRU balance drops.",
+      );
     }
     await refreshBalance();
   } catch (reason) {
-    status.textContent = reason instanceof Error ? reason.message : "Swap failed on Thru.";
+    const message = reason instanceof Error ? reason.message : "Wrap failed on Thru.";
+    setStatus(message);
+    setWrapStatuses(message);
   } finally {
-    button.disabled = false;
+    document.querySelectorAll("[data-wrap-submit]").forEach((el) => { el.disabled = false; });
   }
 }
 
@@ -2145,7 +2197,12 @@ document.querySelector("[data-faucet]")?.addEventListener("click", claimFaucet);
 document.querySelectorAll("[data-wrap-side]").forEach((button) => {
   button.addEventListener("click", () => setWrapSide(button.dataset.wrapSide));
 });
-document.querySelector("[data-wrap-submit]")?.addEventListener("click", swapThruWthru);
+document.querySelectorAll("[data-wrap-submit]").forEach((button) => {
+  button.addEventListener("click", (event) => swapThruWthru(event));
+});
+document.querySelectorAll("[data-wrap-max]").forEach((button) => {
+  button.addEventListener("click", (event) => fillWrapMax(event));
+});
 document.querySelector("[data-send]")?.addEventListener("click", sendThru);
 document.querySelector("[data-disconnect]")?.addEventListener("click", () => {
   if (connectedAccount) connectedAccount.privateKey.fill(0);
@@ -2158,6 +2215,8 @@ document.querySelector("[data-disconnect]")?.addEventListener("click", () => {
   const wthruBalance = document.querySelector("[data-wthru-balance]");
   if (balance) balance.textContent = "—";
   if (wthruBalance) wthruBalance.textContent = "—";
+  document.querySelectorAll("[data-wrap-thru-balance]").forEach((el) => { el.textContent = "—"; });
+  document.querySelectorAll("[data-wrap-wthru-balance]").forEach((el) => { el.textContent = "—"; });
   showWalletView(null);
 });
 document.addEventListener("keydown", (event) => {
