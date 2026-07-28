@@ -233,7 +233,6 @@ function updateHeader(market) {
   const priceEl = document.querySelector("[data-chart-price]");
   const changeEl = document.querySelector("[data-chart-change]");
   const changeVal = document.querySelector("[data-chart-change-value]");
-  const rangeLabel = document.querySelector("[data-chart-range-label]");
   const tradesEl = document.querySelector("[data-chart-trades]");
   const rangeEl = document.querySelector("[data-chart-range]");
 
@@ -265,7 +264,6 @@ function updateHeader(market) {
     changeEl.classList.toggle("is-up", up && spot !== open);
     changeEl.classList.toggle("is-down", !up && spot !== open);
   }
-  if (rangeLabel) rangeLabel.textContent = liveTimeframe === "all" ? "ALL" : liveTimeframe;
   const pts = Array.isArray(market?.chart) ? market.chart : [];
   if (tradesEl) {
     const buys = pts.filter((p) => p?.side === "buy").length;
@@ -364,24 +362,6 @@ export function pushLiveTradePoint(point) {
   if (priceEl) priceEl.textContent = formatSpotLabel(price);
 }
 
-/**
- * @param {string} windowKey
- * @param {any} [market]
- */
-export function setLiveChartTimeframe(windowKey, market) {
-  liveTimeframe = windowKey in TF_MAP ? windowKey : "15s";
-  if (!liveChart) return;
-  // Rebuild from full market prints (not lossy OHLC rebucket)
-  if (market) {
-    liveChart.changeTimeframe(TF_MAP[liveTimeframe] || "15s");
-    syncLiveChart(market, { force: true });
-  } else {
-    liveChart.changeTimeframe(TF_MAP[liveTimeframe] || "15s");
-  }
-  const rangeLabel = document.querySelector("[data-chart-range-label]");
-  if (rangeLabel) rangeLabel.textContent = liveTimeframe === "all" ? "ALL" : liveTimeframe;
-}
-
 export function destroyLiveChart() {
   if (liveChart) {
     try {
@@ -397,8 +377,4 @@ export function destroyLiveChart() {
 
 export function isLiveChartMounted() {
   return Boolean(liveChart);
-}
-
-export function getLiveTimeframe() {
-  return liveTimeframe;
 }

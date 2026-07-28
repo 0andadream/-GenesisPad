@@ -19,10 +19,8 @@ import {
   mountLiveChart,
   syncLiveChart,
   pushLiveTradePoint,
-  setLiveChartTimeframe,
   destroyLiveChart,
   isLiveChartMounted,
-  getLiveTimeframe,
 } from "./live-chart.js";
 
 
@@ -1215,12 +1213,10 @@ function ensureChartSeed(market) {
   }
 }
 
-/** Candle interval for Lightweight Charts host (short default so live trades show). */
-let chartWindow = "15s";
-
 /**
  * Drive the production DexScreener-style Lightweight Charts instance.
  * Chart is mounted once per trade modal open; subsequent calls only sync data.
+ * One candle per trade print (no timeframe bucketing UI).
  */
 function renderTokenChart(market) {
   if (!market) return;
@@ -1234,7 +1230,7 @@ function renderTokenChart(market) {
   } catch { /* ignore */ }
 
   if (!isLiveChartMounted()) {
-    mountLiveChart(m, chartWindow);
+    mountLiveChart(m);
   } else {
     syncLiveChart(m);
   }
@@ -1270,25 +1266,6 @@ function renderTokenChart(market) {
     setStat("[data-stat-vault]", "—");
     setStat("[data-stat-progress]", "—");
   }
-}
-
-function bindChartRangePills() {
-  document.querySelectorAll("[data-chart-window]").forEach((btn) => {
-    if (btn.dataset.bound === "1") return;
-    btn.dataset.bound = "1";
-    btn.addEventListener("click", () => {
-      chartWindow = btn.dataset.chartWindow || "5m";
-      document.querySelectorAll("[data-chart-window]").forEach((b) => {
-        const on = b.dataset.chartWindow === chartWindow;
-        b.classList.toggle("is-active", on);
-        b.setAttribute("aria-selected", on ? "true" : "false");
-      });
-      if (activeTrade) {
-        setLiveChartTimeframe(chartWindow, activeTrade);
-        renderTokenChart(activeTrade);
-      }
-    });
-  });
 }
 
 function quoteCurveBuy(market, thruIn) {
@@ -4209,7 +4186,6 @@ async function openTrade(index, side) {
     try { updateTradeQuote(); } catch { /* ignore */ }
   }
 
-  bindChartRangePills();
   renderTokenChart(activeTrade);
   renderTradeTape(activeTrade);
   startTradeLiveFeed();
@@ -4842,7 +4818,6 @@ async function bootMarkets() {
   setInterval(updateRegistryLiveBadge, 1000);
 }
 
-bindChartRangePills();
 bootMarkets();
 restoreWalletSession();
 syncAppPageFromHash();
