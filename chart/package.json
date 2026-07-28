@@ -1,0 +1,42 @@
+{
+  "name": "@genesispad/dex-chart",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DexScreener-style live OHLCV chart (TradingView Lightweight Charts)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./Chart.css": "./src/Chart.css"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "demo": "vite --config demo/vite.config.ts",
+    "demo:build": "vite build --config demo/vite.config.ts"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "dependencies": {
+    "lightweight-charts": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}

@@ -1,0 +1,301 @@
+.dex-live-chart {
+  --dex-bg: #0d1117;
+  --dex-panel: #0d1117;
+  --dex-text: #e6edf3;
+  --dex-muted: #8b949e;
+  --dex-border: #21262d;
+  --dex-up: #26a69a;
+  --dex-down: #ef5350;
+  --dex-chip: #161b22;
+  --dex-chip-active: #21262d;
+  --dex-accent: #58a6ff;
+
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+  min-height: 420px;
+  background: var(--dex-bg);
+  color: var(--dex-text);
+  border: 1px solid var(--dex-border);
+  border-radius: 10px;
+  overflow: hidden;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.dex-live-chart__stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--dex-border);
+  border-bottom: 1px solid var(--dex-border);
+}
+
+.dex-live-chart__stat {
+  background: var(--dex-chip);
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.dex-live-chart__stat-label {
+  display: block;
+  color: var(--dex-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.dex-live-chart__stat-value {
+  display: block;
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--dex-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dex-live-chart__stat-value.is-up {
+  color: var(--dex-up);
+}
+.dex-live-chart__stat-value.is-down {
+  color: var(--dex-down);
+}
+
+.dex-live-chart__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--dex-border);
+  background: rgba(22, 27, 34, 0.65);
+  flex-wrap: wrap;
+}
+
+.dex-live-chart__price-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dex-live-chart__price {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.dex-live-chart__price.is-up {
+  color: var(--dex-up);
+}
+.dex-live-chart__price.is-down {
+  color: var(--dex-down);
+}
+
+.dex-live-chart__sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dex-muted);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.dex-live-chart__sub .is-up {
+  color: var(--dex-up);
+}
+.dex-live-chart__sub .is-down {
+  color: var(--dex-down);
+}
+
+.dex-live-chart__pin {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--dex-border);
+  color: var(--dex-muted);
+}
+
+.dex-live-chart__pin.is-on {
+  border-color: rgba(88, 166, 255, 0.45);
+  color: var(--dex-accent);
+  background: rgba(88, 166, 255, 0.08);
+}
+
+.dex-live-chart__intervals {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: #010409;
+  border: 1px solid var(--dex-border);
+}
+
+.dex-live-chart__interval {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--dex-muted);
+  font: 650 11px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 8px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.dex-live-chart__interval:hover {
+  color: var(--dex-text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dex-live-chart__interval.is-active {
+  background: var(--dex-chip-active);
+  color: var(--dex-text);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.dex-live-chart__stage {
+  position: relative;
+  flex: 1;
+  min-height: 320px;
+  height: min(52vh, 480px);
+  background: var(--dex-panel);
+}
+
+.dex-live-chart__canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* High-DPI: lightweight-charts handles devicePixelRatio via autoSize */
+
+.dex-live-chart__tooltip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  min-width: 148px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--dex-border);
+  background: rgba(22, 27, 34, 0.94);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--dex-text);
+  transform: translate(12px, 12px);
+}
+
+.dex-live-chart__tooltip-time {
+  color: var(--dex-muted);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.dex-live-chart__tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dex-live-chart__tooltip-row span:first-child {
+  color: var(--dex-muted);
+}
+
+.dex-live-chart__tooltip-row.is-up span:last-child {
+  color: var(--dex-up);
+}
+.dex-live-chart__tooltip-row.is-down span:last-child {
+  color: var(--dex-down);
+}
+
+.dex-live-chart__ws {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--dex-muted);
+}
+
+.dex-live-chart__ws-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6e7681;
+}
+
+.dex-live-chart__ws-dot.is-open {
+  background: var(--dex-up);
+  box-shadow: 0 0 0 3px rgba(38, 166, 154, 0.2);
+  animation: dex-pulse 1.4s ease-out infinite;
+}
+
+.dex-live-chart__ws-dot.is-connecting {
+  background: #d29922;
+}
+
+.dex-live-chart__ws-dot.is-error {
+  background: var(--dex-down);
+}
+
+@keyframes dex-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(38, 166, 154, 0.35);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(38, 166, 154, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(38, 166, 154, 0);
+  }
+}
+
+@media (max-width: 720px) {
+  .dex-live-chart__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dex-live-chart__stage {
+    min-height: 280px;
+    height: 56vh;
+  }
+
+  .dex-live-chart__price {
+    font-size: 1.15rem;
+  }
+
+  .dex-live-chart__interval {
+    padding: 7px 7px;
+    font-size: 10px;
+  }
+}
+
+@media (max-width: 420px) {
+  .dex-live-chart__stats {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .dex-live-chart__toolbar {
+    padding: 8px;
+  }
+}

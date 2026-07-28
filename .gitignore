@@ -41,3 +41,7 @@ next-env.d.ts
 /outputs/
 /work/
 programs/genesis-amm/build/
+
+# chart package
+chart/node_modules/
+chart/dist/
