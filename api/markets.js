@@ -25,6 +25,11 @@ const SEED_MIRROR_IDS = [
 ].filter(Boolean);
 
 const JSONBLOB = "https://jsonblob.com/api/jsonBlob";
+/**
+ * Clean-slate wipe flags used to stick forever on free JSONBlob mirrors and
+ * zero the registry on every cold GET. Only honor wipes this recent.
+ */
+const WIPE_TTL_MS = 30 * 60 * 1000;
 
 /** @type {{ markets: any[], updatedAt: number, wipedAt: number }} */
 let memoryBoard = { markets: [], updatedAt: 0, wipedAt: 0 };
@@ -305,9 +310,9 @@ async function createBlob(payload, attempt = 1) {
 /**
  * Read durable stores.
  *
- * Clean-slate wipe drops deleted tokens, but must NOT erase a just-published
- * market when mirrors still lag on the old wipe payload (that caused tokens
- * to flash on Explore then vanish).
+ * Clean-slate wipe is temporary (WIPE_TTL_MS). Old wipe:true flags on free
+ * JSONBlob mirrors used to stick forever and zero the registry on every cold
+ * serverless GET — that is what "registry keeps resetting to 0" was.
  */
 async function readBoard() {
   const [gist, ...blobs] = await Promise.all([
@@ -322,45 +327,45 @@ async function readBoard() {
 
   const durableOk = durableSources.length > 0;
   const blobSources = blobs.filter((b) => b.ok);
+  const now = Date.now();
 
-  // Newest explicit wipe from blob mirrors only (gist often cannot be cleared).
+  // Newest *fresh* explicit wipe from blob mirrors only.
   let newestWipeAt = 0;
   let wipeVotes = 0;
   for (const s of blobSources) {
     const empty = !s.markets || mergeMarkets(s.markets).length === 0;
-    if (s.wipe && empty) {
+    const wipeAt = parseTime(s.wipedAt || s.updatedAt);
+    const wipeFresh = wipeAt > 0 && now - wipeAt < WIPE_TTL_MS;
+    if (s.wipe && empty && wipeFresh) {
       wipeVotes += 1;
-      newestWipeAt = Math.max(
-        newestWipeAt,
-        parseTime(s.wipedAt || s.updatedAt),
-      );
+      newestWipeAt = Math.max(newestWipeAt, wipeAt);
     }
   }
-  // Need consensus (or sole reachable mirror) so one lagging wipe blob cannot
-  // erase a fresh publish that already landed on other mirrors / memory.
-  const wipeConsensus = wipeVotes > 0 && wipeVotes >= Math.ceil(Math.max(blobSources.length, 1) / 2);
+  // Consensus among reachable blobs; one lagging wipe mirror is not enough
+  // when multiple mirrors respond.
+  const wipeConsensus = wipeVotes > 0
+    && wipeVotes >= Math.ceil(Math.max(blobSources.length, 1) / 2);
   if (!wipeConsensus) newestWipeAt = 0;
 
-  // Non-empty durable markets. Prefer post-wipe sources; also accept any
-  // non-empty blob that is not itself an empty wipe (publish cleared wipe).
-  const postWipeLists = [];
+  // Any non-empty durable board always counts. Markets with wipe:false after
+  // a publish beat expired wipe flags automatically.
+  const marketLists = [];
   for (const s of durableSources) {
     const live = mergeMarkets(s.markets);
     if (!live.length) continue;
     const ts = parseTime(s.updatedAt || s.wipedAt);
-    if (newestWipeAt && ts && ts <= newestWipeAt && s.wipe) continue;
-    // Non-empty board without wipe flag always counts (new publish).
-    if (s.wipe && newestWipeAt && ts <= newestWipeAt) continue;
-    postWipeLists.push(live);
+    // Only skip empty-wipe mirrors that are still inside the wipe TTL.
+    if (newestWipeAt && s.wipe && ts && ts <= newestWipeAt) continue;
+    marketLists.push(live);
   }
 
-  const durableMarkets = mergeMarkets(...postWipeLists);
+  const durableMarkets = mergeMarkets(...marketLists);
   const durableUpdatedAt = Math.max(
     0,
     ...durableSources.map((s) => parseTime(s.updatedAt)),
   );
 
-  // Memory markets newer than wipe (just published on this instance).
+  // Memory markets: keep everything unless a *fresh* wipe is active.
   let memoryMarkets = memoryBoard.markets || [];
   if (newestWipeAt > 0) {
     memoryMarkets = memoryMarkets.filter(
@@ -368,11 +373,11 @@ async function readBoard() {
     );
   }
 
-  // True clean slate: wipe consensus, no durable markets, no fresh memory.
+  // True clean slate only while wipe is fresh AND nothing else has markets.
   if (newestWipeAt > 0 && durableMarkets.length === 0 && memoryMarkets.length === 0) {
     memoryBoard = {
       markets: [],
-      updatedAt: Math.max(newestWipeAt, Date.now()),
+      updatedAt: Math.max(newestWipeAt, now),
       wipedAt: newestWipeAt,
     };
     return {
@@ -388,9 +393,8 @@ async function readBoard() {
   const markets = mergeMarkets(memoryMarkets, durableMarkets);
   memoryBoard = {
     markets,
-    updatedAt: Math.max(memoryBoard.updatedAt || 0, durableUpdatedAt, Date.now()),
-    // Keep wipe watermark only when board is still empty after it.
-    wipedAt: markets.length ? 0 : (newestWipeAt || memoryBoard.wipedAt || 0),
+    updatedAt: Math.max(memoryBoard.updatedAt || 0, durableUpdatedAt, now),
+    wipedAt: 0,
   };
 
   return {
