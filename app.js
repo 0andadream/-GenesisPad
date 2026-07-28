@@ -1,6 +1,11 @@
-/** Same public registry the launchpad app publishes to. */
-const MARKET_REGISTRY_URL =
-  "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70";
+/** Same public registries the launchpad app publishes to. */
+const MARKET_REGISTRY_URLS = [
+  "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70",
+  "https://jsonblob.com/api/jsonBlob/019fa8d5-e68c-74ed-8f39-20591b09abce",
+];
+const MARKET_REGISTRY_URL = MARKET_REGISTRY_URLS[0];
+const MARKETS_KEY = "genesis-markets";
+const REGISTRY_FETCH_TIMEOUT_MS = 2800;
 const NATIVE_THRU_DECIMALS = 9;
 const THEME_KEY = "genesis-theme";
 
@@ -139,31 +144,85 @@ function applyStats(stats) {
   });
 }
 
+function readLocalMarkets() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MARKETS_KEY) || "[]");
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Paint protocol stats immediately from local cache (same origin as /app). */
+function refreshStatsInstant() {
+  const local = readLocalMarkets();
+  if (!local.length) return false;
+  const live = summarizeMarkets(local);
+  applyStats(live);
+  setProtocolLive("live", "Live");
+  window.__genesisProtocolStats = { ...live, at: Date.now(), source: "local-cache" };
+  return true;
+}
+
+async function fetchRegistryFrom(url) {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller
+    ? setTimeout(() => controller.abort(), REGISTRY_FETCH_TIMEOUT_MS)
+    : null;
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: "application/json" },
+      cache: "no-cache",
+      mode: "cors",
+      signal: controller?.signal,
+    });
+    if (!response.ok) throw new Error(`registry ${response.status}`);
+    const data = await response.json();
+    return Array.isArray(data.markets) ? data.markets : Array.isArray(data) ? data : [];
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Race both public mirrors — first success wins for speed. */
 async function fetchRegistryMarkets() {
-  const response = await fetch(MARKET_REGISTRY_URL, {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
+  return new Promise((resolve, reject) => {
+    let pending = MARKET_REGISTRY_URLS.length;
+    let settled = false;
+    let lastError = new Error("registry unreachable");
+
+    MARKET_REGISTRY_URLS.forEach((url) => {
+      fetchRegistryFrom(url)
+        .then((markets) => {
+          if (settled) return;
+          settled = true;
+          resolve(markets);
+        })
+        .catch((reason) => {
+          lastError = reason instanceof Error ? reason : lastError;
+          pending -= 1;
+          if (!settled && pending <= 0) reject(lastError);
+        });
+    });
   });
-  if (!response.ok) throw new Error(`registry ${response.status}`);
-  const data = await response.json();
-  return Array.isArray(data.markets) ? data.markets : Array.isArray(data) ? data : [];
 }
 
 async function fetchStaticStats() {
   const endpoint = window.GENESIS_STATS_ENDPOINT || "/stats.json";
-  const response = await fetch(`${endpoint}?t=${Date.now()}`, { cache: "no-store" });
+  const response = await fetch(endpoint, { cache: "no-cache" });
   if (!response.ok) return null;
   return response.json();
 }
 
 async function refreshStats() {
+  const hadInstant = Boolean(window.__genesisProtocolStats);
+  if (!hadInstant) setProtocolLive("syncing", "Syncing registry…");
+
   try {
-    setProtocolLive("syncing", "Syncing registry…");
     const markets = await fetchRegistryMarkets();
     const live = summarizeMarkets(markets);
     applyStats(live);
-    const ageLabel = "Live";
-    setProtocolLive("live", ageLabel);
+    setProtocolLive("live", "Live");
     window.__genesisProtocolStats = { ...live, at: Date.now(), source: "registry" };
     return;
   } catch {
@@ -173,7 +232,7 @@ async function refreshStats() {
   try {
     const stats = await fetchStaticStats();
     if (!stats) {
-      setProtocolLive("error", "Registry offline");
+      if (!hadInstant) setProtocolLive("error", "Registry offline");
       return;
     }
     applyStats({
@@ -183,9 +242,14 @@ async function refreshStats() {
       trades: stats.trades ?? 0,
       graduated: stats.graduated ?? 0,
     });
-    setProtocolLive("live", "Cached stats");
+    setProtocolLive("live", hadInstant ? "Live" : "Cached stats");
+    window.__genesisProtocolStats = {
+      markets: stats.markets ?? 0,
+      at: Date.now(),
+      source: "static",
+    };
   } catch {
-    setProtocolLive("error", "Registry offline");
+    if (!hadInstant) setProtocolLive("error", "Registry offline");
   }
 }
 
@@ -202,8 +266,10 @@ document.querySelectorAll(".nav-pill a").forEach((link) => {
   });
 });
 
+// Instant local stats, then race the public boards in the background.
+refreshStatsInstant();
 refreshStats();
-setInterval(refreshStats, 8000);
+setInterval(refreshStats, 6000);
 
 const motionStage = document.querySelector("[data-motion-stage]");
 const motionWords = [...document.querySelectorAll("[data-motion-word]")];

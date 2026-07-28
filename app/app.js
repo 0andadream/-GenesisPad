@@ -158,6 +158,11 @@ const MARKET_REGISTRY_URLS = [
 ];
 // Back-compat single URL (home page stats still reference the first board).
 const MARKET_REGISTRY_URL = MARKET_REGISTRY_URLS[0];
+/** Abort slow mirrors so one hung board cannot block the UI. */
+const REGISTRY_FETCH_TIMEOUT_MS = 2800;
+/** First paint poll cadence; backs off when the board is quiet. */
+const REGISTRY_POLL_FAST_MS = 2500;
+const REGISTRY_POLL_SLOW_MS = 10000;
 const TOKEN_IMAGE_MAX_DIM = 256;
 const TOKEN_IMAGE_MAX_CHARS = 80_000;
 let pendingTokenImage = null;
@@ -1546,16 +1551,22 @@ function saveMarkets(markets, { publish = true } = {}) {
 }
 
 /**
- * Fetch one registry URL.
+ * Fetch one registry URL with a hard timeout.
  * @returns {{ ok: boolean, markets: any[], error?: string, url: string }}
  */
-async function fetchPublicMarketsFrom(url) {
+async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_MS } = {}) {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
   try {
-    const response = await fetch(`${url}?t=${Date.now()}`, {
+    const response = await fetch(url, {
       method: "GET",
       headers: { Accept: "application/json" },
-      cache: "no-store",
+      // Prefer revalidation over forced bypass — faster repeat loads.
+      cache: "no-cache",
       mode: "cors",
+      signal: controller?.signal,
     });
     if (!response.ok) {
       return { ok: false, markets: [], error: `HTTP ${response.status}`, url };
@@ -1566,22 +1577,64 @@ async function fetchPublicMarketsFrom(url) {
       : Array.isArray(data) ? data : [];
     return { ok: true, markets, url };
   } catch (reason) {
+    const aborted = reason?.name === "AbortError";
     return {
       ok: false,
       markets: [],
-      error: reason instanceof Error ? reason.message : "network error",
+      error: aborted
+        ? "timeout"
+        : reason instanceof Error ? reason.message : "network error",
       url,
     };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * First successful mirror wins — used for snappy first paint.
+ * Does not wait on a slow second board.
+ */
+async function fetchPublicMarketsFast() {
+  return new Promise((resolve) => {
+    let pending = MARKET_REGISTRY_URLS.length;
+    let settled = false;
+    let lastError = "Public board unreachable";
+
+    MARKET_REGISTRY_URLS.forEach((url) => {
+      fetchPublicMarketsFrom(url).then((result) => {
+        if (settled) return;
+        if (result.ok) {
+          settled = true;
+          const markets = stampMarkets(mergeMarketLists(result.markets));
+          lastPublicBoard = { ok: true, count: markets.length, error: "" };
+          resolve({ ok: true, markets, partial: true, url: result.url });
+          return;
+        }
+        lastError = result.error || lastError;
+        pending -= 1;
+        if (pending <= 0) {
+          settled = true;
+          lastPublicBoard = { ok: false, count: 0, error: lastError };
+          resolve({ ok: false, markets: [], error: lastError });
+        }
+      });
+    });
+  });
 }
 
 /**
  * Read ALL public boards and merge.
  * ok=true only if at least one board responded successfully.
  * CRITICAL: failed fetches must NOT be treated as empty boards.
+ * @param {{ mode?: "fast" | "full" }} [opts]
  */
-async function fetchPublicMarketsDetailed() {
-  const results = await Promise.all(MARKET_REGISTRY_URLS.map((url) => fetchPublicMarketsFrom(url)));
+async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
+  if (mode === "fast") return fetchPublicMarketsFast();
+
+  const results = await Promise.all(
+    MARKET_REGISTRY_URLS.map((url) => fetchPublicMarketsFrom(url)),
+  );
   const okResults = results.filter((r) => r.ok);
   if (!okResults.length) {
     lastPublicBoard = { ok: false, count: 0, error: results[0]?.error || "Public board unreachable" };
@@ -1680,9 +1733,9 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
         }
 
         await publishPublicMarkets(merged);
-        await new Promise((r) => setTimeout(r, 350));
+        await new Promise((r) => setTimeout(r, 120));
 
-        const confirmedResult = await fetchPublicMarketsDetailed();
+        const confirmedResult = await fetchPublicMarketsDetailed({ mode: "fast" });
         if (!confirmedResult.ok) {
           throw new Error("Published, but could not re-read the public board.");
         }
@@ -1721,18 +1774,25 @@ function marketsSignature(markets) {
     .join("|");
 }
 
-async function syncPublicMarkets() {
+/**
+ * Merge remote registry into local storage and refresh open trade UI.
+ * @param {{ mode?: "fast" | "full", publish?: boolean }} [opts]
+ *  - mode "fast": first mirror wins (boot / perceived speed)
+ *  - mode "full": merge every mirror (authoritative poll)
+ *  - publish: when true (default on full), soft-push local extras in background
+ */
+async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = {}) {
   if (registrySyncing) return readMarkets();
   registrySyncing = true;
   try {
     const local = readMarkets();
-    const remoteResult = await fetchPublicMarketsDetailed();
+    const remoteResult = await fetchPublicMarketsDetailed({ mode });
 
     // If the public board is unreachable, keep local and DO NOT publish
     // (publishing after a failed fetch was wiping everyone's board).
     if (!remoteResult.ok) {
-      registryLiveAt = Date.now();
-      // Keep last known public status optimistic if we already have markets listed.
+      // Keep live clock ticking when we already have a local board to show.
+      if (local.length) registryLiveAt = Date.now();
       if (!local.length) {
         lastPublicBoard = {
           ok: false,
@@ -1752,13 +1812,11 @@ async function syncPublicMarkets() {
     registryLiveAt = Date.now();
     lastPublicBoard = { ok: true, count: remote.length, error: "" };
 
-    // Push only when local has something remote is missing (and remote fetch succeeded).
+    // Push only when local has something remote is missing — never block UI on publish.
     const remoteSig = marketsSignature(mergeMarketLists(remote));
     const localHasExtra = merged.length > remote.length || after !== remoteSig;
-    if (localHasExtra && merged.length) {
-      try {
-        await pushMarketsToPublic(merged);
-      } catch { /* soft-fail background sync */ }
+    if (publish && localHasExtra && merged.length) {
+      pushMarketsToPublic(merged).catch(() => { /* soft-fail background sync */ });
     }
 
     // Keep open trade modal + chart live when remote activity lands.
@@ -2542,12 +2600,15 @@ function updateRegistryLiveBadge() {
 
 function marketBoardHtml(markets, indexed) {
   if (!markets.length) {
+    const stillSyncing = !registryLiveAt;
     return `
       <div class="token-empty">
         <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-        <h3>The registry is quiet.</h3>
-        <p>Launches are public. Create a market and anyone on Genesis can trade it with their own wallet.</p>
-        <a href="#create">Create the first market</a>
+        <h3>${stillSyncing ? "Loading live markets…" : "The registry is quiet."}</h3>
+        <p>${stillSyncing
+          ? "Pulling the public board — this should only take a moment."
+          : "Launches are public. Create a market and anyone on Genesis can trade it with their own wallet."}</p>
+        ${stillSyncing ? "" : '<a href="#create">Create the first market</a>'}
       </div>`;
   }
   if (!indexed.length) {
@@ -3662,21 +3723,58 @@ document.querySelector("[data-trade-amount]")?.addEventListener("input", (event)
 document.querySelector("[data-trade-submit]")?.addEventListener("click", executeTrade);
 
 async function bootMarkets() {
-  try {
-    await syncPublicMarkets();
-  } catch {
-    /* local cache still works offline */
+  // 1) Instant paint from local cache — never block first view on the network.
+  const local = readMarkets();
+  if (local.length) {
+    registryLiveAt = Date.now();
+    lastPublicBoard = { ok: true, count: local.length, error: "" };
   }
   renderMarkets();
   syncAppPageFromHash();
-  // Live registry: poll often so Newest / Recent / charts stay current.
-  const REGISTRY_POLL_MS = 5000;
-  setInterval(async () => {
-    try {
-      await syncPublicMarkets();
-      renderMarkets();
-    } catch { /* ignore */ }
-  }, REGISTRY_POLL_MS);
+
+  // 2) Fast path: first mirror that answers wins for a quick remote refresh.
+  try {
+    const before = marketsSignature(readMarkets());
+    await syncPublicMarkets({ mode: "fast", publish: false });
+    if (marketsSignature(readMarkets()) !== before) renderMarkets();
+    else updateRegistryLiveBadge();
+  } catch {
+    /* local cache still works offline */
+  }
+
+  // 3) Full merge of every mirror (authoritative) without blocking card clicks.
+  try {
+    const before = marketsSignature(readMarkets());
+    await syncPublicMarkets({ mode: "full", publish: true });
+    if (marketsSignature(readMarkets()) !== before) renderMarkets();
+    else updateRegistryLiveBadge();
+  } catch {
+    /* ignore */
+  }
+
+  // Adaptive poll: stay hot while the board is changing, back off when quiet.
+  let pollMs = REGISTRY_POLL_FAST_MS;
+  const schedulePoll = () => {
+    window.setTimeout(async () => {
+      try {
+        const before = marketsSignature(readMarkets());
+        await syncPublicMarkets({ mode: "full", publish: true });
+        const after = marketsSignature(readMarkets());
+        if (before !== after) {
+          renderMarkets();
+          pollMs = REGISTRY_POLL_FAST_MS;
+        } else {
+          updateRegistryLiveBadge();
+          pollMs = Math.min(REGISTRY_POLL_SLOW_MS, pollMs + 1500);
+        }
+      } catch {
+        /* ignore */
+      }
+      schedulePoll();
+    }, pollMs);
+  };
+  schedulePoll();
+
   // Live badge clock.
   setInterval(updateRegistryLiveBadge, 1000);
   // Keep open candle chart ticking (current interval bar advances with wall clock).
