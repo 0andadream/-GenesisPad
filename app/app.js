@@ -1905,13 +1905,12 @@ async function graduateMarket(market, setStatus = () => {}) {
 
   // Do NOT pull THRU/tokens out of the curve here. A failed AMM seed used to drain
   // the vault and break sells. Graduation is accounting-only until AMM is reliable.
-  setStatus("Graduation threshold reached — public curve trading stays open…");
+  setStatus("Graduation threshold reached…");
   const updated = updateMarket(market.mintAddress, {
     graduated: true,
     phase: "graduated",
     liquidity: false,
-    liquidityPendingReason:
-      "Graduated. Buy/sell continues on the public bonding curve (AMM seed deferred).",
+    liquidityPendingReason: "Graduated. Trading continues.",
     graduatedAt: market.graduatedAt || Date.now(),
     updatedAt: Date.now(),
   }) || market;
@@ -2366,9 +2365,7 @@ function readMarkets() {
 
 function marketStatusLabel(market) {
   if (market.phase === "amm" || market.liquidity) return "AMM live";
-  if (market.graduated || market.phase === "graduated") {
-    return isBondingMarket(market) ? "Graduated · curve open" : "Graduated";
-  }
+  if (market.graduated || market.phase === "graduated") return "Graduated";
   if (market.curve) return `Curve ${curveProgress(market).toFixed(0)}%`;
   if (market.liquidityPendingReason) return "AMM pending";
   return "Awaiting pool";
@@ -3074,19 +3071,21 @@ async function openTrade(index, side) {
   if (isBondingMarket(activeTrade)) {
     activeTrade = await syncCurveVaultFromChain(activeTrade);
     const c = readCurve(activeTrade);
-    const gradNote = activeTrade.graduated
-      ? "Graduated — public curve trading stays open. "
-      : "";
-    document.querySelector("[data-trade-status]").textContent =
-      `${gradNote}Public bonding curve · ${progress.toFixed(1)}% to graduation ` +
-      `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU in vault). ` +
-      "Sells are paid from THRU buyers paid in — Max uses vault-safe size.";
+    if (activeTrade.graduated) {
+      document.querySelector("[data-trade-status]").textContent =
+        `Graduated · vault ${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} THRU. ` +
+        "Buy and sell stay available. Max uses vault-safe size.";
+    } else {
+      document.querySelector("[data-trade-status]").textContent =
+        `Public bonding curve · ${progress.toFixed(1)}% to graduation ` +
+        `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU in vault). ` +
+        "Sells are paid from THRU buyers paid in — Max uses vault-safe size.";
+    }
   } else if (activeTrade.liquidity) {
     document.querySelector("[data-trade-status]").textContent = "Quote updates from the Thru AMM pool.";
   } else if (activeTrade.graduated) {
     document.querySelector("[data-trade-status]").textContent =
-      activeTrade.liquidityPendingReason ||
-      "This market graduated. Curve inventory may be empty — AMM seed still pending.";
+      activeTrade.liquidityPendingReason || "Graduated. Trading continues.";
   } else {
     document.querySelector("[data-trade-status]").textContent =
       "This mint is live, but has no bonding curve or AMM pool yet.";
@@ -3315,7 +3314,7 @@ async function executeCurveTrade(amount, status) {
       updated = await graduateMarket(updated || market, (message) => { status.textContent = message; });
       status.textContent += updated?.liquidity
         ? " Market graduated and AMM was seeded."
-        : " Market graduated — public curve trading continues.";
+        : " Market graduated.";
     }
     activeTrade = updated || readMarkets().find((m) => m.mintAddress === market.mintAddress);
     renderTokenChart(activeTrade);
@@ -3395,7 +3394,7 @@ async function executeTrade() {
 
     if (!activeTrade?.liquidity) {
       status.textContent = activeTrade?.graduated
-        ? (activeTrade.liquidityPendingReason || "Graduated, but the AMM pool is not seeded yet.")
+        ? (activeTrade.liquidityPendingReason || "Graduated. Trading continues when the pool is available.")
         : "Trade not submitted: no bonding curve or AMM pool is available for this mint.";
       return;
     }
