@@ -517,6 +517,212 @@ span.wallet-token-avatar {
   min-height: 50vh;
 }
 
+.header-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-create {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 16px;
+  gap: 10px;
+  font-size: 9px;
+}
+
+.header-create b {
+  font-size: 15px;
+}
+
+.command-bar-search {
+  grid-template-columns: 1fr;
+  margin: 8px 0 18px;
+  padding: 0;
+  border: 0;
+}
+
+/* Square token cards (Pons / pump.fun-style board) */
+.token-board {
+  min-height: 180px;
+}
+
+.token-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+.token-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
+  transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+}
+
+.token-card:hover {
+  border-color: var(--ink);
+  box-shadow: 0 10px 28px rgba(23, 23, 23, 0.08);
+  transform: translateY(-2px);
+}
+
+.token-card-hit {
+  display: grid;
+  gap: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.token-card-media {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  background: #111;
+  overflow: hidden;
+}
+
+.token-card-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.token-card-img-fallback {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(255,255,255,.12), transparent 45%),
+    linear-gradient(145deg, #1a1a1a, #3a342c);
+  color: #f4f4f2;
+  font: 400 48px/1 var(--serif);
+  letter-spacing: -.04em;
+}
+
+.token-card-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255,255,255,.25);
+  background: rgba(12, 12, 12, 0.72);
+  color: #f4f4f2;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.token-card-body {
+  display: grid;
+  gap: 8px;
+  padding: 12px 12px 10px;
+}
+
+.token-card-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.token-card-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 16px/1.2 var(--serif);
+}
+
+.token-card-title span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.token-card-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.token-card-progress {
+  margin: 0;
+}
+
+.token-card-progress .liquidity-state {
+  font-size: 10px;
+}
+
+.token-card-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0;
+  border-top: 1px solid var(--line);
+}
+
+.token-card-actions button {
+  min-height: 36px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.token-card-actions button:last-child {
+  border-right: 0;
+}
+
+.token-card-actions button:hover {
+  background: var(--ink);
+  color: var(--light);
+}
+
+.token-card.is-graduated {
+  border-color: rgba(23, 23, 23, 0.35);
+}
+
+.token-board .token-empty {
+  padding: 48px 24px;
+  border: 1px solid var(--line);
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .header-create {
+    padding: 0 10px;
+  }
+  .header-create b {
+    margin: 0;
+  }
+  .token-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+
+@media (max-width: 420px) {
+  .header-tools .header-create {
+    font-size: 0;
+  }
+  .header-tools .header-create b {
+    font-size: 18px;
+  }
+}
+
 /* Public Wrap desk — dedicated Wrap page */
 .wrap-desk {
   padding: 48px max(22px, calc((100vw - 1280px) / 2)) 28px;

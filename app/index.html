@@ -35,36 +35,18 @@
         <a href="#activity" data-nav="activity">Activity</a>
       </nav>
       <div class="header-tools">
+        <a class="create-button header-create" href="#create">Create a token <b>＋</b></a>
         <button class="ink-button" type="button" data-wallet-open>Connect wallet</button>
       </div>
     </header>
 
     <main>
-      <!-- Explore: markets only (no wrap) -->
+      <!-- Explore: square token grid + sort filters (incl. Graduated) -->
       <div class="app-page" data-page="explore" id="explore">
         <section class="app-intro">
           <p class="eyebrow">The Genesis launchpad</p>
           <h1>Markets begin<br /><em>with an idea.</em></h1>
           <p>Public bonding-curve markets on Thru Alphanet. Anyone can launch, and anyone with a wallet can buy or sell from this site.</p>
-        </section>
-
-        <section class="command-bar" aria-label="Launchpad controls">
-          <label><span>⌕</span><input data-search type="search" placeholder="Search token, ticker, or address" /></label>
-          <a class="create-button" href="#create">Create a token <b>＋</b></a>
-        </section>
-
-        <section class="graduated" aria-labelledby="graduated-title">
-          <div class="section-heading">
-            <div><p class="eyebrow">Archive 000</p><h2 id="graduated-title">Graduated</h2></div>
-            <p>Markets that hit the graduation target and seed (or queue) the AMM.</p>
-          </div>
-          <div data-graduated-list>
-            <div class="empty-ledger">
-              <div class="seal">G</div>
-              <div><strong>No graduated markets yet.</strong><span>Fill a bonding curve to the THRU target and the market lands here.</span></div>
-              <em>Awaiting record</em>
-            </div>
-          </div>
         </section>
 
         <section class="explore" aria-labelledby="explore-title">
@@ -75,12 +57,16 @@
             </div>
             <p><strong data-count>0</strong> tokens launched on Genesis.</p>
           </div>
+          <section class="command-bar command-bar-search" aria-label="Search markets">
+            <label><span>⌕</span><input data-search type="search" placeholder="Search token, ticker, or address" /></label>
+          </section>
           <div class="filters">
             <div role="tablist" aria-label="Sort launches">
               <button class="selected" type="button" data-filter="recent">Recent activity</button>
               <button type="button" data-filter="newest">Newest</button>
               <button type="button" data-filter="market">Market cap</button>
               <button type="button" data-filter="volume">Volume</button>
+              <button type="button" data-filter="graduated">Graduated</button>
             </div>
             <div role="tablist" aria-label="Filter by age">
               <button class="selected" type="button" data-age="all">All</button>
@@ -88,8 +74,7 @@
               <button type="button" data-age="7d">7d</button>
             </div>
           </div>
-          <div class="token-table" data-explore-table>
-            <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
+          <div class="token-board" data-explore-table>
             <div class="token-empty">
               <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
               <h3>The registry is quiet.</h3>
@@ -164,6 +149,7 @@
               <button type="button" data-filter="newest">Newest</button>
               <button type="button" data-filter="market">Market cap</button>
               <button type="button" data-filter="volume">Volume</button>
+              <button type="button" data-filter="graduated">Graduated</button>
             </div>
             <div role="tablist" aria-label="Filter by age">
               <button class="selected" type="button" data-age="all">All</button>
@@ -171,8 +157,7 @@
               <button type="button" data-age="7d">7d</button>
             </div>
           </div>
-          <div class="token-table" data-activity-table>
-            <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
+          <div class="token-board" data-activity-table>
             <div class="token-empty">
               <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
               <h3>The registry is quiet.</h3>

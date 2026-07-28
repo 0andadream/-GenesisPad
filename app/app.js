@@ -25,16 +25,25 @@ let registrySyncing = false;
 
 document.querySelectorAll("[role='tablist'] button").forEach((button) => {
   button.addEventListener("click", () => {
-    button.parentElement.querySelectorAll("button").forEach((item) => item.classList.remove("selected"));
-    button.classList.add("selected");
     if (button.dataset.filter) {
       marketSort = button.dataset.filter;
+      document.querySelectorAll("[data-filter]").forEach((btn) => {
+        btn.classList.toggle("selected", btn.dataset.filter === marketSort);
+      });
       renderMarkets();
+      return;
     }
     if (button.dataset.age) {
       marketAge = button.dataset.age;
+      document.querySelectorAll("[data-age]").forEach((btn) => {
+        btn.classList.toggle("selected", btn.dataset.age === marketAge);
+      });
       renderMarkets();
+      return;
     }
+    // Generic tablists (wrap side, trade side, chart intervals, etc.)
+    button.parentElement.querySelectorAll("button").forEach((item) => item.classList.remove("selected"));
+    button.classList.add("selected");
   });
 });
 
@@ -1977,6 +1986,15 @@ function marketStatusLabel(market) {
   return "Awaiting pool";
 }
 
+function marketCardMedia(market) {
+  const src = typeof market?.image === "string" ? market.image.trim() : "";
+  const letter = (market?.ticker || market?.name || "?").slice(0, 1).toUpperCase();
+  if (src && (src.startsWith("data:image/") || /^https?:\/\//i.test(src))) {
+    return `<img class="token-card-img" src="${src.replace(/"/g, "&quot;")}" alt="" loading="lazy" />`;
+  }
+  return `<div class="token-card-img token-card-img-fallback" aria-hidden="true">${letter}</div>`;
+}
+
 function renderMarketCard(market, index) {
   const progress = market.curve ? curveProgress(market) : (market.liquidity ? 100 : 0);
   const stats = readTradeStats(market);
@@ -1984,22 +2002,31 @@ function renderMarketCard(market, index) {
     ? BigInt(market.lastPrice)
     : (stats.points.length ? BigInt(stats.points[stats.points.length - 1].price) : 0n);
   const priceLabel = last > 0n ? formatSpotPrice(last) : "—";
+  const status = marketStatusLabel(market);
+  const graduated = isGraduatedMarket(market);
   return `
-    <article class="market-row">
-      <button type="button" class="market-identity" data-open-market="${index}" title="Open chart and stats">
-        ${marketImageHtml(market)}
-        <div>
-          <strong>${market.name}</strong>
-          <small>${market.ticker} · ${priceLabel}</small>
-          <small class="market-mini-stats"><b class="stat-buy">${stats.buys} buys</b> · <b class="stat-sell">${stats.sells} sells</b></small>
+    <article class="token-card${graduated ? " is-graduated" : ""}">
+      <button type="button" class="token-card-hit" data-open-market="${index}" title="Open ${market.ticker}">
+        <div class="token-card-media">
+          ${marketCardMedia(market)}
+          ${graduated ? `<span class="token-card-badge">Graduated</span>` : ""}
+        </div>
+        <div class="token-card-body">
+          <div class="token-card-title">
+            <strong>${market.name}</strong>
+            <span>$${market.ticker}</span>
+          </div>
+          <div class="token-card-meta">
+            <small>${priceLabel}</small>
+            <small class="market-mini-stats"><b class="stat-buy">${stats.buys}B</b> · <b class="stat-sell">${stats.sells}S</b></small>
+          </div>
+          <div class="curve-progress token-card-progress" title="Bonding progress to graduation">
+            <div class="curve-progress-bar"><i style="width:${progress}%"></i></div>
+            <span class="liquidity-state">${status}</span>
+          </div>
         </div>
       </button>
-      <strong>${BigInt(market.supply || "0").toLocaleString()}</strong>
-      <div class="curve-progress" title="Bonding progress to graduation">
-        <div class="curve-progress-bar"><i style="width:${progress}%"></i></div>
-        <span class="liquidity-state">${marketStatusLabel(market)}</span>
-      </div>
-      <div class="trade-actions">
+      <div class="token-card-actions trade-actions">
         <button type="button" data-trade="${index}" data-trade-side="buy">Buy</button>
         <button type="button" data-trade="${index}" data-trade-side="sell">Sell</button>
         <button type="button" data-liquidity="${index}">Pool</button>
@@ -2017,6 +2044,10 @@ function filterAndSortMarkets(markets) {
   const q = marketQuery.toLowerCase();
 
   let list = markets.map((market, index) => ({ market, index }));
+
+  if (marketSort === "graduated") {
+    list = list.filter(({ market }) => isGraduatedMarket(market));
+  }
 
   if (ageMs > 0) {
     list = list.filter(({ market }) => {
@@ -2051,7 +2082,7 @@ function filterAndSortMarkets(markets) {
       const vol = cmpBig(marketVolumeThru(b.market), marketVolumeThru(a.market));
       return vol || (marketTimestamp(b.market) - marketTimestamp(a.market));
     }
-    // recent activity (default)
+    // recent activity + graduated (default recency)
     return marketTimestamp(b.market) - marketTimestamp(a.market);
   });
 
@@ -2071,10 +2102,9 @@ function updateRegistryLiveBadge() {
   });
 }
 
-function marketTableHtml(markets, indexed) {
+function marketBoardHtml(markets, indexed) {
   if (!markets.length) {
     return `
-      <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
       <div class="token-empty">
         <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
         <h3>The registry is quiet.</h3>
@@ -2085,18 +2115,17 @@ function marketTableHtml(markets, indexed) {
   if (!indexed.length) {
     const emptyTitle = marketQuery
       ? `No market found for “${marketQuery}”.`
-      : "No markets match this filter.";
+      : marketSort === "graduated"
+        ? "No graduated markets yet."
+        : "No markets match this filter.";
     return `
-      <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
       <div class="token-empty">
         <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
         <h3>${emptyTitle}</h3>
         <p>Try another sort, clear search, or switch age to All.</p>
       </div>`;
   }
-  return `
-    <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
-    <div class="market-list">${indexed.map(({ market, index }) => renderMarketCard(market, index)).join("")}</div>`;
+  return `<div class="token-grid">${indexed.map(({ market, index }) => renderMarketCard(market, index)).join("")}</div>`;
 }
 
 function renderMarkets() {
@@ -2106,28 +2135,10 @@ function renderMarkets() {
   });
   updateRegistryLiveBadge();
 
-  // Graduated rail uses full list (not explore filters) — Explore page only.
-  const allIndexed = markets.map((market, index) => ({ market, index }));
-  const graduated = allIndexed.filter(({ market }) => isGraduatedMarket(market));
-
-  const graduatedHost = document.querySelector("[data-graduated-list]");
-  if (graduatedHost) {
-    if (!graduated.length) {
-      graduatedHost.innerHTML = `
-        <div class="empty-ledger">
-          <div class="seal">G</div>
-          <div><strong>No graduated markets yet.</strong><span>When a curve hits its THRU target it appears here. Trading can stay open on the curve until AMM is live.</span></div>
-          <em>Awaiting record</em>
-        </div>`;
-    } else {
-      graduatedHost.innerHTML = `<div class="market-list">${graduated.map(({ market, index }) => renderMarketCard(market, index)).join("")}</div>`;
-    }
-  }
-
   const indexed = filterAndSortMarkets(markets);
-  const html = marketTableHtml(markets, indexed);
-  document.querySelectorAll(".token-table").forEach((table) => {
-    table.innerHTML = html;
+  const html = marketBoardHtml(markets, indexed);
+  document.querySelectorAll(".token-board").forEach((board) => {
+    board.innerHTML = html;
   });
 }
 
