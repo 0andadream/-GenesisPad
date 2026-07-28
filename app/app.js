@@ -1702,21 +1702,19 @@ function setBrowserGistToken(token) {
  */
 async function connectPublicBoard(setStatus = () => {}) {
   setStatus("Requesting GitHub device login for the public board…");
-  const codeRes = await fetch("https://github.com/login/device/code", {
+  // Proxy through our API — github.com/login/* blocks browser CORS.
+  const codeRes = await fetch("/api/github-device", {
     method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      client_id: GITHUB_DEVICE_CLIENT_ID,
-      scope: "gist",
-    }),
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ step: "code" }),
   });
   if (!codeRes.ok) {
     throw new Error("Could not start GitHub device login.");
   }
   const device = await codeRes.json();
+  if (!device.device_code || !device.user_code) {
+    throw new Error(device.error_description || device.error || "Device login failed to start.");
+  }
   const userCode = device.user_code;
   const verifyUrl = device.verification_uri || "https://github.com/login/device";
   const intervalMs = Math.max(5, Number(device.interval) || 5) * 1000;
@@ -1729,17 +1727,10 @@ async function connectPublicBoard(setStatus = () => {}) {
 
   while (Date.now() < expiresAt) {
     await new Promise((r) => setTimeout(r, intervalMs));
-    const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+    const tokenRes = await fetch("/api/github-device", {
       method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        client_id: GITHUB_DEVICE_CLIENT_ID,
-        device_code: device.device_code,
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-      }),
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ step: "token", device_code: device.device_code }),
     });
     if (!tokenRes.ok) continue;
     const tokenJson = await tokenRes.json();
