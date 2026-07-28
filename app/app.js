@@ -1064,25 +1064,49 @@ function ensureChartSeed(market) {
   }
 }
 
+/** Chart time window: all | 1h | 15m — matches Pons range pills. */
+let chartWindow = "all";
+
+function chartWindowMs(windowKey = chartWindow) {
+  if (windowKey === "15m") return 15 * 60 * 1000;
+  if (windowKey === "1h") return 60 * 60 * 1000;
+  return 0;
+}
+
+function compactChartPrice(priceBaseUnits) {
+  if (priceBaseUnits <= 0n) return "0";
+  // Short y-axis labels (Pons-style right ticks).
+  const full = formatUnits(priceBaseUnits, NATIVE_THRU_DECIMALS, 8);
+  if (full.includes("e") || full.includes("E")) return full;
+  const [w, f = ""] = full.split(".");
+  if (!f) return w;
+  const trimmed = f.replace(/0+$/, "").slice(0, 6);
+  return trimmed ? `${w}.${trimmed}` : w;
+}
+
 /**
- * Live price chart: green/red segments on up/down moves, live % from open → spot.
- * Quiet time extends a flat tail to "now". Spot tip always uses curve reserves
- * so the candle moves as soon as peer trades land on the board.
+ * Pons-style noxa chart: single lime area line, gradient fill, live tip,
+ * y-axis ticks, buy/sell markers, hover crosshair, range pills.
  */
 function renderTokenChart(market) {
   const root = document.querySelector("[data-token-chart]");
   const svg = document.querySelector("[data-chart-svg]");
   const priceEl = document.querySelector("[data-chart-price]");
   const changeEl = document.querySelector("[data-chart-change]");
+  const changeVal = document.querySelector("[data-chart-change-value]");
+  const rangeLabel = document.querySelector("[data-chart-range-label]");
   const tradesEl = document.querySelector("[data-chart-trades]");
   const rangeEl = document.querySelector("[data-chart-range]");
   if (!svg || !market) return;
 
   let m = ensureChartSeed(market);
-  const points = readChart(m)
+  const now = Date.now();
+  const winMs = chartWindowMs();
+  let points = readChart(m)
     .filter((p) => p.side !== "hold")
+    .filter((p) => !winMs || now - (Number(p.t) || 0) <= winMs)
     .slice();
-  const stats = readTradeStats(m);
+  const stats = readTradeStats({ ...m, chart: points });
 
   // Live tip: bonding-curve spot (moves when virtual reserves update).
   let spot = 0n;
@@ -1095,10 +1119,8 @@ function renderTokenChart(market) {
     try { spot = BigInt(m.lastPrice); } catch { spot = 0n; }
   }
 
-  // Hold last printed price out to now, then pin to live spot.
   if (points.length) {
     const lastPt = points[points.length - 1];
-    const now = Date.now();
     if (now - (Number(lastPt.t) || 0) > 2_000) {
       points.push({
         t: now - 1,
@@ -1111,20 +1133,24 @@ function renderTokenChart(market) {
   }
   if (spot > 0n) {
     points.push({
-      t: Date.now(),
+      t: now,
       price: spot.toString(),
       side: "live",
       thru: "0",
       tokens: "0",
     });
   }
+  if (!points.length && spot > 0n) {
+    points = [
+      { t: now - 60_000, price: spot.toString(), side: "seed", thru: "0", tokens: "0" },
+      { t: now, price: spot.toString(), side: "live", thru: "0", tokens: "0" },
+    ];
+  }
 
   const prices = points.map((p) => BigInt(p.price || "0"));
-  // Open = first seed/trade price; last = live spot (or last print).
   const openPrice = prices.length ? prices[0] : spot;
   const last = spot > 0n ? spot : (prices.length ? prices[prices.length - 1] : 0n);
   const up = last >= openPrice;
-  const dir = up ? "up" : "down";
 
   if (root) {
     root.classList.toggle("up", up);
@@ -1135,24 +1161,25 @@ function renderTokenChart(market) {
     priceEl.textContent = formatSpotPrice(last);
     if (prevText && prevText !== priceEl.textContent) {
       priceEl.classList.remove("price-flash");
-      // restart animation
       void priceEl.offsetWidth;
       priceEl.classList.add("price-flash");
     }
   }
-  if (changeEl) {
-    if (openPrice > 0n && last !== openPrice) {
-      const delta = up ? last - openPrice : openPrice - last;
-      const bps = (delta * 10000n) / openPrice;
-      const pct = (Number(bps) / 100).toFixed(2);
-      changeEl.textContent = `${up ? "+" : "−"}${pct}%`;
-      changeEl.classList.toggle("up", up);
-      changeEl.classList.toggle("down", !up);
-    } else {
-      changeEl.textContent = "0.00%";
-      changeEl.classList.remove("up", "down");
-    }
+  let pctText = "0.00%";
+  if (openPrice > 0n && last !== openPrice) {
+    const delta = up ? last - openPrice : openPrice - last;
+    const bps = (delta * 10000n) / openPrice;
+    pctText = `${up ? "+" : "−"}${(Number(bps) / 100).toFixed(2)}%`;
   }
+  if (changeVal) changeVal.textContent = pctText;
+  else if (changeEl) changeEl.textContent = pctText;
+  if (changeEl) {
+    changeEl.classList.toggle("up", up && last !== openPrice);
+    changeEl.classList.toggle("down", !up && last !== openPrice);
+    changeEl.classList.toggle("is-up", up && last !== openPrice);
+    changeEl.classList.toggle("is-down", !up && last !== openPrice);
+  }
+  if (rangeLabel) rangeLabel.textContent = chartWindow === "all" ? "ALL" : chartWindow.toUpperCase();
   if (tradesEl) {
     const realTrades = stats.buys + stats.sells;
     tradesEl.textContent = realTrades
@@ -1185,12 +1212,16 @@ function renderTokenChart(market) {
     setStat("[data-stat-progress]", "—");
   }
 
-  const W = 400;
-  const H = 160;
-  const padX = 8;
-  const padY = 14;
-  const innerW = W - padX * 2;
-  const innerH = H - padY * 2;
+  // Pons noxa geometry
+  const W = 640;
+  const H = 280;
+  const padL = 8;
+  const padR = 72;
+  const padT = 16;
+  const padB = 28;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const baseline = H - padB;
 
   let minP = prices[0] || 0n;
   let maxP = prices[0] || 1n;
@@ -1203,59 +1234,135 @@ function renderTokenChart(market) {
     if (last > maxP) maxP = last;
   }
   if (maxP === minP) maxP = minP + 1n;
-  // Soft pad so tiny moves still read.
-  const pad = (maxP - minP) / 10n || 1n;
+  const pad = (maxP - minP) / 8n || 1n;
   minP = minP > pad ? minP - pad : 0n;
   maxP += pad;
   const span = maxP - minP || 1n;
 
   const n = Math.max(points.length, 2);
   const coords = points.map((p, i) => {
-    const x = padX + (innerW * i) / Math.max(n - 1, 1);
+    const x = padL + (plotW * i) / Math.max(n - 1, 1);
     const yRatio = Number(((BigInt(p.price) - minP) * 10000n) / span) / 10000;
-    const y = padY + innerH * (1 - Math.min(1, Math.max(0, yRatio)));
-    return { x, y, side: p.side, price: BigInt(p.price || "0") };
+    const y = padT + plotH * (1 - Math.min(1, Math.max(0, yRatio)));
+    return {
+      x,
+      y,
+      side: p.side,
+      price: BigInt(p.price || "0"),
+      t: Number(p.t) || 0,
+    };
   });
-
   if (coords.length === 1) {
-    coords.push({ x: W - padX, y: coords[0].y, side: coords[0].side, price: coords[0].price });
+    coords.push({
+      x: padL + plotW,
+      y: coords[0].y,
+      side: coords[0].side,
+      price: coords[0].price,
+      t: coords[0].t,
+    });
   }
 
-  // Per-segment green/red so candles read up and down, not one flat color.
-  let segments = "";
-  for (let i = 1; i < coords.length; i += 1) {
-    const a = coords[i - 1];
-    const b = coords[i];
-    const segUp = b.price >= a.price;
-    segments +=
-      `<line class="chart-seg ${segUp ? "up" : "down"}" ` +
-      `x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" ` +
-      `x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" />`;
-  }
-
-  const lineD = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
+  const lineD = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(2)},${c.y.toFixed(2)}`).join(" ");
   const areaD =
-    `${lineD} L${coords[coords.length - 1].x.toFixed(1)},${(H - padY).toFixed(1)} ` +
-    `L${coords[0].x.toFixed(1)},${(H - padY).toFixed(1)} Z`;
+    `${lineD} L${coords[coords.length - 1].x.toFixed(2)},${baseline.toFixed(2)} ` +
+    `L${coords[0].x.toFixed(2)},${baseline.toFixed(2)} Z`;
 
+  // Y ticks (4 levels) — Pons style right labels
+  const yTicks = [];
+  for (let i = 0; i < 4; i += 1) {
+    const y = padT + (plotH * i) / 3;
+    const priceAt = maxP - ((maxP - minP) * BigInt(i)) / 3n;
+    yTicks.push({ y, label: compactChartPrice(priceAt) });
+  }
+
+  const gradId = "noxaAreaGrad";
   const dots = coords
     .filter((c) => c.side === "buy" || c.side === "sell")
     .map((c) =>
-      `<circle class="chart-${c.side}" cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.5"></circle>`,
+      `<circle class="chart-${c.side}" cx="${c.x.toFixed(2)}" cy="${c.y.toFixed(2)}" r="3.2"></circle>`,
     )
     .join("");
 
+  const lastCoord = coords[coords.length - 1];
+  const grid = yTicks.map((t) =>
+    `<line class="noxa-chart-grid" x1="${padL}" x2="${padL + plotW}" y1="${t.y.toFixed(2)}" y2="${t.y.toFixed(2)}"></line>`
+    + `<text class="noxa-chart-ytick" x="${W - 4}" y="${(t.y - 4).toFixed(2)}" text-anchor="end">${t.label}</text>`,
+  ).join("");
+
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.onmousemove = null;
-  svg.onmouseleave = null;
   svg.innerHTML = `
-    <line class="chart-grid" x1="${padX}" y1="${padY}" x2="${W - padX}" y2="${padY}"></line>
-    <line class="chart-grid" x1="${padX}" y1="${H / 2}" x2="${W - padX}" y2="${H / 2}"></line>
-    <line class="chart-grid" x1="${padX}" y1="${H - padY}" x2="${W - padX}" y2="${H - padY}"></line>
-    <path class="chart-area ${dir}" d="${areaD}"></path>
-    ${segments}
+    <defs>
+      <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="var(--chart-line)" stop-opacity="0.34"/>
+        <stop offset="100%" stop-color="var(--chart-line)" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    ${grid}
+    <path class="noxa-chart-area" d="${areaD}" fill="url(#${gradId})"></path>
+    <path class="noxa-chart-line" d="${lineD}" fill="none"></path>
     ${dots}
+    <circle class="noxa-chart-live-dot" cx="${lastCoord.x.toFixed(2)}" cy="${lastCoord.y.toFixed(2)}" r="4.5"></circle>
+    <g class="noxa-chart-cursor" hidden>
+      <line x1="0" x2="0" y1="${padT}" y2="${baseline}"></line>
+      <circle cx="0" cy="0" r="4.5"></circle>
+    </g>
+    <rect class="noxa-chart-scrub-hit" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}"></rect>
   `;
+
+  // Hover crosshair (Pons scrub)
+  const cursor = svg.querySelector(".noxa-chart-cursor");
+  const hit = svg.querySelector(".noxa-chart-scrub-hit");
+  const moveCursor = (clientX) => {
+    if (!cursor || !hit) return;
+    const rect = svg.getBoundingClientRect();
+    const scaleX = W / Math.max(rect.width, 1);
+    const xSvg = (clientX - rect.left) * scaleX;
+    // nearest point
+    let best = coords[0];
+    let bestDist = Infinity;
+    for (const c of coords) {
+      const d = Math.abs(c.x - xSvg);
+      if (d < bestDist) {
+        bestDist = d;
+        best = c;
+      }
+    }
+    cursor.hidden = false;
+    const line = cursor.querySelector("line");
+    const circle = cursor.querySelector("circle");
+    if (line) {
+      line.setAttribute("x1", best.x.toFixed(2));
+      line.setAttribute("x2", best.x.toFixed(2));
+    }
+    if (circle) {
+      circle.setAttribute("cx", best.x.toFixed(2));
+      circle.setAttribute("cy", best.y.toFixed(2));
+    }
+    if (priceEl) priceEl.textContent = formatSpotPrice(best.price);
+  };
+  if (hit) {
+    hit.onpointermove = (e) => moveCursor(e.clientX);
+    hit.onpointerleave = () => {
+      if (cursor) cursor.hidden = true;
+      if (priceEl) priceEl.textContent = formatSpotPrice(last);
+    };
+  }
+}
+
+function bindChartRangePills() {
+  document.querySelectorAll("[data-chart-window]").forEach((btn) => {
+    if (btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      chartWindow = btn.dataset.chartWindow || "all";
+      document.querySelectorAll("[data-chart-window]").forEach((b) => {
+        const on = b.dataset.chartWindow === chartWindow;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      if (activeTrade) renderTokenChart(activeTrade);
+    });
+  });
 }
 
 function quoteCurveBuy(market, thruIn) {
@@ -3991,6 +4098,7 @@ async function openTrade(index, side) {
   document.querySelector("[data-trade-amount]").value = "";
   document.querySelector("[data-trade-quote]").textContent = "—";
   lastTapeSignature = "";
+  bindChartRangePills();
   renderTokenChart(activeTrade);
   renderTradeTape(activeTrade);
   startTradeLiveFeed();
@@ -4478,6 +4586,7 @@ async function bootMarkets() {
   setInterval(updateRegistryLiveBadge, 1000);
 }
 
+bindChartRangePills();
 bootMarkets();
 restoreWalletSession();
 syncAppPageFromHash();
