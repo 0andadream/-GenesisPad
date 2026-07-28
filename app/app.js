@@ -2659,8 +2659,10 @@ document.querySelector("[data-download]")?.addEventListener("click", downloadBac
 document.querySelector("[data-copy-generated]")?.addEventListener("click", () => {
   if (generatedAccount) navigator.clipboard.writeText(bytesToHex(generatedAccount.privateKey));
 });
-document.querySelector("[data-copy-address]")?.addEventListener("click", () => {
-  if (connectedAccount) navigator.clipboard.writeText(connectedAccount.address);
+document.querySelectorAll("[data-copy-address]").forEach((button) => {
+  button.addEventListener("click", () => {
+    if (connectedAccount) navigator.clipboard.writeText(connectedAccount.address);
+  });
 });
 document.querySelectorAll("[data-reveal]").forEach((button) => button.addEventListener("click", () => {
   const input = document.querySelector(button.dataset.reveal === "generated" ? "[data-generated-key]" : "[data-import-key]");
