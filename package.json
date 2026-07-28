@@ -2,9 +2,13 @@
   "name": "genesispad",
   "version": "1.0.0",
   "private": true,
-  "packageManager": "pnpm@10.34.5",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "vercel-build": "node scripts/build.mjs"
   },
   "dependencies": {
     "@thru/programs": "^0.3.0",
@@ -13,5 +17,10 @@
     "esbuild": "^0.28.1",
     "gsap": "^3.15.0",
     "three": "^0.185.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }
