@@ -508,7 +508,16 @@ span.wallet-token-avatar {
   color: var(--light);
 }
 
-/* Public Wrap desk on the app home */
+/* App pages (Explore / Wrap / Activity) */
+.app-page[hidden] {
+  display: none !important;
+}
+
+.app-page {
+  min-height: 50vh;
+}
+
+/* Public Wrap desk — dedicated Wrap page */
 .wrap-desk {
   padding: 48px max(22px, calc((100vw - 1280px) / 2)) 28px;
 }

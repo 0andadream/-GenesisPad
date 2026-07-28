@@ -2059,26 +2059,54 @@ function filterAndSortMarkets(markets) {
 }
 
 function updateRegistryLiveBadge() {
-  const el = document.querySelector("[data-registry-live]");
-  if (!el) return;
-  if (!registryLiveAt) {
-    el.textContent = "Syncing…";
-    el.dataset.state = "syncing";
-    return;
+  document.querySelectorAll("[data-registry-live]").forEach((el) => {
+    if (!registryLiveAt) {
+      el.textContent = "Syncing…";
+      el.dataset.state = "syncing";
+      return;
+    }
+    const ageSec = Math.max(0, Math.round((Date.now() - registryLiveAt) / 1000));
+    el.textContent = ageSec < 3 ? "Live" : `Live · ${ageSec}s ago`;
+    el.dataset.state = "live";
+  });
+}
+
+function marketTableHtml(markets, indexed) {
+  if (!markets.length) {
+    return `
+      <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
+      <div class="token-empty">
+        <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <h3>The registry is quiet.</h3>
+        <p>Launches are public. Create a market and anyone on Genesis can trade it with their own wallet.</p>
+        <a href="#create">Create the first market</a>
+      </div>`;
   }
-  const ageSec = Math.max(0, Math.round((Date.now() - registryLiveAt) / 1000));
-  el.textContent = ageSec < 3 ? "Live" : `Live · ${ageSec}s ago`;
-  el.dataset.state = "live";
+  if (!indexed.length) {
+    const emptyTitle = marketQuery
+      ? `No market found for “${marketQuery}”.`
+      : "No markets match this filter.";
+    return `
+      <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
+      <div class="token-empty">
+        <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <h3>${emptyTitle}</h3>
+        <p>Try another sort, clear search, or switch age to All.</p>
+      </div>`;
+  }
+  return `
+    <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
+    <div class="market-list">${indexed.map(({ market, index }) => renderMarketCard(market, index)).join("")}</div>`;
 }
 
 function renderMarkets() {
   const markets = readMarkets();
-  const table = document.querySelector(".token-table");
-  const countEl = document.querySelector("[data-count]");
-  if (countEl) countEl.textContent = String(markets.length);
+  document.querySelectorAll("[data-count]").forEach((el) => {
+    el.textContent = String(markets.length);
+  });
   updateRegistryLiveBadge();
 
-  // Graduated rail uses full list (not explore filters).
+  // Graduated rail uses full list (not explore filters) — Explore page only.
   const allIndexed = markets.map((market, index) => ({ market, index }));
   const graduated = allIndexed.filter(({ market }) => isGraduatedMarket(market));
 
@@ -2097,36 +2125,36 @@ function renderMarkets() {
   }
 
   const indexed = filterAndSortMarkets(markets);
+  const html = marketTableHtml(markets, indexed);
+  document.querySelectorAll(".token-table").forEach((table) => {
+    table.innerHTML = html;
+  });
+}
 
-  if (!markets.length) {
-    table.innerHTML = `
-      <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
-      <div class="token-empty">
-        <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-        <h3>The registry is quiet.</h3>
-        <p>Launches are public. Create a market and anyone on Genesis can trade it with their own wallet.</p>
-        <a href="#create">Create the first market</a>
-      </div>`;
-    return;
+/** Hash pages: explore (default) | wrap | activity */
+function currentAppPage() {
+  const raw = (location.hash || "#explore").replace(/^#/, "").toLowerCase();
+  if (raw === "wrap" || raw === "activity") return raw;
+  if (raw === "create") return "explore"; // drawer overlay, stay on explore
+  return "explore";
+}
+
+function showAppPage(page) {
+  const target = page === "wrap" || page === "activity" ? page : "explore";
+  document.querySelectorAll("[data-page]").forEach((el) => {
+    const match = el.dataset.page === target;
+    el.hidden = !match;
+  });
+  document.querySelectorAll("[data-app-nav] [data-nav]").forEach((link) => {
+    link.classList.toggle("active", link.dataset.nav === target);
+  });
+  if (target === "wrap" && connectedAccount) {
+    refreshBalance().catch(() => { /* ignore */ });
   }
+}
 
-  if (!indexed.length) {
-    const emptyTitle = marketQuery
-      ? `No market found for “${marketQuery}”.`
-      : "No markets match this filter.";
-    table.innerHTML = `
-      <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
-      <div class="token-empty">
-        <div class="pulse-chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-        <h3>${emptyTitle}</h3>
-        <p>Try another sort, clear search, or switch age to All.</p>
-      </div>`;
-    return;
-  }
-
-  table.innerHTML = `
-    <div class="table-head"><span>Market</span><span>Supply</span><span>Progress</span><span>Trade</span></div>
-    <div class="market-list">${indexed.map(({ market, index }) => renderMarketCard(market, index)).join("")}</div>`;
+function syncAppPageFromHash() {
+  showAppPage(currentAppPage());
 }
 
 async function claimFaucet() {
@@ -2426,6 +2454,19 @@ document.addEventListener("keydown", (event) => {
 document.querySelector("[data-create-form]")?.addEventListener("submit", (event) => {
   event.preventDefault();
   createToken();
+});
+window.addEventListener("hashchange", syncAppPageFromHash);
+document.querySelectorAll("[data-app-nav] a[data-nav]").forEach((link) => {
+  link.addEventListener("click", () => {
+    // Let hash update, then show page on next tick (hashchange also fires).
+    requestAnimationFrame(syncAppPageFromHash);
+  });
+});
+// Wallet hint → Wrap page
+document.querySelectorAll('a[href="#wrap"]').forEach((link) => {
+  link.addEventListener("click", () => {
+    requestAnimationFrame(() => showAppPage("wrap"));
+  });
 });
 document.querySelector("[data-token-image]")?.addEventListener("change", async (event) => {
   const file = event.target.files?.[0];
@@ -2992,6 +3033,7 @@ async function bootMarkets() {
     /* local cache still works offline */
   }
   renderMarkets();
+  syncAppPageFromHash();
   // Live registry: poll often so Newest / Recent / charts stay current.
   const REGISTRY_POLL_MS = 5000;
   setInterval(async () => {
@@ -3014,3 +3056,4 @@ async function bootMarkets() {
 
 bootMarkets();
 restoreWalletSession();
+syncAppPageFromHash();
