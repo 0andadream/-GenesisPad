@@ -1209,7 +1209,7 @@ function ensureChartSeed(market) {
       chart: seed,
       lastPrice: startPrice.toString(),
       updatedAt: now,
-    }) || market;
+    }, { publish: false }) || market;
   } catch {
     return market;
   }
@@ -3800,11 +3800,21 @@ function renderTradeTape(market) {
   }).join("");
 }
 
-/** Pull storage + remote, then repaint chart / tape / % / quote. */
-async function refreshOpenTradeUi({ sync = false } = {}) {
+/** Soft-refresh open trade modal. Never clears the amount input. */
+async function refreshOpenTradeUi({ sync = false, forceChart = false } = {}) {
   if (!activeTrade?.mintAddress) return;
   const modal = document.querySelector("[data-trade-modal]");
   if (!modal || modal.hidden) return;
+
+  // While the user is typing an amount, only pull remote data — do not repaint
+  // chart/tape (avoids focus loss / “panel refresh” feel).
+  const amountInput = document.querySelector("[data-trade-amount]");
+  const typing = Boolean(
+    amountInput
+    && document.activeElement === amountInput
+    && String(amountInput.value || "").length > 0,
+  );
+
   if (sync) {
     try {
       await syncPublicMarkets({ mode: "full", publish: false });
@@ -3813,10 +3823,75 @@ async function refreshOpenTradeUi({ sync = false } = {}) {
   const fresh = resolveTradeMarket(
     readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress),
   );
-  if (fresh) activeTrade = fresh;
-  renderTokenChart(activeTrade);
-  renderTradeTape(activeTrade);
+  if (fresh) {
+    // Retroactively mark graduation from cumulative buy volume.
+    const healedGrad = ensureGraduationFlag(fresh);
+    activeTrade = healedGrad;
+  }
+
+  if (!typing || forceChart) {
+    renderTokenChart(activeTrade);
+    renderTradeTape(activeTrade);
+    updateTradeProgressUi(activeTrade);
+  } else {
+    // Still refresh quote against latest curve while typing.
+    try { updateTradeQuote(); } catch { /* ignore */ }
+    updateTradeProgressUi(activeTrade);
+    return;
+  }
   try { updateTradeQuote(); } catch { /* ignore */ }
+}
+
+/** Progress / vault / graduated status line — safe during typing. */
+function updateTradeProgressUi(market) {
+  if (!market) return;
+  const statusEl = document.querySelector("[data-trade-status]");
+  try {
+    if (isBondingMarket(market)) {
+      const c = readCurve(market);
+      const progress = curveProgress(market);
+      if (statusEl) {
+        if (isGraduatedMarket(market)) {
+          statusEl.textContent =
+            `Graduated · vault ${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} THRU. Buy and sell stay available.`;
+        } else {
+          statusEl.textContent =
+            `Bonding curve · ${progress.toFixed(1)}% to graduation ` +
+            `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU).`;
+        }
+      }
+      const progEl = document.querySelector("[data-stat-progress]");
+      if (progEl) progEl.textContent = `${progress.toFixed(1)}%`;
+      const vaultEl = document.querySelector("[data-stat-vault]");
+      if (vaultEl) vaultEl.textContent = `${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 6)} THRU`;
+    }
+  } catch { /* ignore */ }
+}
+
+/**
+ * If cumulative buy volume ever reached the graduation target, mark graduated
+ * so Explore → Graduated and the trade status stay correct after sells drain vault.
+ */
+function ensureGraduationFlag(market) {
+  if (!market?.mintAddress || isGraduatedMarket(market)) return market;
+  try {
+    const target = BigInt(market.curve?.graduationTargetThru || GRADUATION_REAL_THRU);
+    const stats = readTradeStats(market);
+    const buyThru = stats.buyThru || 0n;
+    const realThru = BigInt(market.curve?.realThru || "0");
+    const peak = buyThru > realThru ? buyThru : realThru;
+    if (target > 0n && peak >= target) {
+      return updateMarket(market.mintAddress, {
+        graduated: true,
+        phase: "graduated",
+        liquidity: false,
+        liquidityPendingReason: "Graduated. Trading continues.",
+        graduatedAt: market.graduatedAt || Date.now(),
+        updatedAt: Date.now(),
+      }, { publish: true }) || { ...market, graduated: true, phase: "graduated" };
+    }
+  } catch { /* ignore */ }
+  return market;
 }
 
 let tradeLiveTimer = 0;
@@ -3832,7 +3907,7 @@ function stopTradeLiveFeed() {
 
 function startTradeLiveFeed() {
   stopTradeLiveFeed();
-  // Immediate paint, then 1s live loop while the modal is open.
+  // Soft first paint (no force), then calm poll — never wipe amount field.
   refreshOpenTradeUi({ sync: true }).catch(() => {});
   tradeLiveTimer = window.setInterval(() => {
     if (tradeLiveBusy) return;
@@ -4037,9 +4112,12 @@ async function refreshTradeBalances() {
 
 async function openTrade(index, side) {
   const listed = readMarkets()[index];
+  const prevMint = activeTrade?.mintAddress || "";
   activeTrade = resolveTradeMarket(listed) || listed;
-  activeSide = side;
+  activeSide = side === "sell" ? "sell" : "buy";
   if (!activeTrade) return;
+  const sameMint = Boolean(prevMint && prevMint === activeTrade.mintAddress)
+    && document.querySelector("[data-trade-modal]")?.hidden === false;
   tradeModal.hidden = false;
   document.body.classList.add("modal-open");
   // Pull latest peer trades/curve before first paint of chart + tape.
@@ -4048,7 +4126,7 @@ async function openTrade(index, side) {
     const fresh = resolveTradeMarket(
       readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress),
     );
-    if (fresh) activeTrade = fresh;
+    if (fresh) activeTrade = ensureGraduationFlag(fresh);
   } catch { /* offline: use local */ }
 
   const name = activeTrade.name || activeTrade.ticker || "Token";
@@ -4098,58 +4176,78 @@ async function openTrade(index, side) {
     tradeFallback.hidden = hasImage;
   }
 
-  const submit = document.querySelector("[data-trade-submit]");
-  if (submit) {
-    submit.textContent = side === "buy" ? "Buy with THRU" : `Sell ${ticker}`;
-    submit.classList.toggle("is-buy", side === "buy");
-    submit.classList.toggle("is-sell", side === "sell");
-  }
-  const sidePanel = document.querySelector(".trade-launch-side");
-  if (sidePanel) sidePanel.dataset.side = side;
-  document.querySelector("[data-trade-input-label]").textContent = "You receive";
-  const amountLabel = document.querySelector("[data-trade-amount-label]");
-  if (amountLabel) amountLabel.textContent = side === "buy" ? "You pay" : "You sell";
-  const amountAsset = document.querySelector("[data-trade-amount-asset]");
-  if (amountAsset) amountAsset.textContent = side === "buy" ? "THRU" : ticker;
+  applyTradeSideUi(side, ticker);
 
-  const progress = activeTrade.curve ? curveProgress(activeTrade) : null;
   if (isBondingMarket(activeTrade)) {
     activeTrade = await syncCurveVaultFromChain(activeTrade);
-    activeTrade = healMissingTradePrints(activeTrade, { persist: true, publish: true });
-    const c = readCurve(activeTrade);
-    if (activeTrade.graduated) {
-      document.querySelector("[data-trade-status]").textContent =
-        `Graduated · vault ${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} THRU. Buy and sell stay available.`;
-    } else {
-      document.querySelector("[data-trade-status]").textContent =
-        `Bonding curve · ${progress.toFixed(1)}% to graduation ` +
-        `(${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 9)} / ${formatUnits(c.graduationTarget, NATIVE_THRU_DECIMALS, 9)} THRU).`;
-    }
+    activeTrade = healMissingTradePrints(activeTrade, { persist: true, publish: false });
+    activeTrade = ensureGraduationFlag(activeTrade);
+    updateTradeProgressUi(activeTrade);
   } else if (activeTrade.liquidity) {
-    document.querySelector("[data-trade-status]").textContent = "AMM market · quotes from the live pool.";
-  } else if (activeTrade.graduated) {
-    document.querySelector("[data-trade-status]").textContent =
-      activeTrade.liquidityPendingReason || "Graduated. Trading continues.";
+    const statusEl = document.querySelector("[data-trade-status]");
+    if (statusEl) statusEl.textContent = "AMM market · quotes from the live pool.";
+  } else if (isGraduatedMarket(activeTrade)) {
+    const statusEl = document.querySelector("[data-trade-status]");
+    if (statusEl) {
+      statusEl.textContent = activeTrade.liquidityPendingReason || "Graduated. Trading continues.";
+    }
   } else {
-    document.querySelector("[data-trade-status]").textContent =
-      "This mint is live, but has no bonding curve yet.";
+    const statusEl = document.querySelector("[data-trade-status]");
+    if (statusEl) statusEl.textContent = "This mint is live, but has no bonding curve yet.";
   }
 
-  document.querySelectorAll(".trade-switch [data-side]").forEach((button) => {
-    const on = button.dataset.side === side;
-    button.classList.toggle("selected", on);
-    button.setAttribute("aria-selected", on ? "true" : "false");
-  });
-  document.querySelector("[data-trade-amount]").value = "";
-  document.querySelector("[data-trade-quote]").textContent = "—";
-  lastTapeSignature = "";
+  // Only wipe the amount when opening a different mint (not on buy/sell toggle).
+  const amountEl = document.querySelector("[data-trade-amount]");
+  const quoteEl = document.querySelector("[data-trade-quote]");
+  if (!sameMint) {
+    if (amountEl) amountEl.value = "";
+    if (quoteEl) quoteEl.textContent = "—";
+    lastTapeSignature = "";
+    destroyLiveChart();
+  } else {
+    // Side switch: keep typed amount, just refresh quote/balance labels.
+    try { updateTradeQuote(); } catch { /* ignore */ }
+  }
+
   bindChartRangePills();
-  // Fresh Lightweight Charts host per market open (avoids stale series).
-  destroyLiveChart();
   renderTokenChart(activeTrade);
   renderTradeTape(activeTrade);
   startTradeLiveFeed();
   await refreshTradeBalances();
+}
+
+/** Update buy/sell chrome without resetting the amount field. */
+function applyTradeSideUi(side, ticker = activeTrade?.ticker || "TOKEN") {
+  activeSide = side === "sell" ? "sell" : "buy";
+  const submit = document.querySelector("[data-trade-submit]");
+  if (submit) {
+    submit.textContent = activeSide === "buy" ? "Buy with THRU" : `Sell ${ticker}`;
+    submit.classList.toggle("is-buy", activeSide === "buy");
+    submit.classList.toggle("is-sell", activeSide === "sell");
+  }
+  const sidePanel = document.querySelector(".trade-launch-side");
+  if (sidePanel) sidePanel.dataset.tradeSidePanel = activeSide;
+  const inputLabel = document.querySelector("[data-trade-input-label]");
+  if (inputLabel) inputLabel.textContent = "You receive";
+  const amountLabel = document.querySelector("[data-trade-amount-label]");
+  if (amountLabel) amountLabel.textContent = activeSide === "buy" ? "You pay" : "You sell";
+  const amountAsset = document.querySelector("[data-trade-amount-asset]");
+  if (amountAsset) amountAsset.textContent = activeSide === "buy" ? "THRU" : ticker;
+  document.querySelectorAll(".trade-switch [data-trade-side]").forEach((button) => {
+    const on = button.dataset.tradeSide === activeSide;
+    button.classList.toggle("selected", on);
+    button.setAttribute("aria-selected", on ? "true" : "false");
+  });
+}
+
+/** Toggle buy/sell without re-running the heavy openTrade path (keeps amount). */
+function switchTradeSide(side) {
+  if (!activeTrade) return;
+  const next = side === "sell" ? "sell" : "buy";
+  if (next === activeSide) return;
+  applyTradeSideUi(next, activeTrade.ticker || "TOKEN");
+  refreshTradeBalances().catch(() => {});
+  try { updateTradeQuote(); } catch { /* ignore */ }
 }
 
 function closeTrade() {
@@ -4373,10 +4471,13 @@ async function executeCurveTrade(amount, status) {
       successMsg += updated?.liquidity
         ? " Market graduated and AMM was seeded."
         : " Market graduated — curve still tradeable.";
+    } else {
+      updated = ensureGraduationFlag(updated || market);
     }
     activeTrade = updated
       || readMarkets().find((m) => m.mintAddress === market.mintAddress)
       || market;
+    activeTrade = ensureGraduationFlag(activeTrade);
     status.textContent = successMsg;
     try {
       pushLiveTradePoint({
@@ -4625,9 +4726,16 @@ document.querySelector("main")?.addEventListener("click", (event) => {
   }
 });
 document.querySelectorAll("[data-trade-close]").forEach((button) => button.addEventListener("click", closeTrade));
-document.querySelectorAll("[data-side]").forEach((button) => button.addEventListener("click", () => {
-  if (activeTrade) openTrade(readMarkets().findIndex((market) => market.mintAddress === activeTrade.mintAddress), button.dataset.side);
-}));
+// ONLY the Buy/Sell tabs — never the whole panel (panel used to have data-side
+// and re-ran openTrade on every amount-field click, wiping the typed value).
+document.querySelectorAll(".trade-switch [data-trade-side]").forEach((button) => {
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!activeTrade) return;
+    switchTradeSide(button.dataset.tradeSide || "buy");
+  });
+});
 document.querySelector("[data-trade-max]")?.addEventListener("click", () => {
   setTradeAmountFromPercent(100).catch(() => {});
 });
