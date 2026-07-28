@@ -1434,238 +1434,207 @@ html[data-theme="dark"] .token-card-actions button[data-trade-side="sell"] {
   }
 }
 
-/* ─── Pons-style noxa chart ───────────────────────────────────────────── */
-.token-chart.noxa-chart {
-  --chart-line: #d4fc50;
-  --chart-line-soft: rgba(212, 252, 80, 0.28);
-  --chart-grid: rgba(255, 255, 255, 0.08);
-  --chart-axis: rgba(232, 239, 233, 0.45);
-  --chart-stage: #111310;
-  --success: #30d158;
-  --danger: #ff453a;
-  --bg-elevated: #0c0e0b;
+/* ─── DexScreener-style candlestick chart ─────────────────────────────── */
+.token-chart.dex-chart {
+  --dex-up: #22c55e;
+  --dex-down: #ef4444;
+  --dex-up-dim: rgba(34, 197, 94, 0.45);
+  --dex-down-dim: rgba(239, 68, 68, 0.45);
+  --dex-grid: rgba(255, 255, 255, 0.06);
+  --dex-axis: rgba(160, 170, 180, 0.7);
+  --dex-bg: #0b0e11;
+  --dex-panel: #12161c;
   margin: 0 0 22px;
-  padding: 16px 14px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: #0a0c0a;
-  color: #e8efe9;
-  border-radius: 18px;
+  padding: 12px 12px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--dex-bg);
+  color: #e8edf2;
+  border-radius: 8px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  min-height: 0;
+  gap: 10px;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-html[data-theme="light"] .token-chart.noxa-chart {
-  --chart-line: #6f9f18;
-  --chart-line-soft: rgba(111, 159, 24, 0.22);
-  --chart-grid: rgba(17, 17, 17, 0.08);
-  --chart-axis: rgba(17, 17, 17, 0.42);
-  --chart-stage: #f3f1ea;
-  --success: #34c759;
-  --danger: #ff3b30;
-  --bg-elevated: #ffffff;
-  background: #f6f4ef;
+html[data-theme="light"] .token-chart.dex-chart {
+  --dex-grid: rgba(17, 17, 17, 0.07);
+  --dex-axis: rgba(60, 70, 80, 0.65);
+  --dex-bg: #f4f6f8;
+  --dex-panel: #ffffff;
+  background: var(--dex-bg);
   border-color: rgba(17, 17, 17, 0.08);
-  color: #171717;
+  color: #12161c;
 }
 
-.noxa-chart-head {
+.dex-chart-head {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
-.noxa-chart-price-block {
+.dex-chart-price-block {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
 }
 
-.noxa-chart-price,
-.token-chart.noxa-chart [data-chart-price] {
+.dex-chart-price,
+.token-chart.dex-chart [data-chart-price] {
   margin: 0;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
-  color: var(--chart-line);
-  font-size: 1.85rem;
-  font-weight: 400;
-  line-height: 1.1;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 1.55rem;
+  font-weight: 600;
+  line-height: 1.15;
+  color: #e8edf2;
 }
 
-.noxa-chart-price.price-flash {
-  animation: chart-price-flash .55s ease;
+html[data-theme="light"] .dex-chart-price,
+html[data-theme="light"] .token-chart.dex-chart [data-chart-price] {
+  color: #12161c;
+}
+
+.token-chart.dex-chart.up [data-chart-price],
+.token-chart.dex-chart.up .dex-chart-price { color: var(--dex-up); }
+.token-chart.dex-chart.down [data-chart-price],
+.token-chart.dex-chart.down .dex-chart-price { color: var(--dex-down); }
+
+.dex-chart-price.price-flash {
+  animation: chart-price-flash .45s ease;
 }
 
 @keyframes chart-price-flash {
   0% { filter: brightness(1); }
-  40% { filter: brightness(1.45); }
+  40% { filter: brightness(1.5); }
   100% { filter: brightness(1); }
 }
 
-.noxa-chart-change,
-.token-chart.noxa-chart [data-chart-change] {
+.dex-chart-change,
+.token-chart.dex-chart [data-chart-change] {
   margin: 0;
   font-variant-numeric: tabular-nums;
-  color: rgba(232, 239, 233, 0.55);
-  font-size: 13px;
+  color: var(--dex-axis);
+  font-size: 12px;
   font-weight: 600;
-}
-
-html[data-theme="light"] .noxa-chart-change,
-html[data-theme="light"] .token-chart.noxa-chart [data-chart-change] {
-  color: rgba(17, 17, 17, 0.5);
-}
-
-.noxa-chart-change.is-up,
-.token-chart.noxa-chart [data-chart-change].up { color: var(--success); }
-.noxa-chart-change.is-down,
-.token-chart.noxa-chart [data-chart-change].down { color: var(--danger); }
-
-.noxa-chart-change-range {
-  color: rgba(232, 239, 233, 0.4);
-  text-transform: uppercase;
-  margin-left: 6px;
-  font-size: 11px;
-  letter-spacing: 0.04em;
-}
-
-html[data-theme="light"] .noxa-chart-change-range {
-  color: rgba(17, 17, 17, 0.38);
-}
-
-.noxa-chart-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 7px;
-}
-
-.noxa-chart-ranges {
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  flex-shrink: 0;
-  gap: 2px;
-  padding: 3px;
-  display: inline-flex;
-}
-
-html[data-theme="light"] .noxa-chart-ranges {
-  background: rgba(17, 17, 17, 0.05);
-}
-
-.noxa-chart-range {
-  color: rgba(232, 239, 233, 0.55);
-  font: inherit;
-  letter-spacing: 0.04em;
-  border-radius: 999px;
-  cursor: pointer;
-  background: transparent;
-  border: 0;
-  padding: 6px 10px;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-html[data-theme="light"] .noxa-chart-range {
-  color: rgba(17, 17, 17, 0.5);
-}
-
-.noxa-chart-range:hover { color: #fff; }
-html[data-theme="light"] .noxa-chart-range:hover { color: #111; }
-
-.noxa-chart-range.is-active {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
-  box-shadow: none;
-}
-
-html[data-theme="light"] .noxa-chart-range.is-active {
-  background: #fff;
-  color: #111;
-  box-shadow: 0 1px 3px rgba(17, 17, 17, 0.08);
-}
-
-.noxa-chart-stage {
-  background: var(--chart-stage);
-  border-radius: 18px;
-  position: relative;
+  max-width: min(100%, 420px);
   overflow: hidden;
-  min-height: 220px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.noxa-chart-svg,
-.token-chart.noxa-chart [data-chart-svg] {
-  aspect-ratio: 640 / 280;
-  touch-action: none;
-  cursor: crosshair;
-  width: 100%;
-  height: auto;
+.dex-chart-change.is-up,
+.dex-chart-change.up,
+.token-chart.dex-chart [data-chart-change].up { color: var(--dex-up); }
+.dex-chart-change.is-down,
+.dex-chart-change.down,
+.token-chart.dex-chart [data-chart-change].down { color: var(--dex-down); }
+
+.dex-chart-interval-label {
+  margin-left: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  opacity: 0.7;
+  color: var(--dex-axis);
+}
+
+.dex-chart-intervals {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+html[data-theme="light"] .dex-chart-intervals {
+  background: rgba(17, 17, 17, 0.04);
+  border-color: rgba(17, 17, 17, 0.08);
+}
+
+.dex-interval {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--dex-axis);
+  font: 600 11px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  padding: 7px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.dex-interval:hover { color: #fff; }
+html[data-theme="light"] .dex-interval:hover { color: #111; }
+
+.dex-interval.is-active {
+  background: rgba(34, 197, 94, 0.16);
+  color: var(--dex-up);
+}
+
+.dex-chart-stage {
+  background: var(--dex-panel);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+  min-height: 260px;
+}
+
+.dex-chart-svg,
+.token-chart.dex-chart [data-chart-svg] {
   display: block;
+  width: 100%;
+  height: 280px;
+  cursor: crosshair;
+  touch-action: none;
 }
 
-.noxa-chart-svg .noxa-chart-grid {
-  stroke: var(--chart-grid);
+.dex-chart-svg .dex-grid {
+  stroke: var(--dex-grid);
   stroke-width: 1;
-  stroke-dasharray: 3 4;
 }
 
-.noxa-chart-svg .noxa-chart-ytick {
-  fill: var(--chart-axis);
-  font-size: 11px;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+.dex-chart-svg .dex-sep {
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
 }
 
-.noxa-chart-svg .noxa-chart-line {
-  fill: none;
-  stroke: var(--chart-line);
-  stroke-width: 2.5;
-  stroke-linejoin: round;
-  stroke-linecap: round;
+.dex-chart-svg .dex-ytick {
+  fill: var(--dex-axis);
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
-.noxa-chart-svg .noxa-chart-area {
+/* Candles */
+.dex-chart-svg .dex-wick.up { stroke: var(--dex-up); stroke-width: 1.25; }
+.dex-chart-svg .dex-wick.down { stroke: var(--dex-down); stroke-width: 1.25; }
+.dex-chart-svg .dex-body.up {
+  fill: var(--dex-up);
+  stroke: var(--dex-up);
+  stroke-width: 0.5;
+}
+.dex-chart-svg .dex-body.down {
+  fill: var(--dex-down);
+  stroke: var(--dex-down);
+  stroke-width: 0.5;
+}
+
+/* Volume */
+.dex-chart-svg .dex-vol.up { fill: var(--dex-up-dim); }
+.dex-chart-svg .dex-vol.down { fill: var(--dex-down-dim); }
+
+.dex-chart-svg .dex-cursor-v,
+.dex-chart-svg .dex-cursor-h {
+  stroke: rgba(200, 210, 220, 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
   pointer-events: none;
 }
 
-.noxa-chart-svg .noxa-chart-live-dot {
-  fill: var(--chart-line);
-  stroke: var(--bg-elevated);
-  stroke-width: 2px;
-}
-
-.noxa-chart-svg .noxa-chart-cursor line {
-  stroke: rgba(255, 255, 255, 0.28);
-  stroke-width: 1;
-}
-
-html[data-theme="light"] .noxa-chart-svg .noxa-chart-cursor line {
-  stroke: rgba(17, 17, 17, 0.28);
-}
-
-.noxa-chart-svg .noxa-chart-cursor circle {
-  fill: var(--chart-line);
-  stroke: var(--bg-elevated);
-  stroke-width: 2px;
-}
-
-.noxa-chart-svg .chart-buy {
-  fill: var(--chart-line);
-  stroke: var(--bg-elevated);
-  stroke-width: 1.5;
-}
-
-.noxa-chart-svg .chart-sell {
-  fill: #ff453af2;
-  stroke: var(--bg-elevated);
-  stroke-width: 1.5;
-}
-
-.noxa-chart-svg .noxa-chart-scrub-hit {
+.dex-chart-svg .dex-scrub {
   fill: transparent;
   cursor: crosshair;
 }
@@ -1675,7 +1644,7 @@ html[data-theme="light"] .noxa-chart-svg .noxa-chart-cursor line {
 }
 
 @keyframes tape-new-flash {
-  0% { background: rgba(212, 252, 80, 0.22); }
+  0% { background: rgba(34, 197, 94, 0.22); }
   100% { background: transparent; }
 }
 
@@ -1683,13 +1652,10 @@ html[data-theme="light"] .noxa-chart-svg .noxa-chart-cursor line {
   display: flex;
   justify-content: space-between;
   margin-top: 0;
-  color: rgba(232, 239, 233, 0.45);
+  color: var(--dex-axis, rgba(160, 170, 180, 0.7));
   font-size: 10px;
   letter-spacing: .04em;
-}
-
-html[data-theme="light"] .token-chart-axis {
-  color: rgba(17, 17, 17, 0.42);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .registry-live {

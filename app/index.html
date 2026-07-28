@@ -225,28 +225,28 @@
               </div>
             </header>
 
-            <div class="token-chart noxa-chart" data-token-chart>
-              <div class="noxa-chart-head">
-                <div class="noxa-chart-price-block">
-                  <p class="noxa-chart-price" data-chart-price>—</p>
-                  <p class="noxa-chart-change" data-chart-change>
+            <div class="token-chart dex-chart" data-token-chart>
+              <div class="dex-chart-head">
+                <div class="dex-chart-price-block">
+                  <p class="dex-chart-price" data-chart-price>—</p>
+                  <p class="dex-chart-change" data-chart-change>
                     <span data-chart-change-value>0.00%</span>
-                    <span class="noxa-chart-change-range" data-chart-range-label>ALL</span>
+                    <span class="dex-chart-interval-label" data-chart-range-label>5M</span>
                   </p>
                 </div>
-                <div class="noxa-chart-actions">
-                  <div class="noxa-chart-ranges" role="tablist" aria-label="Chart range" data-chart-ranges>
-                    <button type="button" role="tab" class="noxa-chart-range is-active" data-chart-window="all" aria-selected="true">ALL</button>
-                    <button type="button" role="tab" class="noxa-chart-range" data-chart-window="1h" aria-selected="false">1H</button>
-                    <button type="button" role="tab" class="noxa-chart-range" data-chart-window="15m" aria-selected="false">15M</button>
-                  </div>
+                <div class="dex-chart-intervals" role="tablist" aria-label="Candle interval" data-chart-ranges>
+                  <button type="button" role="tab" class="dex-interval" data-chart-window="1m" aria-selected="false">1m</button>
+                  <button type="button" role="tab" class="dex-interval is-active" data-chart-window="5m" aria-selected="true">5m</button>
+                  <button type="button" role="tab" class="dex-interval" data-chart-window="15m" aria-selected="false">15m</button>
+                  <button type="button" role="tab" class="dex-interval" data-chart-window="1h" aria-selected="false">1H</button>
+                  <button type="button" role="tab" class="dex-interval" data-chart-window="all" aria-selected="false">ALL</button>
                 </div>
               </div>
-              <div class="noxa-chart-stage">
-                <svg class="noxa-chart-svg" data-chart-svg viewBox="0 0 640 280" preserveAspectRatio="xMidYMid meet" aria-label="Token price chart"></svg>
+              <div class="dex-chart-stage">
+                <svg class="dex-chart-svg" data-chart-svg viewBox="0 0 720 360" preserveAspectRatio="none" aria-label="Candlestick price chart"></svg>
               </div>
               <div class="token-chart-axis">
-                <span data-chart-range>Price · THRU per token · live</span>
+                <span data-chart-range>OHLC · THRU per token</span>
                 <span data-chart-trades>No trades yet</span>
               </div>
               <div class="token-stats" data-token-stats>

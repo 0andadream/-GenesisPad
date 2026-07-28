@@ -1064,18 +1064,20 @@ function ensureChartSeed(market) {
   }
 }
 
-/** Chart time window: all | 1h | 15m — matches Pons range pills. */
-let chartWindow = "all";
+/** Candle interval: 1m | 5m | 15m | 1h | all — DexScreener-style. */
+let chartWindow = "5m";
 
-function chartWindowMs(windowKey = chartWindow) {
+function chartIntervalMs(windowKey = chartWindow) {
+  if (windowKey === "1m") return 60 * 1000;
+  if (windowKey === "5m") return 5 * 60 * 1000;
   if (windowKey === "15m") return 15 * 60 * 1000;
   if (windowKey === "1h") return 60 * 60 * 1000;
+  // ALL: adaptive bucket from data span
   return 0;
 }
 
 function compactChartPrice(priceBaseUnits) {
   if (priceBaseUnits <= 0n) return "0";
-  // Short y-axis labels (Pons-style right ticks).
   const full = formatUnits(priceBaseUnits, NATIVE_THRU_DECIMALS, 8);
   if (full.includes("e") || full.includes("E")) return full;
   const [w, f = ""] = full.split(".");
@@ -1085,8 +1087,98 @@ function compactChartPrice(priceBaseUnits) {
 }
 
 /**
- * Pons-style noxa chart: single lime area line, gradient fill, live tip,
- * y-axis ticks, buy/sell markers, hover crosshair, range pills.
+ * Bucket trade prints into OHLC candles (DexScreener-style).
+ * @returns {{ t: number, o: bigint, h: bigint, l: bigint, c: bigint, vol: bigint, buys: number, sells: number }[]}
+ */
+function buildCandles(points, intervalMs, spot = 0n) {
+  const trades = (points || [])
+    .filter((p) => p && (p.side === "buy" || p.side === "sell" || p.side === "seed" || p.side === "live"))
+    .map((p) => ({
+      t: Number(p.t) || 0,
+      price: BigInt(p.price || "0"),
+      vol: BigInt(p.thru || "0"),
+      side: p.side || "seed",
+    }))
+    .filter((p) => p.price > 0n && p.t > 0)
+    .sort((a, b) => a.t - b.t);
+
+  if (!trades.length && spot > 0n) {
+    const now = Date.now();
+    return [{
+      t: now,
+      o: spot,
+      h: spot,
+      l: spot,
+      c: spot,
+      vol: 0n,
+      buys: 0,
+      sells: 0,
+    }];
+  }
+  if (!trades.length) return [];
+
+  let bucket = intervalMs;
+  if (!bucket) {
+    const span = Math.max(60_000, (trades[trades.length - 1].t - trades[0].t) || 60_000);
+    // Aim for ~40–60 candles across ALL
+    bucket = Math.max(60_000, Math.floor(span / 48));
+  }
+
+  const map = new Map();
+  for (const tr of trades) {
+    const key = Math.floor(tr.t / bucket) * bucket;
+    let c = map.get(key);
+    if (!c) {
+      c = {
+        t: key,
+        o: tr.price,
+        h: tr.price,
+        l: tr.price,
+        c: tr.price,
+        vol: 0n,
+        buys: 0,
+        sells: 0,
+      };
+      map.set(key, c);
+    }
+    if (tr.price > c.h) c.h = tr.price;
+    if (tr.price < c.l) c.l = tr.price;
+    c.c = tr.price;
+    c.vol += tr.vol;
+    if (tr.side === "buy") c.buys += 1;
+    if (tr.side === "sell") c.sells += 1;
+  }
+
+  // Fill empty buckets through now so the chart extends live
+  const candles = [...map.values()].sort((a, b) => a.t - b.t);
+  if (!candles.length) return candles;
+  const last = candles[candles.length - 1];
+  const nowBucket = Math.floor(Date.now() / bucket) * bucket;
+  if (spot > 0n) {
+    if (last.t === nowBucket) {
+      if (spot > last.h) last.h = spot;
+      if (spot < last.l) last.l = spot;
+      last.c = spot;
+    } else if (nowBucket > last.t) {
+      candles.push({
+        t: nowBucket,
+        o: last.c,
+        h: spot > last.c ? spot : last.c,
+        l: spot < last.c ? spot : last.c,
+        c: spot,
+        vol: 0n,
+        buys: 0,
+        sells: 0,
+      });
+    }
+  }
+  // Cap candles for SVG density
+  return candles.slice(-80);
+}
+
+/**
+ * DexScreener-style OHLC candlesticks + volume histogram.
+ * Green up / red down bodies, wicks, volume bars, live price + %.
  */
 function renderTokenChart(market) {
   const root = document.querySelector("[data-token-chart]");
@@ -1100,15 +1192,9 @@ function renderTokenChart(market) {
   if (!svg || !market) return;
 
   let m = ensureChartSeed(market);
-  const now = Date.now();
-  const winMs = chartWindowMs();
-  let points = readChart(m)
-    .filter((p) => p.side !== "hold")
-    .filter((p) => !winMs || now - (Number(p.t) || 0) <= winMs)
-    .slice();
-  const stats = readTradeStats({ ...m, chart: points });
+  const rawPoints = readChart(m).filter((p) => p.side !== "hold");
+  const stats = readTradeStats(m);
 
-  // Live tip: bonding-curve spot (moves when virtual reserves update).
   let spot = 0n;
   try {
     spot = curveSpotPriceThruPerToken(m);
@@ -1119,37 +1205,10 @@ function renderTokenChart(market) {
     try { spot = BigInt(m.lastPrice); } catch { spot = 0n; }
   }
 
-  if (points.length) {
-    const lastPt = points[points.length - 1];
-    if (now - (Number(lastPt.t) || 0) > 2_000) {
-      points.push({
-        t: now - 1,
-        price: lastPt.price,
-        side: "hold",
-        thru: "0",
-        tokens: "0",
-      });
-    }
-  }
-  if (spot > 0n) {
-    points.push({
-      t: now,
-      price: spot.toString(),
-      side: "live",
-      thru: "0",
-      tokens: "0",
-    });
-  }
-  if (!points.length && spot > 0n) {
-    points = [
-      { t: now - 60_000, price: spot.toString(), side: "seed", thru: "0", tokens: "0" },
-      { t: now, price: spot.toString(), side: "live", thru: "0", tokens: "0" },
-    ];
-  }
-
-  const prices = points.map((p) => BigInt(p.price || "0"));
-  const openPrice = prices.length ? prices[0] : spot;
-  const last = spot > 0n ? spot : (prices.length ? prices[prices.length - 1] : 0n);
+  const intervalMs = chartIntervalMs();
+  const candles = buildCandles(rawPoints, intervalMs, spot);
+  const openPrice = candles.length ? candles[0].o : spot;
+  const last = candles.length ? candles[candles.length - 1].c : spot;
   const up = last >= openPrice;
 
   if (root) {
@@ -1179,14 +1238,16 @@ function renderTokenChart(market) {
     changeEl.classList.toggle("is-up", up && last !== openPrice);
     changeEl.classList.toggle("is-down", !up && last !== openPrice);
   }
-  if (rangeLabel) rangeLabel.textContent = chartWindow === "all" ? "ALL" : chartWindow.toUpperCase();
+  if (rangeLabel) {
+    rangeLabel.textContent = chartWindow === "all" ? "ALL" : chartWindow;
+  }
   if (tradesEl) {
     const realTrades = stats.buys + stats.sells;
     tradesEl.textContent = realTrades
       ? `${realTrades} trade${realTrades === 1 ? "" : "s"} · ${stats.buys}B / ${stats.sells}S`
       : "No trades yet";
   }
-  if (rangeEl) rangeEl.textContent = "Price · THRU per token · live";
+  if (rangeEl) rangeEl.textContent = `OHLC · ${chartWindow === "all" ? "auto" : chartWindow} candles · THRU`;
 
   const setStat = (sel, text, cls) => {
     const el = document.querySelector(sel);
@@ -1199,10 +1260,14 @@ function renderTokenChart(market) {
   setStat("[data-stat-sells]", String(stats.sells), "stat-sell");
   setStat("[data-stat-buy-vol]", `${formatUnits(stats.buyThru, NATIVE_THRU_DECIMALS, 6)} THRU`, "stat-buy");
   setStat("[data-stat-sell-vol]", `${formatUnits(stats.sellThru, NATIVE_THRU_DECIMALS, 6)} THRU`, "stat-sell");
-  const high = stats.high > last ? stats.high : last;
-  const low = stats.low > 0n && stats.low < last ? stats.low : (last > 0n ? last : stats.low);
-  setStat("[data-stat-high]", formatSpotPrice(high || last));
-  setStat("[data-stat-low]", formatSpotPrice(low || last));
+  let hi = 0n;
+  let lo = 0n;
+  for (const c of candles) {
+    if (hi === 0n || c.h > hi) hi = c.h;
+    if (lo === 0n || c.l < lo) lo = c.l;
+  }
+  setStat("[data-stat-high]", formatSpotPrice(hi || last));
+  setStat("[data-stat-low]", formatSpotPrice(lo || last));
   try {
     const c = readCurve(m);
     setStat("[data-stat-vault]", `${formatUnits(c.realThru, NATIVE_THRU_DECIMALS, 6)} THRU`);
@@ -1212,139 +1277,153 @@ function renderTokenChart(market) {
     setStat("[data-stat-progress]", "—");
   }
 
-  // Pons noxa geometry
-  const W = 640;
-  const H = 280;
+  // DexScreener layout: price pane + volume pane
+  const W = 720;
+  const H = 360;
   const padL = 8;
-  const padR = 72;
-  const padT = 16;
-  const padB = 28;
+  const padR = 68;
+  const padT = 12;
+  const volH = 64;
+  const gap = 10;
+  const priceH = H - padT - volH - gap - 8;
+  const priceBottom = padT + priceH;
+  const volTop = priceBottom + gap;
   const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-  const baseline = H - padB;
 
-  let minP = prices[0] || 0n;
-  let maxP = prices[0] || 1n;
-  for (const p of prices) {
-    if (p < minP) minP = p;
-    if (p > maxP) maxP = p;
-  }
-  if (last > 0n) {
-    if (last < minP) minP = last;
-    if (last > maxP) maxP = last;
-  }
+  let minP = lo || last || 1n;
+  let maxP = hi || last || 1n;
   if (maxP === minP) maxP = minP + 1n;
-  const pad = (maxP - minP) / 8n || 1n;
+  const pad = (maxP - minP) / 10n || 1n;
   minP = minP > pad ? minP - pad : 0n;
   maxP += pad;
   const span = maxP - minP || 1n;
 
-  const n = Math.max(points.length, 2);
-  const coords = points.map((p, i) => {
-    const x = padL + (plotW * i) / Math.max(n - 1, 1);
-    const yRatio = Number(((BigInt(p.price) - minP) * 10000n) / span) / 10000;
-    const y = padT + plotH * (1 - Math.min(1, Math.max(0, yRatio)));
-    return {
-      x,
-      y,
-      side: p.side,
-      price: BigInt(p.price || "0"),
-      t: Number(p.t) || 0,
-    };
-  });
-  if (coords.length === 1) {
-    coords.push({
-      x: padL + plotW,
-      y: coords[0].y,
-      side: coords[0].side,
-      price: coords[0].price,
-      t: coords[0].t,
-    });
+  let maxVol = 1n;
+  for (const c of candles) {
+    if (c.vol > maxVol) maxVol = c.vol;
   }
 
-  const lineD = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(2)},${c.y.toFixed(2)}`).join(" ");
-  const areaD =
-    `${lineD} L${coords[coords.length - 1].x.toFixed(2)},${baseline.toFixed(2)} ` +
-    `L${coords[0].x.toFixed(2)},${baseline.toFixed(2)} Z`;
+  const n = Math.max(candles.length, 1);
+  const slot = plotW / n;
+  const bodyW = Math.max(2, Math.min(14, slot * 0.62));
 
-  // Y ticks (4 levels) — Pons style right labels
+  const yPrice = (p) => {
+    const yRatio = Number(((p - minP) * 10000n) / span) / 10000;
+    return padT + priceH * (1 - Math.min(1, Math.max(0, yRatio)));
+  };
+
+  // Grid + y ticks
   const yTicks = [];
-  for (let i = 0; i < 4; i += 1) {
-    const y = padT + (plotH * i) / 3;
-    const priceAt = maxP - ((maxP - minP) * BigInt(i)) / 3n;
+  for (let i = 0; i < 5; i += 1) {
+    const y = padT + (priceH * i) / 4;
+    const priceAt = maxP - ((maxP - minP) * BigInt(i)) / 4n;
     yTicks.push({ y, label: compactChartPrice(priceAt) });
   }
-
-  const gradId = "noxaAreaGrad";
-  const dots = coords
-    .filter((c) => c.side === "buy" || c.side === "sell")
-    .map((c) =>
-      `<circle class="chart-${c.side}" cx="${c.x.toFixed(2)}" cy="${c.y.toFixed(2)}" r="3.2"></circle>`,
-    )
-    .join("");
-
-  const lastCoord = coords[coords.length - 1];
   const grid = yTicks.map((t) =>
-    `<line class="noxa-chart-grid" x1="${padL}" x2="${padL + plotW}" y1="${t.y.toFixed(2)}" y2="${t.y.toFixed(2)}"></line>`
-    + `<text class="noxa-chart-ytick" x="${W - 4}" y="${(t.y - 4).toFixed(2)}" text-anchor="end">${t.label}</text>`,
+    `<line class="dex-grid" x1="${padL}" x2="${padL + plotW}" y1="${t.y.toFixed(1)}" y2="${t.y.toFixed(1)}"></line>`
+    + `<text class="dex-ytick" x="${W - 4}" y="${(t.y + 3).toFixed(1)}" text-anchor="end">${t.label}</text>`,
   ).join("");
+
+  let candleSvg = "";
+  let volSvg = "";
+  candles.forEach((c, i) => {
+    const cx = padL + slot * i + slot / 2;
+    const bull = c.c >= c.o;
+    const cls = bull ? "up" : "down";
+    const yO = yPrice(c.o);
+    const yC = yPrice(c.c);
+    const yH = yPrice(c.h);
+    const yL = yPrice(c.l);
+    const bodyTop = Math.min(yO, yC);
+    const bodyBot = Math.max(yO, yC);
+    const bodyHeight = Math.max(1.2, bodyBot - bodyTop);
+    // Wick
+    candleSvg +=
+      `<line class="dex-wick ${cls}" x1="${cx.toFixed(2)}" x2="${cx.toFixed(2)}" `
+      + `y1="${yH.toFixed(2)}" y2="${yL.toFixed(2)}"></line>`;
+    // Body
+    candleSvg +=
+      `<rect class="dex-body ${cls}" x="${(cx - bodyW / 2).toFixed(2)}" y="${bodyTop.toFixed(2)}" `
+      + `width="${bodyW.toFixed(2)}" height="${bodyHeight.toFixed(2)}" rx="0.5"></rect>`;
+    // Volume
+    const vH = maxVol > 0n
+      ? Math.max(1, Number((c.vol * 1000n) / maxVol) / 1000) * (volH - 4)
+      : 1;
+    const vy = volTop + volH - vH;
+    volSvg +=
+      `<rect class="dex-vol ${cls}" x="${(cx - bodyW / 2).toFixed(2)}" y="${vy.toFixed(2)}" `
+      + `width="${bodyW.toFixed(2)}" height="${vH.toFixed(2)}"></rect>`;
+  });
+
+  // Volume baseline
+  const volBase =
+    `<line class="dex-grid" x1="${padL}" x2="${padL + plotW}" y1="${(volTop + volH).toFixed(1)}" y2="${(volTop + volH).toFixed(1)}"></line>`
+    + `<text class="dex-ytick" x="${W - 4}" y="${(volTop + 10).toFixed(1)}" text-anchor="end">Vol</text>`;
+
+  // Separator between price & volume
+  const sep =
+    `<line class="dex-sep" x1="${padL}" x2="${padL + plotW}" y1="${priceBottom.toFixed(1)}" y2="${priceBottom.toFixed(1)}"></line>`;
 
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = `
-    <defs>
-      <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="var(--chart-line)" stop-opacity="0.34"/>
-        <stop offset="100%" stop-color="var(--chart-line)" stop-opacity="0"/>
-      </linearGradient>
-    </defs>
     ${grid}
-    <path class="noxa-chart-area" d="${areaD}" fill="url(#${gradId})"></path>
-    <path class="noxa-chart-line" d="${lineD}" fill="none"></path>
-    ${dots}
-    <circle class="noxa-chart-live-dot" cx="${lastCoord.x.toFixed(2)}" cy="${lastCoord.y.toFixed(2)}" r="4.5"></circle>
-    <g class="noxa-chart-cursor" hidden>
-      <line x1="0" x2="0" y1="${padT}" y2="${baseline}"></line>
-      <circle cx="0" cy="0" r="4.5"></circle>
+    ${sep}
+    ${volBase}
+    <g class="dex-volumes">${volSvg}</g>
+    <g class="dex-candles">${candleSvg}</g>
+    <g class="dex-cursor" hidden>
+      <line class="dex-cursor-v" x1="0" x2="0" y1="${padT}" y2="${volTop + volH}"></line>
+      <line class="dex-cursor-h" x1="${padL}" x2="${padL + plotW}" y1="0" y2="0"></line>
     </g>
-    <rect class="noxa-chart-scrub-hit" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}"></rect>
+    <rect class="dex-scrub" x="${padL}" y="${padT}" width="${plotW}" height="${priceH + gap + volH}"></rect>
   `;
 
-  // Hover crosshair (Pons scrub)
-  const cursor = svg.querySelector(".noxa-chart-cursor");
-  const hit = svg.querySelector(".noxa-chart-scrub-hit");
-  const moveCursor = (clientX) => {
-    if (!cursor || !hit) return;
+  // Hover: snap to candle, show OHLC in price
+  const cursor = svg.querySelector(".dex-cursor");
+  const scrub = svg.querySelector(".dex-scrub");
+  const onMove = (clientX) => {
+    if (!cursor || !candles.length) return;
     const rect = svg.getBoundingClientRect();
     const scaleX = W / Math.max(rect.width, 1);
     const xSvg = (clientX - rect.left) * scaleX;
-    // nearest point
-    let best = coords[0];
-    let bestDist = Infinity;
-    for (const c of coords) {
-      const d = Math.abs(c.x - xSvg);
-      if (d < bestDist) {
-        bestDist = d;
-        best = c;
-      }
-    }
+    let idx = Math.floor((xSvg - padL) / slot);
+    idx = Math.max(0, Math.min(candles.length - 1, idx));
+    const c = candles[idx];
+    const cx = padL + slot * idx + slot / 2;
+    const cy = yPrice(c.c);
     cursor.hidden = false;
-    const line = cursor.querySelector("line");
-    const circle = cursor.querySelector("circle");
-    if (line) {
-      line.setAttribute("x1", best.x.toFixed(2));
-      line.setAttribute("x2", best.x.toFixed(2));
+    const v = cursor.querySelector(".dex-cursor-v");
+    const h = cursor.querySelector(".dex-cursor-h");
+    if (v) {
+      v.setAttribute("x1", cx.toFixed(2));
+      v.setAttribute("x2", cx.toFixed(2));
     }
-    if (circle) {
-      circle.setAttribute("cx", best.x.toFixed(2));
-      circle.setAttribute("cy", best.y.toFixed(2));
+    if (h) {
+      h.setAttribute("y1", cy.toFixed(2));
+      h.setAttribute("y2", cy.toFixed(2));
     }
-    if (priceEl) priceEl.textContent = formatSpotPrice(best.price);
+    if (priceEl) {
+      priceEl.textContent = formatSpotPrice(c.c);
+    }
+    if (changeVal || changeEl) {
+      const o = c.o;
+      const bull = c.c >= c.o;
+      let tip = `O ${compactChartPrice(c.o)}  H ${compactChartPrice(c.h)}  L ${compactChartPrice(c.l)}  C ${compactChartPrice(c.c)}`;
+      if (o > 0n && c.c !== o) {
+        const d = bull ? c.c - o : o - c.c;
+        const bps = (d * 10000n) / o;
+        tip = `${bull ? "+" : "−"}${(Number(bps) / 100).toFixed(2)}% · ${tip}`;
+      }
+      if (changeVal) changeVal.textContent = tip;
+    }
   };
-  if (hit) {
-    hit.onpointermove = (e) => moveCursor(e.clientX);
-    hit.onpointerleave = () => {
+  if (scrub) {
+    scrub.onpointermove = (e) => onMove(e.clientX);
+    scrub.onpointerleave = () => {
       if (cursor) cursor.hidden = true;
       if (priceEl) priceEl.textContent = formatSpotPrice(last);
+      if (changeVal) changeVal.textContent = pctText;
+      else if (changeEl) changeEl.textContent = pctText;
     };
   }
 }
@@ -1354,7 +1433,7 @@ function bindChartRangePills() {
     if (btn.dataset.bound === "1") return;
     btn.dataset.bound = "1";
     btn.addEventListener("click", () => {
-      chartWindow = btn.dataset.chartWindow || "all";
+      chartWindow = btn.dataset.chartWindow || "5m";
       document.querySelectorAll("[data-chart-window]").forEach((b) => {
         const on = b.dataset.chartWindow === chartWindow;
         b.classList.toggle("is-active", on);
