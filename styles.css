@@ -75,9 +75,12 @@ html[data-theme="dark"] .line-link{border-bottom-color:var(--ink)}
 
 /* Protocol / How-it-works — GTE-style black field */
 .manifest .section-index,
-.manifest .kicker,
-.manifest .scene-caption {
+.manifest .kicker {
   position: relative;
+  z-index: 1;
+  color: #a1a1aa;
+}
+.manifest .scene-caption {
   z-index: 1;
   color: #a1a1aa;
 }
