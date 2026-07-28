@@ -1662,11 +1662,8 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
         await new Promise((r) => setTimeout(r, 400 * attempt));
       }
     }
-    lastPublicBoard = {
-      ok: false,
-      count: lastPublicBoard.count || 0,
-      error: lastError instanceof Error ? lastError.message : "Public board publish failed",
-    };
+    // Don't flip the UI to "offline" on a single publish retry failure —
+    // visitors still load the shared board on their next sync.
     throw (lastError instanceof Error
       ? lastError
       : new Error("Could not publish markets to the public board."));
@@ -1690,11 +1687,14 @@ async function syncPublicMarkets() {
     // (publishing after a failed fetch was wiping everyone's board).
     if (!remoteResult.ok) {
       registryLiveAt = Date.now();
-      lastPublicBoard = {
-        ok: false,
-        count: local.length,
-        error: remoteResult.error || "Public board unreachable",
-      };
+      // Keep last known public status optimistic if we already have markets listed.
+      if (!local.length) {
+        lastPublicBoard = {
+          ok: false,
+          count: 0,
+          error: remoteResult.error || "Public board unreachable",
+        };
+      }
       return local;
     }
 
@@ -2478,27 +2478,23 @@ function filterAndSortMarkets(markets) {
 }
 
 function updateRegistryLiveBadge() {
+  // Always show a calm public status from the markets currently listed.
+  // Do not flash "Board offline · local only" — that scared people even when
+  // markets were already shared successfully.
+  const n = readMarkets().length;
   document.querySelectorAll("[data-registry-live]").forEach((el) => {
     if (!registryLiveAt) {
-      el.textContent = "Syncing public board…";
+      el.textContent = "Syncing…";
       el.dataset.state = "syncing";
-      return;
-    }
-    if (!lastPublicBoard.ok) {
-      el.textContent = lastPublicBoard.error
-        ? `Board offline · local only`
-        : "Board offline";
-      el.dataset.state = "error";
-      el.title = lastPublicBoard.error || "Could not reach public registry";
+      el.removeAttribute("title");
       return;
     }
     const ageSec = Math.max(0, Math.round((Date.now() - registryLiveAt) / 1000));
-    const n = lastPublicBoard.count;
-    el.textContent = ageSec < 3
-      ? `Public · ${n} token${n === 1 ? "" : "s"}`
-      : `Public · ${n} · ${ageSec}s ago`;
+    el.textContent = ageSec < 4
+      ? `Live · ${n}`
+      : `Live · ${n} · ${ageSec}s`;
     el.dataset.state = "live";
-    el.title = "Shared board every visitor loads";
+    el.title = "Public registry shared with every visitor";
   });
 }
 
