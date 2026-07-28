@@ -271,6 +271,88 @@ refreshStatsInstant();
 refreshStats();
 setInterval(refreshStats, 6000);
 
+/** Protocol section — GTE-style black field + lane copy. */
+const PROTOCOL_LANES = [
+  "Discovery starts on a public bonding curve — price rises with demand, no pool required to launch.",
+  "Anyone can buy or sell against the curve with THRU. Fees stay transparent; custody stays in your wallet.",
+  "Hit the vault target and the market graduates — depth can seed without trapping curve liquidity.",
+  "Settlement is ThruVM. Every fill resolves into an on-chain public record you can verify.",
+];
+
+const manifestSection = document.querySelector("[data-manifest]");
+const laneCopy = document.querySelector("[data-protocol-lane-copy]");
+const laneButtons = [...document.querySelectorAll("[data-protocol-lanes] [data-lane]")];
+
+function setProtocolLane(index) {
+  const i = Math.max(0, Math.min(PROTOCOL_LANES.length - 1, Number(index) || 0));
+  laneButtons.forEach((btn) => {
+    btn.classList.toggle("is-active", Number(btn.dataset.lane) === i);
+  });
+  if (!laneCopy) return;
+  const next = PROTOCOL_LANES[i];
+  if (laneCopy.textContent === next) return;
+  laneCopy.classList.add("is-swap");
+  window.setTimeout(() => {
+    laneCopy.textContent = next;
+    laneCopy.classList.remove("is-swap");
+  }, 160);
+}
+
+laneButtons.forEach((btn) => {
+  btn.addEventListener("click", () => setProtocolLane(btn.dataset.lane));
+});
+
+if (manifestSection) {
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduceMotion) {
+    manifestSection.classList.add("is-inview");
+  } else {
+    const manifestObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          manifestSection.classList.add("is-inview");
+          manifestObserver.disconnect();
+        });
+      },
+      { threshold: 0.22 },
+    );
+    manifestObserver.observe(manifestSection);
+  }
+
+  // Soft auto-cycle lanes while the section is in view (stops on user click).
+  let laneIndex = 0;
+  let laneTimer = null;
+  let userTouchedLanes = false;
+  laneButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      userTouchedLanes = true;
+      if (laneTimer) window.clearInterval(laneTimer);
+    }, { once: true });
+  });
+  const startLaneCycle = () => {
+    if (userTouchedLanes || reduceMotion || laneTimer) return;
+    laneTimer = window.setInterval(() => {
+      if (!manifestSection.classList.contains("is-inview")) return;
+      laneIndex = (laneIndex + 1) % PROTOCOL_LANES.length;
+      setProtocolLane(laneIndex);
+    }, 4200);
+  };
+  const laneCycleObserver = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) startLaneCycle();
+        else if (laneTimer) {
+          window.clearInterval(laneTimer);
+          laneTimer = null;
+        }
+      });
+    },
+    { threshold: 0.35 },
+  );
+  laneCycleObserver.observe(manifestSection);
+}
+
 const motionStage = document.querySelector("[data-motion-stage]");
 const motionWords = [...document.querySelectorAll("[data-motion-word]")];
 let motionFrame;
