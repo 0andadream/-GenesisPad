@@ -61,12 +61,13 @@ export class DexChart implements ChartController {
   private raf = 0;
   private opts: ChartOptions;
   /**
-   * Multiply real THRU prices into a comfortable display range.
-   * Bonding-curve spots are often 1e-12..1e-6; LW Charts + default minMove
-   * 0.01 rounds those to 0 → a flat line with no red/green bodies.
-   * Axis labels divide by this scale so the user still sees real THRU.
+   * Multiply real THRU prices into comfortable "units" (~1..10).
+   * Bonding-curve spots are often 1e-12..1e-6; LW Charts default minMove
+   * 0.01 would round those to 0. Axis shows unit numbers (side scale);
+   * real THRU = unit × 10^displayExp.
    */
   private displayScale = 1;
+  private displayExp = 0;
 
   constructor(options: ChartOptions = {}) {
     this.opts = options;
@@ -125,27 +126,34 @@ export class DexChart implements ChartController {
       },
       rightPriceScale: {
         borderColor: theme.border,
-        scaleMargins: { top: 0.08, bottom: this.showVolume ? 0.28 : 0.06 },
+        scaleMargins: { top: 0.1, bottom: this.showVolume ? 0.28 : 0.08 },
+        entireTextOnly: false,
+        visible: true,
+        borderVisible: true,
+        minimumWidth: 72,
       },
       timeScale: {
         borderColor: theme.border,
         timeVisible: true,
         secondsVisible: true,
-        rightOffset: 6,
-        barSpacing: 8,
-        minBarSpacing: 2,
+        // Wide bars so candles read as horizontal blocks, not thin vertical sticks.
+        rightOffset: 10,
+        barSpacing: 22,
+        minBarSpacing: 10,
+        fixLeftEdge: false,
+        fixRightEdge: false,
       },
       handleScroll: true,
       handleScale: true,
       kineticScroll: { mouse: true, touch: true },
     });
 
-    // Display-scaled prices land ~1..100; minMove 1e-8 is plenty for body color.
-    // Formatter converts back to real THRU for axis labels.
-    const microPriceFormat = {
+    // Prices are display-scaled into ~1..10 "units". Axis shows those unit
+    // numbers (readable side labels). Real THRU = unit × 10^exp.
+    const unitPriceFormat = {
       type: "custom" as const,
-      minMove: 1e-8,
-      formatter: (price: number) => this.formatRealPrice(price),
+      minMove: 0.0001,
+      formatter: (price: number) => this.formatUnitAxis(price),
     };
 
     const candleSeries = chart.addCandlestickSeries({
@@ -155,9 +163,10 @@ export class DexChart implements ChartController {
       borderDownColor: theme.down,
       wickUpColor: theme.up,
       wickDownColor: theme.down,
-      priceLineVisible: false,
+      borderVisible: true,
+      priceLineVisible: true,
       lastValueVisible: true,
-      priceFormat: microPriceFormat,
+      priceFormat: unitPriceFormat,
     });
 
     let volumeSeries: VolumeSeries | null = null;
@@ -290,9 +299,8 @@ export class DexChart implements ChartController {
   }
 
   /**
-   * Pick a scale so the latest price sits near 1..10. Rebuilds are cheap
-   * (history is tiny for bonding curves). Keeps LW internal math away from
-   * denormal / default-0.01 rounding.
+   * Pick a scale so the latest price sits near 1..10 units.
+   * ref = 6.25e-11 → exp = -11 → scale = 1e11 → unit ≈ 6.25
    */
   private recomputeDisplayScale(data: Candle[]): void {
     let ref = 0;
@@ -305,22 +313,28 @@ export class DexChart implements ChartController {
     }
     if (!(ref > 0)) {
       this.displayScale = 1;
+      this.displayExp = 0;
       return;
     }
-    // ref = 6.25e-11 → exp = -11 → scale = 1e11 → display ≈ 6.25
     const exp = Math.floor(Math.log10(ref));
     const scale = 10 ** -exp;
+    this.displayExp = exp;
     this.displayScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
   }
 
-  /** Axis / price-line label: display units → real THRU. */
-  private formatRealPrice(displayPrice: number): string {
+  /** Right-axis labels: plain unit numbers (e.g. 6.2500). */
+  private formatUnitAxis(displayPrice: number): string {
     if (!Number.isFinite(displayPrice) || displayPrice === 0) return "0";
-    const real = displayPrice / (this.displayScale || 1);
-    const abs = Math.abs(real);
-    if (abs >= 1) return real.toPrecision(6);
-    if (abs >= 1e-4) return real.toFixed(8);
-    return real.toExponential(4);
+    const abs = Math.abs(displayPrice);
+    if (abs >= 100) return displayPrice.toFixed(2);
+    if (abs >= 1) return displayPrice.toFixed(4);
+    if (abs >= 0.01) return displayPrice.toFixed(5);
+    return displayPrice.toPrecision(4);
+  }
+
+  /** Public: unit scale metadata for chart header / HUD. */
+  getPriceUnit(): { scale: number; exp: number } {
+    return { scale: this.displayScale || 1, exp: this.displayExp };
   }
 
   private toDisplayBar(c: Candle): {
@@ -337,20 +351,23 @@ export class DexChart implements ChartController {
     const high = Math.max(c.high, c.open, c.close) * s;
     const lowRaw = Math.min(c.low > 0 ? c.low : Math.min(c.open, c.close), c.open, c.close);
     const low = Math.max(0, lowRaw * s);
-    // Guarantee non-zero body height in display space so color always paints.
-    const minBody = Math.max(Math.abs(close) * 1e-4, 1e-6);
+    // Visible body in unit space (~0.2% min) so green/red fills read clearly.
+    const minBody = Math.max(Math.abs(close) * 0.002, 0.0001);
     let o = open;
     let cl = close;
     if (Math.abs(cl - o) < minBody) {
-      // Preserve direction if any, else slight up doji
       if (cl >= o) cl = o + minBody;
       else o = cl + minBody;
     }
+    // Modest wicks — keep candles blocky, not tall thin needles.
+    const bodyHi = Math.max(o, cl);
+    const bodyLo = Math.min(o, cl);
+    const wick = Math.max((bodyHi - bodyLo) * 0.15, minBody * 0.35);
     return {
       time: c.time as UTCTimestamp,
       open: o,
-      high: Math.max(high, o, cl),
-      low: Math.min(low > 0 ? low : Math.min(o, cl), o, cl),
+      high: Math.max(high, bodyHi + wick),
+      low: Math.max(0, Math.min(low > 0 ? low : bodyLo, bodyLo - wick)),
       close: cl,
     };
   }
@@ -375,11 +392,27 @@ export class DexChart implements ChartController {
     }
     if (bars.length) {
       this.setPriceLine(bars[bars.length - 1].close);
-      this.chart?.timeScale().fitContent();
-      this.chart?.priceScale("right").applyOptions({ autoScale: true });
+      // Keep wide bar spacing; show a comfortable window of recent candles.
+      this.chart?.timeScale().applyOptions({ barSpacing: 22, minBarSpacing: 10, rightOffset: 10 });
+      const n = bars.length;
+      if (n <= 24) {
+        this.chart?.timeScale().setVisibleLogicalRange({
+          from: -1.5,
+          to: n + 3,
+        });
+      } else {
+        this.chart?.timeScale().setVisibleLogicalRange({
+          from: n - 28,
+          to: n + 3,
+        });
+      }
+      this.chart?.priceScale("right").applyOptions({
+        autoScale: true,
+        visible: true,
+        minimumWidth: 72,
+      });
       this.pinned = true;
     }
-    // Markers off by default for launchpad (arrows clutter micro charts)
     if (this.showMarkers) this.paintMarkers();
     else this.candles.setMarkers([]);
   }

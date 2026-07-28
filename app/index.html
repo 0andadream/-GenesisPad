@@ -4,17 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Discover and launch tokens on Genesis, powered by ThruVM." />
-    <meta name="theme-color" content="#eeeeec" />
+    <meta name="theme-color" content="#121211" />
     <script>
       (function () {
         try {
-          var key = "genesis-theme";
-          var theme = localStorage.getItem(key);
-          if (theme !== "light" && theme !== "dark") {
-            theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-          }
-          document.documentElement.dataset.theme = theme;
-          document.documentElement.style.colorScheme = theme;
+          document.documentElement.dataset.theme = "dark";
+          document.documentElement.style.colorScheme = "dark";
+          localStorage.setItem("genesis-theme", "dark");
         } catch (e) {}
       })();
     </script>
@@ -50,9 +46,6 @@
         <a href="#activity" data-nav="activity">Activity</a>
       </nav>
       <div class="header-tools">
-        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark mode" title="Dark mode">
-          <span data-theme-icon aria-hidden="true">☾</span>
-        </button>
         <a class="create-button header-create" href="#create">Create a token <b>＋</b></a>
         <button class="ink-button" type="button" data-wallet-open>Connect wallet</button>
       </div>
@@ -249,7 +242,7 @@
                 <div class="dex-live-host" data-live-chart aria-label="Live candlestick chart"></div>
               </div>
               <div class="token-chart-axis">
-                <span data-chart-range>OHLC · THRU per token · live</span>
+                <span data-chart-range>OHLC · price units · live</span>
                 <span data-chart-trades>No trades yet</span>
               </div>
               <div class="token-stats" data-token-stats>

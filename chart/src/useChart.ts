@@ -208,9 +208,9 @@ export function useChart(options: ChartOptions = {}): UseChartResult {
         borderColor: theme.border,
         timeVisible: true,
         secondsVisible: true,
-        rightOffset: 6,
-        barSpacing: 8,
-        minBarSpacing: 2,
+        rightOffset: 10,
+        barSpacing: 22,
+        minBarSpacing: 10,
       },
       handleScroll: {
         mouseWheel: true,

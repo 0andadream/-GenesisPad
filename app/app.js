@@ -40,45 +40,21 @@ let walletSendAssets = [];
 
 const THEME_KEY = "genesis-theme";
 
-function getPreferredTheme() {
+/** App is dark-only — no light mode, no switch. */
+function applyTheme() {
+  document.documentElement.dataset.theme = "dark";
+  document.documentElement.style.colorScheme = "dark";
   try {
-    const saved = localStorage.getItem(THEME_KEY);
-    if (saved === "light" || saved === "dark") return saved;
-  } catch {
-    /* ignore */
-  }
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-function applyTheme(theme) {
-  const next = theme === "dark" ? "dark" : "light";
-  document.documentElement.dataset.theme = next;
-  document.documentElement.style.colorScheme = next;
-  try {
-    localStorage.setItem(THEME_KEY, next);
+    localStorage.setItem(THEME_KEY, "dark");
   } catch {
     /* ignore */
   }
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = next === "dark" ? "#121211" : "#eeeeec";
-  document.querySelectorAll("[data-theme-icon]").forEach((el) => {
-    el.textContent = next === "dark" ? "☀" : "☾";
-  });
-  document.querySelectorAll("[data-theme-toggle]").forEach((btn) => {
-    const toLight = next === "dark";
-    btn.setAttribute("aria-label", toLight ? "Switch to light mode" : "Switch to dark mode");
-    btn.title = toLight ? "Light mode" : "Dark mode";
-  });
+  if (meta) meta.content = "#121211";
 }
 
 function initTheme() {
-  applyTheme(getPreferredTheme());
-  document.querySelectorAll("[data-theme-toggle]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-      applyTheme(current === "dark" ? "light" : "dark");
-    });
-  });
+  applyTheme();
 }
 
 initTheme();
@@ -977,11 +953,23 @@ function curveSpotPriceThruPerToken(market) {
   return (c.virtualThru * oneToken * extra) / c.virtualToken;
 }
 
+/**
+ * Spot as readable price units (same scale as the chart axis).
+ * 6.25e-11 THRU → "6.2500 × 10⁻¹¹ THRU"
+ */
 function formatSpotPrice(priceBaseUnits) {
-  if (priceBaseUnits <= 0n) return "0 THRU";
+  if (priceBaseUnits <= 0n) return "0";
   const raw = typeof priceBaseUnits === "bigint" ? priceBaseUnits : BigInt(String(priceBaseUnits || "0"));
-  // All new spots use PRICE_FORMAT_DECIMALS (21). formatUnits handles it.
-  return `${formatUnits(raw, PRICE_FORMAT_DECIMALS, 12)} THRU`;
+  const s = formatUnits(raw, PRICE_FORMAT_DECIMALS, 18);
+  const n = Number(s);
+  if (!(n > 0) || !Number.isFinite(n)) return "0";
+  if (n >= 0.0001) return `${n >= 1 ? n.toFixed(6) : n.toFixed(8)} THRU`;
+  const exp = Math.floor(Math.log10(n));
+  const units = n * 10 ** -exp;
+  const abs = Math.abs(exp);
+  const sup = String(abs).replace(/\d/g, (d) => "⁰¹²³⁴⁵⁶⁷⁸⁹"[Number(d)]);
+  const pow = exp < 0 ? `10⁻${sup}` : `10${sup}`;
+  return `${units.toFixed(4)} × ${pow} THRU`;
 }
 
 /** Human float THRU/token for Lightweight Charts (never truncates micro prices). */

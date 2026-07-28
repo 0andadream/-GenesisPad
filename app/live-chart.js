@@ -123,7 +123,8 @@ function marketToCandles(market) {
     }
     const high = Math.max(open, close);
     const low = Math.min(open, close);
-    const pad = Math.max((high - low) * 0.05, close * 1e-6, 1e-24);
+    // Short wicks — candle bodies stay blocky (horizontal width comes from barSpacing).
+    const pad = Math.max((high - low) * 0.12, close * 2e-4, 1e-24);
     candles.push({
       time,
       open,
@@ -189,11 +190,43 @@ function pointsSignature(market) {
   ].join("|");
 }
 
+/**
+ * Convert a real THRU/token float into readable price units.
+ * 6.25e-11 → { units: 6.25, exp: -11 }  (1 unit = 10^exp THRU)
+ */
+function toPriceUnits(real) {
+  if (!(real > 0) || !Number.isFinite(real)) return { units: 0, exp: 0, scale: 1 };
+  const exp = Math.floor(Math.log10(real));
+  const scale = 10 ** -exp;
+  const units = real * scale;
+  return {
+    units: Number.isFinite(units) ? units : 0,
+    exp,
+    scale: Number.isFinite(scale) && scale > 0 ? scale : 1,
+  };
+}
+
+function formatExp(exp) {
+  if (exp === 0) return "1";
+  const abs = Math.abs(exp);
+  const sup = String(abs).replace(/\d/g, (d) => "⁰¹²³⁴⁵⁶⁷⁸⁹"[Number(d)]);
+  return exp < 0 ? `10⁻${sup}` : `10${sup}`;
+}
+
+/** Big header price: unit number + unit scale (readable, matches chart axis). */
 function formatSpotLabel(n) {
   if (!(n > 0)) return "—";
-  if (n >= 1) return `${n.toFixed(6)} THRU`;
-  if (n >= 0.0001) return `${n.toFixed(8)} THRU`;
-  return `${n.toExponential(4)} THRU`;
+  const { units, exp } = toPriceUnits(n);
+  if (!(units > 0)) return "—";
+  if (exp === 0) return `${units.toFixed(4)} THRU`;
+  return `${units.toFixed(4)} unit`;
+}
+
+function formatUnitScaleNote(n) {
+  if (!(n > 0)) return "Price units · live";
+  const { exp } = toPriceUnits(n);
+  if (exp === 0) return "OHLC · THRU per token · live";
+  return `OHLC · 1 unit = ${formatExp(exp)} THRU · side scale = units`;
 }
 
 function updateHeader(market) {
@@ -242,7 +275,7 @@ function updateHeader(market) {
       ? `${n} trade${n === 1 ? "" : "s"} · ${buys}B / ${sells}S`
       : "No trades yet";
   }
-  if (rangeEl) rangeEl.textContent = `OHLC · trade prints · THRU · live`;
+  if (rangeEl) rangeEl.textContent = formatUnitScaleNote(spot);
 }
 
 /**
