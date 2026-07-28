@@ -1517,9 +1517,10 @@ function sanitizeMarketForRegistry(market) {
   if (!market?.mintAddress) return null;
   // Keep curve private key — required for public bonding-curve fills on alphanet.
   const copy = { ...market };
-  // Cap chart history for payload size.
-  if (Array.isArray(copy.chart) && copy.chart.length > CHART_HISTORY) {
-    copy.chart = copy.chart.slice(-CHART_HISTORY);
+  // Cap chart history hard for the public board (smaller writes survive free-tier limits).
+  const maxChart = Math.min(CHART_HISTORY, 48);
+  if (Array.isArray(copy.chart) && copy.chart.length > maxChart) {
+    copy.chart = copy.chart.slice(-maxChart);
   }
   // Cap image size (base64) so the shared board stays under free-tier limits.
   if (typeof copy.image === "string" && copy.image.length > TOKEN_IMAGE_MAX_CHARS) {
@@ -1591,8 +1592,29 @@ async function fetchPublicMarketsFrom(url, { timeoutMs = REGISTRY_FETCH_TIMEOUT_
 }
 
 /**
- * Read the public board (same-origin API).
- * mode is kept for call-site compatibility; both paths hit the API once.
+ * Static bootstrap board committed to the deploy (friends still see known markets
+ * even if free mirrors are rate-limited). Never treats this alone as a wipe source.
+ */
+async function fetchBootstrapMarkets() {
+  try {
+    const response = await fetch(`/markets-board.json?t=${Date.now()}`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return [];
+    const data = await response.json();
+    const markets = Array.isArray(data?.markets)
+      ? data.markets
+      : Array.isArray(data) ? data : [];
+    return stampMarkets(markets);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read the public board (same-origin API), merge bootstrap if needed.
+ * mode is kept for call-site compatibility.
  * CRITICAL: failed fetches must NOT be treated as empty boards.
  */
 async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
@@ -1600,7 +1622,12 @@ async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
   const result = await fetchPublicMarketsFrom(MARKET_REGISTRY_API, {
     timeoutMs: REGISTRY_FETCH_TIMEOUT_MS,
   });
+  const bootstrap = await fetchBootstrapMarkets();
   if (!result.ok) {
+    if (bootstrap.length) {
+      lastPublicBoard = { ok: true, count: bootstrap.length, error: "" };
+      return { ok: true, markets: bootstrap, fromBootstrap: true };
+    }
     lastPublicBoard = {
       ok: false,
       count: 0,
@@ -1608,7 +1635,7 @@ async function fetchPublicMarketsDetailed({ mode = "full" } = {}) {
     };
     return { ok: false, markets: [], error: lastPublicBoard.error };
   }
-  const markets = stampMarkets(result.markets);
+  const markets = stampMarkets(mergeMarketLists(result.markets, bootstrap));
   lastPublicBoard = { ok: true, count: markets.length, error: "" };
   return { ok: true, markets };
 }

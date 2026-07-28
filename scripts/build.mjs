@@ -46,7 +46,7 @@ await build({
   logLevel: "info",
 });
 
-// Public static assets (logo, favicon, stats.json, …)
+// Public static assets (logo, favicon, stats.json, markets-board.json, …)
 if (await exists(new URL("public/", root))) {
   await cp(new URL("public/", root), output, { recursive: true });
 }

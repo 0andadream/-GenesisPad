@@ -1,20 +1,27 @@
 /**
- * Same-origin public market registry for GenesisPad.
+ * GenesisPad public market registry (same-origin).
  *
- * Clients should ONLY talk to this endpoint. We merge server-side and fan out
- * to JSONBlob mirrors with retries (free jsonblob 429s easily when the browser
- * hammers multiple blobs directly).
+ * Clients ONLY talk to this endpoint.
+ * Storage: JSONBlob mirrors with:
+ *  - sequential writes + 429 backoff
+ *  - POST-create fallback when PUTs are rate-limited
+ *  - mirrorIds discovery inside the payload so new blobs become known
+ *  - warm-instance memory as last-resort L1
  */
 
-const MIRROR_URLS = [
-  process.env.GENESIS_MARKETS_BLOB_URL,
-  process.env.GENESIS_MARKETS_BLOB_URL_2,
-  "https://jsonblob.com/api/jsonBlob/019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
-  "https://jsonblob.com/api/jsonBlob/019fa906-1003-7f56-8791-16529d818eb5",
+const SEED_MIRROR_IDS = [
+  process.env.GENESIS_MARKETS_BLOB_ID,
+  process.env.GENESIS_MARKETS_BLOB_ID_2,
+  // Fresh primary (rotated when free-tier rate limits kill older IDs).
+  "019fa916-0e91-740e-bbe3-25c05e8299c4",
+  "019fa906-0ce0-7a92-a0c9-5eefc1b69f83",
+  "019fa906-1003-7f56-8791-16529d818eb5",
 ].filter(Boolean);
 
-/** Warm-instance memory so a 429 on every mirror does not erase the board mid-session. */
-let memoryBoard = { markets: [], updatedAt: 0 };
+const JSONBLOB = "https://jsonblob.com/api/jsonBlob";
+
+/** @type {{ markets: any[], updatedAt: number, mirrorIds: string[] }} */
+let memoryBoard = { markets: [], updatedAt: 0, mirrorIds: [...SEED_MIRROR_IDS] };
 
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -32,6 +39,17 @@ function mergeMarkets(...lists) {
   for (const list of lists) {
     for (const market of list || []) {
       if (!market?.mintAddress) continue;
+      // Drop ephemeral probes
+      const mid = String(market.mintAddress);
+      if (
+        mid.startsWith("test-")
+        || mid.startsWith("ta-friend-test-")
+        || mid === "cooldown"
+        || mid === "seed"
+        || mid === "seed2"
+      ) {
+        continue;
+      }
       const prev = map.get(market.mintAddress);
       if (!prev || score(market) >= score(prev)) {
         map.set(market.mintAddress, market);
@@ -47,20 +65,34 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function readMirror(url) {
+function blobUrl(id) {
+  return `${JSONBLOB}/${id}`;
+}
+
+function collectMirrorIds(...sources) {
+  const ids = new Set(SEED_MIRROR_IDS);
+  for (const id of memoryBoard.mirrorIds || []) {
+    if (id) ids.add(id);
+  }
+  for (const src of sources) {
+    if (!src) continue;
+    if (Array.isArray(src.mirrorIds)) {
+      for (const id of src.mirrorIds) if (id) ids.add(String(id));
+    }
+    if (src.primaryId) ids.add(String(src.primaryId));
+  }
+  return [...ids];
+}
+
+async function readBlob(id) {
+  const url = blobUrl(id);
   try {
     const response = await fetch(`${url}?t=${Date.now()}`, {
       headers: { Accept: "application/json" },
       cache: "no-store",
     });
-    if (response.status === 404) {
-      return { ok: false, markets: [], error: "404", url };
-    }
-    if (response.status === 429) {
-      return { ok: false, markets: [], error: "429", url };
-    }
     if (!response.ok) {
-      return { ok: false, markets: [], error: `HTTP ${response.status}`, url };
+      return { ok: false, id, error: String(response.status), markets: [], mirrorIds: [] };
     }
     const data = await response.json();
     const markets = Array.isArray(data?.markets)
@@ -68,88 +100,193 @@ async function readMirror(url) {
       : Array.isArray(data)
         ? data
         : [];
-    return { ok: true, markets, url };
+    const mirrorIds = Array.isArray(data?.mirrorIds) ? data.mirrorIds.map(String) : [];
+    if (data?.primaryId) mirrorIds.push(String(data.primaryId));
+    return { ok: true, id, markets, mirrorIds, updatedAt: data?.updatedAt || 0 };
   } catch (reason) {
     return {
       ok: false,
-      markets: [],
+      id,
       error: reason instanceof Error ? reason.message : "network",
-      url,
+      markets: [],
+      mirrorIds: [],
     };
   }
 }
 
-async function writeMirror(url, payload, attempt = 1) {
-  const body = JSON.stringify(payload);
-  let response = await fetch(url, {
+async function putBlob(id, payload, attempt = 1) {
+  const response = await fetch(blobUrl(id), {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body,
+    body: JSON.stringify(payload),
   });
-
-  if (response.status === 429 && attempt < 4) {
-    await sleep(350 * attempt * attempt);
-    return writeMirror(url, payload, attempt + 1);
+  if (response.status === 429 && attempt < 5) {
+    await sleep(400 * attempt * attempt);
+    return putBlob(id, payload, attempt + 1);
   }
-
-  // Free JSONBlob boards expire; recreate when missing.
-  if (response.status === 404 && url.includes("jsonblob.com")) {
-    response = await fetch("https://jsonblob.com/api/jsonBlob", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body,
-    });
-    if (!response.ok) {
-      throw new Error(`Registry create failed (${response.status})`);
-    }
-    return true;
+  if (response.status === 404) {
+    // Expired — create a replacement.
+    return createBlob(payload);
   }
-
   if (!response.ok) {
-    throw new Error(`Registry write failed (${response.status})`);
+    throw new Error(`PUT ${id.slice(0, 8)}… failed (${response.status})`);
   }
-  return true;
+  return { id, created: false };
 }
 
-async function readAllMirrors() {
-  const results = await Promise.all(MIRROR_URLS.map((url) => readMirror(url)));
-  const ok = results.filter((r) => r.ok);
-  const markets = mergeMarkets(memoryBoard.markets, ...ok.map((r) => r.markets));
-  // Keep warm memory filled with the best known board.
-  if (markets.length) {
-    memoryBoard = { markets, updatedAt: Date.now() };
+async function createBlob(payload, attempt = 1) {
+  const response = await fetch(JSONBLOB, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (response.status === 429 && attempt < 5) {
+    await sleep(500 * attempt * attempt);
+    return createBlob(payload, attempt + 1);
   }
+  if (!response.ok) {
+    throw new Error(`POST create failed (${response.status})`);
+  }
+  const loc = response.headers.get("location") || response.headers.get("Location") || "";
+  const match = loc.match(/([0-9a-fA-F-]{36})/);
+  if (!match) {
+    // Some gateways return the body only.
+    try {
+      const data = await response.json();
+      if (data?.id) return { id: String(data.id), created: true };
+    } catch { /* ignore */ }
+    throw new Error("POST create succeeded but no blob id returned");
+  }
+  return { id: match[1], created: true };
+}
+
+async function readBoard() {
+  // First pass on known IDs.
+  let ids = collectMirrorIds();
+  let results = await Promise.all(ids.map((id) => readBlob(id)));
+
+  // Learn additional mirror IDs from payloads and fetch those too.
+  const learned = new Set(ids);
+  for (const r of results) {
+    for (const id of r.mirrorIds || []) learned.add(id);
+  }
+  const extra = [...learned].filter((id) => !ids.includes(id));
+  if (extra.length) {
+    const more = await Promise.all(extra.map((id) => readBlob(id)));
+    results = results.concat(more);
+    ids = [...learned];
+  }
+
+  const ok = results.filter((r) => r.ok);
+  const markets = mergeMarkets(
+    memoryBoard.markets,
+    ...ok.map((r) => r.markets),
+  );
+  const mirrorIds = collectMirrorIds(
+    memoryBoard,
+    ...ok.map((r) => ({ mirrorIds: r.mirrorIds, primaryId: r.id })),
+  );
+
+  memoryBoard = {
+    markets,
+    updatedAt: Date.now(),
+    mirrorIds,
+  };
+
   return {
     markets,
+    mirrorIds,
     okCount: ok.length,
-    errors: results.filter((r) => !r.ok).map((r) => `${r.url}: ${r.error}`),
     updatedAt: Date.now(),
+    errors: results.filter((r) => !r.ok).map((r) => `${r.id}: ${r.error}`),
   };
 }
 
-async function writeAllMirrors(payload) {
-  // Sequential writes + spacing to avoid jsonblob 429 storms.
+async function writeBoard(markets) {
+  const mirrorIds = collectMirrorIds(memoryBoard);
+  const payload = {
+    markets,
+    updatedAt: Date.now(),
+    note: "GenesisPad public market registry",
+    mirrorIds,
+    primaryId: mirrorIds[0] || null,
+  };
+
+  // Always update warm memory first so this instance can serve friends immediately.
+  memoryBoard = {
+    markets,
+    updatedAt: payload.updatedAt,
+    mirrorIds,
+  };
+
   const outcomes = [];
-  for (const url of MIRROR_URLS) {
+  let anyOk = false;
+
+  // 1) Try PUT to every known mirror, spaced out to avoid 429 storms.
+  for (const id of mirrorIds) {
     try {
-      await writeMirror(url, payload);
-      outcomes.push({ url, ok: true });
+      await sleep(150);
+      const result = await putBlob(id, payload);
+      outcomes.push({ id: result.id, ok: true, created: result.created });
+      anyOk = true;
+      if (result.created && !mirrorIds.includes(result.id)) {
+        mirrorIds.unshift(result.id);
+        payload.mirrorIds = mirrorIds;
+        payload.primaryId = result.id;
+        memoryBoard.mirrorIds = mirrorIds;
+      }
     } catch (reason) {
       outcomes.push({
-        url,
+        id,
         ok: false,
         error: reason instanceof Error ? reason.message : "write failed",
       });
     }
-    await sleep(120);
   }
-  return outcomes;
+
+  // 2) If every PUT failed, POST a brand-new blob (often works during 429 on old IDs).
+  if (!anyOk) {
+    try {
+      const created = await createBlob(payload);
+      mirrorIds.unshift(created.id);
+      payload.mirrorIds = mirrorIds;
+      payload.primaryId = created.id;
+      memoryBoard.mirrorIds = mirrorIds;
+      // Write again so payload includes the new id.
+      try {
+        await putBlob(created.id, payload);
+      } catch { /* create body already had markets */ }
+      outcomes.push({ id: created.id, ok: true, created: true });
+      anyOk = true;
+    } catch (reason) {
+      outcomes.push({
+        id: "create",
+        ok: false,
+        error: reason instanceof Error ? reason.message : "create failed",
+      });
+    }
+  }
+
+  // Memory always has the board even if free mirrors are angry.
+  memoryBoard = {
+    markets,
+    updatedAt: Date.now(),
+    mirrorIds,
+  };
+
+  return {
+    markets,
+    mirrorIds,
+    writeOk: anyOk,
+    outcomes,
+    updatedAt: Date.now(),
+  };
 }
 
 module.exports = async function handler(req, res) {
@@ -161,7 +298,7 @@ module.exports = async function handler(req, res) {
 
   try {
     if (req.method === "GET") {
-      const data = await readAllMirrors();
+      const data = await readBoard();
       res.status(200).json({
         markets: data.markets,
         updatedAt: data.updatedAt,
@@ -177,9 +314,8 @@ module.exports = async function handler(req, res) {
         ? JSON.parse(req.body || "{}")
         : (req.body || {});
       const incoming = Array.isArray(body.markets) ? body.markets : [];
-      const existing = await readAllMirrors();
+      const existing = await readBoard();
 
-      // Never allow an empty publish to wipe a non-empty board.
       if (!incoming.length && existing.markets.length) {
         res.status(200).json({
           markets: existing.markets,
@@ -192,39 +328,32 @@ module.exports = async function handler(req, res) {
       }
 
       const markets = mergeMarkets(existing.markets, incoming);
-      const payload = {
-        markets,
-        updatedAt: Date.now(),
-        note: "GenesisPad public market registry",
-      };
+      const written = await writeBoard(markets);
 
-      // Memory is always updated so subsequent GETs on this instance see the mint
-      // even if every free mirror is rate-limited.
-      memoryBoard = { markets, updatedAt: payload.updatedAt };
-
-      const writeOutcomes = await writeAllMirrors(payload);
-      const writeOk = writeOutcomes.some((w) => w.ok);
-
-      // Prefer re-read, but never drop the just-merged board if mirrors are 429'd.
-      let confirmed = markets;
-      let mirrors = writeOutcomes.filter((w) => w.ok).length;
+      // Re-read best-effort; never drop the board we just accepted.
+      let confirmed = written.markets;
       try {
-        const reread = await readAllMirrors();
-        confirmed = mergeMarkets(markets, reread.markets);
-        mirrors = Math.max(mirrors, reread.okCount);
-        memoryBoard = { markets: confirmed, updatedAt: Date.now() };
-      } catch {
-        confirmed = markets;
-      }
+        const reread = await readBoard();
+        confirmed = mergeMarkets(written.markets, reread.markets);
+      } catch { /* keep written */ }
+
+      memoryBoard = {
+        markets: confirmed,
+        updatedAt: Date.now(),
+        mirrorIds: written.mirrorIds,
+      };
 
       res.status(200).json({
         markets: confirmed,
         updatedAt: Date.now(),
         public: true,
-        mirrors,
-        writeOk,
+        mirrors: written.outcomes.filter((o) => o.ok).length,
+        writeOk: written.writeOk,
         source: "api",
-        writes: writeOutcomes,
+        // If writeOk is false, board is still served from memory on this instance;
+        // clients should still treat API body as success when mint is present.
+        durable: written.writeOk,
+        writes: written.outcomes,
       });
       return;
     }
