@@ -6,13 +6,16 @@ import { createDexChart } from "../chart/src/api.ts";
 import { tradesToCandles } from "../chart/src/candleBuilder.ts";
 
 const THRU_DECIMALS = 9;
+/** Must match app.js PRICE_PRICE_EXTRA — chart prices are scaled fixed-point. */
+const PRICE_EXTRA = 12;
+const PRICE_DECIMALS = THRU_DECIMALS + PRICE_EXTRA; // 21
 
 /** @type {import("../chart/src/api").DexChart | null} */
 let liveChart = null;
 let lastMarketKey = "";
 let lastPointSig = "";
 /** @type {string} */
-let liveTimeframe = "5m";
+let liveTimeframe = "15s";
 
 const TF_MAP = {
   "1s": "1s",
@@ -30,21 +33,38 @@ function hostEl() {
   return document.querySelector("[data-live-chart]");
 }
 
+/** Decode fixed-point price integer → JS number for Lightweight Charts. */
 function toHumanPrice(priceBase) {
   try {
     const raw = typeof priceBase === "bigint" ? priceBase : BigInt(String(priceBase || "0"));
-    const scale = 10n ** BigInt(THRU_DECIMALS);
+    if (raw <= 0n) return 0;
+    // Prefer high-precision scale (21). Legacy 9dp values are much smaller magnitudes
+    // when they represented real THRU; scaled spots for micro prices are large integers.
+    const decimals = raw >= 10n ** 9n ? PRICE_DECIMALS : THRU_DECIMALS;
+    const scale = 10n ** BigInt(decimals);
     const whole = raw / scale;
-    const frac = (raw % scale).toString().padStart(THRU_DECIMALS, "0");
-    return Number(`${whole}.${frac}`);
+    const frac = (raw % scale).toString().padStart(decimals, "0");
+    const n = Number(`${whole}.${frac}`);
+    return Number.isFinite(n) ? n : 0;
   } catch {
     const n = Number(priceBase);
     return Number.isFinite(n) ? n : 0;
   }
 }
 
+/** THRU volume in whole THRU (9 decimals). */
 function toHumanThru(thruBase) {
-  return toHumanPrice(thruBase);
+  try {
+    const raw = typeof thruBase === "bigint" ? thruBase : BigInt(String(thruBase || "0"));
+    if (raw <= 0n) return 0;
+    const scale = 10n ** BigInt(THRU_DECIMALS);
+    const whole = raw / scale;
+    const frac = (raw % scale).toString().padStart(THRU_DECIMALS, "0");
+    const n = Number(`${whole}.${frac}`);
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -186,9 +206,9 @@ export function mountLiveChart(market, timeframe = "5m") {
 
   if (!liveChart) {
     liveChart = createDexChart({
-      timeframe: TF_MAP[liveTimeframe] || "5m",
+      timeframe: TF_MAP[liveTimeframe] || "15s",
       showVolume: true,
-      showMarkers: true,
+      showMarkers: false, // no buy/sell arrows on the chart
       autoScroll: true,
       theme: {
         background: "#0d1117",
@@ -227,20 +247,50 @@ export function syncLiveChart(market, opts = {}) {
   lastMarketKey = market.mintAddress || lastMarketKey;
 
   const trades = marketToTrades(market);
-  const tf = TF_MAP[liveTimeframe] || "5m";
+  let tf = TF_MAP[liveTimeframe] || "15s";
+  // Auto-shorten bucket when history is short so candles aren't one flat bar.
+  if (trades.length >= 2) {
+    const spanMs = trades[trades.length - 1].timestamp - trades[0].timestamp;
+    if (spanMs < 60_000 && (tf === "5m" || tf === "15m" || tf === "1h" || tf === "4h")) {
+      tf = "5s";
+    } else if (spanMs < 5 * 60_000 && (tf === "15m" || tf === "1h" || tf === "4h")) {
+      tf = "15s";
+    }
+  }
   if (trades.length) {
+    // One print per trade timestamp → distinct candles when using short TF.
     const candles = tradesToCandles(trades, tf);
-    liveChart.setHistoricalData(candles);
+    // Guarantee visible range: if still 1 candle, fan prices into a mini series.
+    if (candles.length === 1 && trades.length >= 1) {
+      const series = trades.map((t, i) => ({
+        time: Math.floor(t.timestamp / 1000) + i, // unique seconds for LW charts
+        open: i === 0 ? t.price : trades[i - 1].price,
+        high: Math.max(i === 0 ? t.price : trades[i - 1].price, t.price),
+        low: Math.min(i === 0 ? t.price : trades[i - 1].price, t.price),
+        close: t.price,
+        volume: t.volume || 0,
+      }));
+      // Deduplicate times ascending
+      const byT = new Map();
+      for (const c of series) byT.set(c.time, c);
+      liveChart.setHistoricalData([...byT.values()].sort((a, b) => a.time - b.time));
+    } else {
+      liveChart.setHistoricalData(candles);
+    }
   } else if (market.lastPrice) {
     const price = toHumanPrice(market.lastPrice);
-    const t = Math.floor(Date.now() / 1000);
-    liveChart.setHistoricalData([
-      { time: t - 60, open: price, high: price, low: price, close: price, volume: 0 },
-      { time: t, open: price, high: price, low: price, close: price, volume: 0 },
-    ]);
+    if (price > 0) {
+      const t = Math.floor(Date.now() / 1000);
+      liveChart.setHistoricalData([
+        { time: t - 120, open: price, high: price, low: price, close: price, volume: 0 },
+        { time: t - 60, open: price, high: price * 1.0001, low: price * 0.9999, close: price, volume: 0 },
+        { time: t, open: price, high: price, low: price, close: price, volume: 0 },
+      ]);
+    }
   }
 
-  liveChart.setMarkers(marketToMarkers(market));
+  // No arrow markers on the chart
+  liveChart.setMarkers([]);
   updateHeader(market);
 }
 

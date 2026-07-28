@@ -960,19 +960,41 @@ function curveProgress(market) {
   }
 }
 
+/**
+ * Extra fixed-point scale so micro prices don't truncate to 0 via integer division.
+ * Spot is stored as THRU with (NATIVE_THRU_DECIMALS + PRICE_PRICE_EXTRA) fractional digits.
+ * Example: 6.25e-11 THRU/token → non-zero integer, charts can move.
+ */
+const PRICE_PRICE_EXTRA = 12;
+const PRICE_FORMAT_DECIMALS = NATIVE_THRU_DECIMALS + PRICE_PRICE_EXTRA; // 21
+
 function curveSpotPriceThruPerToken(market) {
   const c = readCurve(market);
   if (c.virtualToken <= 0n) return 0n;
-  // THRU base units for one whole token (10^decimals base units).
-  const oneToken = 10n ** BigInt(market.decimals || 0);
-  return (c.virtualThru * oneToken) / c.virtualToken;
+  // THRU (9dp) * token whole (10^dec) * 10^extra / token base units
+  const oneToken = 10n ** BigInt(Number(market.decimals) || 0);
+  const extra = 10n ** BigInt(PRICE_PRICE_EXTRA);
+  return (c.virtualThru * oneToken * extra) / c.virtualToken;
 }
 
 function formatSpotPrice(priceBaseUnits) {
-  // priceBaseUnits = THRU base units per 1 whole token
   if (priceBaseUnits <= 0n) return "0 THRU";
-  // Show more precision for tiny alphanet prices
-  return `${formatUnits(priceBaseUnits, NATIVE_THRU_DECIMALS, 12)} THRU`;
+  const raw = typeof priceBaseUnits === "bigint" ? priceBaseUnits : BigInt(String(priceBaseUnits || "0"));
+  // All new spots use PRICE_FORMAT_DECIMALS (21). formatUnits handles it.
+  return `${formatUnits(raw, PRICE_FORMAT_DECIMALS, 12)} THRU`;
+}
+
+/** Human float THRU/token for Lightweight Charts (never truncates micro prices). */
+function spotPriceNumber(market) {
+  try {
+    const scaled = curveSpotPriceThruPerToken(market);
+    if (scaled <= 0n) return 0;
+    const s = formatUnits(scaled, PRICE_FORMAT_DECIMALS, 18);
+    const n = Number(s);
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
 }
 
 const CHART_HISTORY = 240;
@@ -1075,8 +1097,8 @@ function ensureChartSeed(market) {
   }
 }
 
-/** Candle interval for Lightweight Charts host. */
-let chartWindow = "5m";
+/** Candle interval for Lightweight Charts host (short default so live trades show). */
+let chartWindow = "15s";
 
 /**
  * Drive the production DexScreener-style Lightweight Charts instance.
@@ -2059,7 +2081,10 @@ async function publishTradeActivity(market, statusEl = null) {
   if (!market?.mintAddress) return;
   const note = statusEl ? String(statusEl.textContent || "") : "";
   try {
-    if (statusEl) statusEl.textContent = `${note} Publishing trade…`.trim();
+    // Don't clobber a clear success message with "Publishing…"
+    if (statusEl && !note.startsWith("✓")) {
+      statusEl.textContent = `${note} Publishing trade…`.trim();
+    }
     await pushMarketsToPublic(readMarkets(), {
       requireMint: market.mintAddress,
       attempts: 5,
@@ -4038,7 +4063,12 @@ async function submitSwap(market, side, amountIn, tokenAccount, wthruAccount) {
 }
 
 async function executeCurveTrade(amount, status) {
-  const market = activeTrade;
+  // Always re-resolve so curve key + vault aren't stale after a thin board sync.
+  const market = resolveTradeMarket(activeTrade) || activeTrade;
+  activeTrade = market;
+  if (!isBondingMarket(market)) {
+    throw new Error("Bonding curve is not available for this mint right now.");
+  }
   const curveSigner = await loadCurveSigner(market);
   const userToken = await ensureTokenAccount(connectedAccount.address, market.mintAddress);
   const curveToken = {
@@ -4090,26 +4120,29 @@ async function executeCurveTrade(amount, status) {
         realToken: quote.next.realToken.toString(),
       },
     };
+    const buyPrice = curveSpotPriceThruPerToken(nextMarket);
     updated = appendChartPoint(nextMarket, {
       side: "buy",
-      price: curveSpotPriceThruPerToken(nextMarket),
+      price: buyPrice,
       thru: amount,
       tokens: quote.tokensOut,
     }) || nextMarket;
-    status.textContent =
-      `Bought ${formatUnits(quote.tokensOut, market.decimals)} ${market.ticker} ` +
+    let successMsg =
+      `✓ Buy confirmed — received ${formatUnits(quote.tokensOut, market.decimals)} ${market.ticker} ` +
+      `for ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU ` +
       `(fee ${formatUnits(quote.fee, NATIVE_THRU_DECIMALS, 9)} THRU).`;
     if (quote.next.realThru >= quote.next.graduationTarget) {
       updated = await graduateMarket(updated || market, (message) => { status.textContent = message; });
-      status.textContent += updated?.liquidity
+      successMsg += updated?.liquidity
         ? " Market graduated and AMM was seeded."
-        : " Market graduated.";
+        : " Market graduated — curve still tradeable.";
     }
     activeTrade = updated || readMarkets().find((m) => m.mintAddress === market.mintAddress);
+    status.textContent = successMsg;
     try {
       pushLiveTradePoint({
         t: Date.now(),
-        price: activeTrade?.lastPrice || curveSpotPriceThruPerToken(activeTrade),
+        price: buyPrice,
         thru: amount,
         side: "buy",
       });
@@ -4117,16 +4150,38 @@ async function executeCurveTrade(amount, status) {
     renderTokenChart(activeTrade);
     renderTradeTape(activeTrade);
     renderMarkets();
-    // Public board must get this print so the other wallet's chart/tape/price move.
-    await publishTradeActivity(activeTrade, status);
-    await refreshOpenTradeUi({ sync: true });
+    // Publish in background so success message stays visible.
+    publishTradeActivity(activeTrade, null).catch(() => {});
     await refreshTradeBalances();
     await refreshBalance();
+    // Soft remote pull without clobbering status
+    refreshOpenTradeUi({ sync: true }).then(() => {
+      if (status && !String(status.textContent || "").startsWith("✓")) {
+        status.textContent = successMsg;
+      }
+    }).catch(() => {});
     return;
   }
 
-  // Sell
-  const quote = quoteCurveSell(market, amount);
+  // Sell — preflight vault + wallet balance
+  await refreshTradeBalances();
+  const sellable = tradeBalances.sellable != null ? tradeBalances.sellable : tradeBalances.token;
+  if (sellable < amount) {
+    throw new Error(
+      `Not enough ${market.ticker} to sell. You have ${formatUnits(sellable, market.decimals)} ` +
+      `(requested ${formatUnits(amount, market.decimals)}).`,
+    );
+  }
+  let quote;
+  try {
+    quote = quoteCurveSell(market, amount);
+  } catch (reason) {
+    throw new Error(
+      reason instanceof Error
+        ? `Sell blocked: ${reason.message}`
+        : "Sell blocked: curve quote failed.",
+    );
+  }
   status.textContent =
     `Selling ${formatUnits(amount, market.decimals)} ${market.ticker} on the bonding curve…`;
   await submitTokenTransfer(userToken, curveToken, amount);
@@ -4147,20 +4202,23 @@ async function executeCurveTrade(amount, status) {
       realToken: quote.next.realToken.toString(),
     },
   };
+  const sellPrice = curveSpotPriceThruPerToken(nextMarket);
   updated = appendChartPoint(nextMarket, {
     side: "sell",
-    price: curveSpotPriceThruPerToken(nextMarket),
+    price: sellPrice,
     thru: quote.netThru,
     tokens: amount,
   }) || nextMarket;
   activeTrade = updated || market;
-  status.textContent =
-    `Sold for ${formatUnits(quote.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+  const successMsg =
+    `✓ Sell confirmed — received ${formatUnits(quote.netThru, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+    `for ${formatUnits(amount, market.decimals)} ${market.ticker} ` +
     `(fee ${formatUnits(quote.fee, NATIVE_THRU_DECIMALS, 9)} THRU).`;
+  status.textContent = successMsg;
   try {
     pushLiveTradePoint({
       t: Date.now(),
-      price: activeTrade?.lastPrice || curveSpotPriceThruPerToken(activeTrade),
+      price: sellPrice,
       thru: quote.netThru,
       side: "sell",
     });
@@ -4168,10 +4226,14 @@ async function executeCurveTrade(amount, status) {
   renderTokenChart(activeTrade);
   renderTradeTape(activeTrade);
   renderMarkets();
-  await publishTradeActivity(activeTrade, status);
-  await refreshOpenTradeUi({ sync: true });
+  publishTradeActivity(activeTrade, null).catch(() => {});
   await refreshTradeBalances();
   await refreshBalance();
+  refreshOpenTradeUi({ sync: true }).then(() => {
+    if (status && !String(status.textContent || "").startsWith("✓")) {
+      status.textContent = successMsg;
+    }
+  }).catch(() => {});
 }
 
 async function executeTrade() {
@@ -4214,6 +4276,7 @@ async function executeTrade() {
     // Bonding-curve path (default for new launches).
     if (isBondingMarket(activeTrade)) {
       await executeCurveTrade(amount, status);
+      // Success / error already written to status by executeCurveTrade.
       return;
     }
 
