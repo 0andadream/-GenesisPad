@@ -104,8 +104,6 @@ const MARKETS_KEY = "genesis-markets";
 // Public shared registry (direct — no Vercel serverless, avoids Node version issues).
 const MARKET_REGISTRY_URL =
   "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70";
-// Bump this to wipe local caches when the public board is reset for launch.
-const BOARD_EPOCH = "public-v1";
 const TOKEN_IMAGE_MAX_DIM = 256;
 const TOKEN_IMAGE_MAX_CHARS = 120_000;
 let pendingTokenImage = null;
@@ -1153,12 +1151,6 @@ function mergeTwoMarkets(a, b) {
   };
 }
 
-function ensureBoardEpoch() {
-  if (localStorage.getItem("genesis-board-epoch") === BOARD_EPOCH) return;
-  localStorage.setItem(MARKETS_KEY, "[]");
-  localStorage.setItem("genesis-board-epoch", BOARD_EPOCH);
-}
-
 function marketImageHtml(market, className = "token-avatar") {
   const src = typeof market?.image === "string" ? market.image.trim() : "";
   if (src && (src.startsWith("data:image/") || /^https?:\/\//i.test(src))) {
@@ -1255,7 +1247,6 @@ function mergeMarketLists(...lists) {
 }
 
 function saveMarkets(markets, { publish = true } = {}) {
-  ensureBoardEpoch();
   const stamped = markets.slice(0, 100).map((market) => ({
     ...market,
     updatedAt: market.updatedAt || market.createdAt || Date.now(),
@@ -1268,37 +1259,24 @@ function saveMarkets(markets, { publish = true } = {}) {
   return stamped;
 }
 
-async function fetchPublicRegistry() {
+async function fetchPublicMarkets() {
   try {
     const response = await fetch(MARKET_REGISTRY_URL, {
       headers: { Accept: "application/json" },
       cache: "no-store",
     });
-    if (!response.ok) return { markets: [], boardEpoch: "", updatedAt: 0 };
+    if (!response.ok) return [];
     const data = await response.json();
-    const markets = Array.isArray(data.markets)
-      ? data.markets
-      : Array.isArray(data) ? data : [];
-    return {
-      markets,
-      boardEpoch: data.boardEpoch || "",
-      updatedAt: Number(data.updatedAt || 0),
-    };
+    return Array.isArray(data.markets) ? data.markets : Array.isArray(data) ? data : [];
   } catch {
-    return { markets: [], boardEpoch: "", updatedAt: 0 };
+    return [];
   }
-}
-
-async function fetchPublicMarkets() {
-  const data = await fetchPublicRegistry();
-  return data.markets;
 }
 
 async function publishPublicMarkets(markets) {
   const payload = {
     markets: markets.slice(0, 100),
     updatedAt: Date.now(),
-    boardEpoch: BOARD_EPOCH,
   };
   const response = await fetch(MARKET_REGISTRY_URL, {
     method: "PUT",
@@ -1321,32 +1299,17 @@ async function syncPublicMarkets() {
   if (registrySyncing) return readMarkets();
   registrySyncing = true;
   try {
-    ensureBoardEpoch();
     const local = readMarkets();
-    const remotePayload = await fetchPublicRegistry();
-    // Remote still on pre-wipe epoch: do not re-upload local ghosts; push empty epoch board.
-    if (remotePayload.boardEpoch && remotePayload.boardEpoch !== BOARD_EPOCH) {
-      localStorage.setItem(MARKETS_KEY, "[]");
-      try { await publishPublicMarkets([]); } catch { /* ignore */ }
-      registryLiveAt = Date.now();
-      return [];
-    }
-    // Remote wiped (empty + our epoch) → trust remote over stale local only when local empty
-    // or when remote carries the public epoch stamp.
-    let remote = remotePayload.markets;
-    if (remotePayload.boardEpoch === BOARD_EPOCH && remote.length === 0 && local.length) {
-      // Local has new launches after wipe — keep them. Old ghosts already cleared by ensureBoardEpoch.
-    }
+    const remote = await fetchPublicMarkets();
+    // Always merge local + remote so every visitor sees all deployed tokens.
     const merged = mergeMarketLists(remote, local);
     const before = marketsSignature(local);
     const after = marketsSignature(merged);
     localStorage.setItem(MARKETS_KEY, JSON.stringify(merged));
     registryLiveAt = Date.now();
-    // Push only when we have local-only data or richer merge than remote alone.
+    // Push merge upstream when we have markets remote lacks (or richer history).
     const remoteSig = marketsSignature(mergeMarketLists(remote));
     if (merged.length && after !== remoteSig) {
-      try { await publishPublicMarkets(merged); } catch { /* ignore */ }
-    } else if (!remotePayload.boardEpoch || remotePayload.boardEpoch !== BOARD_EPOCH) {
       try { await publishPublicMarkets(merged); } catch { /* ignore */ }
     } else if (merged.length && !remote.length) {
       try { await publishPublicMarkets(merged); } catch { /* ignore */ }
@@ -1969,7 +1932,6 @@ async function createToken() {
 
 function readMarkets() {
   try {
-    ensureBoardEpoch();
     return JSON.parse(localStorage.getItem(MARKETS_KEY) || "[]");
   } catch {
     return [];
