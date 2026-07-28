@@ -73,15 +73,78 @@ function isProbeMint(mid) {
   );
 }
 
+/**
+ * Deep-merge two market records for the same mint.
+ * Critical: never drop bonding-curve privateKeyHex / tokenAccount when a
+ * newer partial update (chart-only) overwrites a complete launch record —
+ * without the key, buys/sells fail with "no bonding curve".
+ */
+function mergeTwoMarkets(prev, next) {
+  if (!prev) return next;
+  if (!next) return prev;
+  const newer = score(next) >= score(prev) ? next : prev;
+  const older = newer === next ? prev : next;
+  const curveA = prev.curve || null;
+  const curveB = next.curve || null;
+  let curve = null;
+  if (curveA || curveB) {
+    const pick = (curveA?.privateKeyHex ? curveA : null)
+      || (curveB?.privateKeyHex ? curveB : null)
+      || curveA
+      || curveB;
+    const other = pick === curveA ? curveB : curveA;
+    curve = {
+      ...(other || {}),
+      ...(pick || {}),
+      privateKeyHex: curveA?.privateKeyHex || curveB?.privateKeyHex || pick?.privateKeyHex,
+      tokenAccount: curveA?.tokenAccount || curveB?.tokenAccount || pick?.tokenAccount,
+      address: curveA?.address || curveB?.address || pick?.address,
+      virtualThru: pick?.virtualThru ?? other?.virtualThru,
+      virtualToken: pick?.virtualToken ?? other?.virtualToken,
+      realThru: (() => {
+        try {
+          const a = BigInt(curveA?.realThru || "0");
+          const b = BigInt(curveB?.realThru || "0");
+          return (a >= b ? curveA?.realThru : curveB?.realThru) ?? pick?.realThru;
+        } catch {
+          return pick?.realThru ?? other?.realThru;
+        }
+      })(),
+      realToken: (() => {
+        try {
+          const a = BigInt(curveA?.realToken || "0");
+          const b = BigInt(curveB?.realToken || "0");
+          return (a >= b ? curveA?.realToken : curveB?.realToken) ?? pick?.realToken;
+        } catch {
+          return pick?.realToken ?? other?.realToken;
+        }
+      })(),
+      graduationTargetThru: pick?.graduationTargetThru || other?.graduationTargetThru,
+      tradeFeeBps: pick?.tradeFeeBps ?? other?.tradeFeeBps,
+    };
+  }
+  return {
+    ...older,
+    ...newer,
+    createdAt: older.createdAt || newer.createdAt,
+    updatedAt: Math.max(score(prev), score(next)),
+    image: newer.image || older.image || "",
+    curve,
+    graduated: Boolean(prev.graduated || next.graduated),
+    liquidity: prev.liquidity || next.liquidity || false,
+    chart: Array.isArray(newer.chart) && newer.chart.length
+      ? newer.chart
+      : (Array.isArray(older.chart) ? older.chart : []),
+  };
+}
+
 function mergeMarkets(...lists) {
   const map = new Map();
   for (const list of lists) {
     for (const market of list || []) {
       if (!market?.mintAddress || isProbeMint(market.mintAddress)) continue;
       const prev = map.get(market.mintAddress);
-      if (!prev || score(market) >= score(prev)) {
-        map.set(market.mintAddress, market);
-      }
+      map.set(market.mintAddress, prev ? mergeTwoMarkets(prev, market) : market);
     }
   }
   return [...map.values()]

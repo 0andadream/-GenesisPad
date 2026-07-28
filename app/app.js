@@ -906,7 +906,19 @@ function isBondingMarket(market) {
   // Graduation alone does not lock the curve (AMM seed may still be pending).
   if (!market?.curve) return false;
   if (market.liquidity && market.phase === "amm") return false;
-  return Boolean(market.curve.privateKeyHex && market.curve.tokenAccount);
+  // privateKeyHex is required for the curve vault to sign token releases.
+  // tokenAccount is the curve inventory; both must be present on the board.
+  const pk = String(market.curve.privateKeyHex || "").trim();
+  const vault = String(market.curve.tokenAccount || "").trim();
+  return Boolean(pk.length >= 64 && vault);
+}
+
+/** Prefer the fullest local+active market record (keeps curve key after sync). */
+function resolveTradeMarket(market) {
+  if (!market?.mintAddress) return market || null;
+  const local = readMarkets().find((m) => m.mintAddress === market.mintAddress);
+  if (!local) return market;
+  return mergeTwoMarkets(local, market);
 }
 
 function isGraduatedMarket(market) {
@@ -2083,17 +2095,13 @@ async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = 
     const remoteMints = mintSet(remote);
     const now = Date.now();
 
-    // Public board is source of truth. Always keep local-only markets created in
-    // the last few minutes (in-flight launches) — including when remote reports
-    // wipe/empty, so a lagging wipe cannot make a new token flash then vanish.
-    const recentLocalOnly = (local || []).filter((market) => {
-      if (!market?.mintAddress || remoteMints.has(market.mintAddress)) return false;
-      const created = Number(market.createdAt || market.updatedAt || 0);
-      return created > 0 && now - created < 10 * 60 * 1000;
-    });
-
     // Intentional wipe + no remote markets: drop old ghosts, keep only recent.
     if (remoteResult.wiped && remote.length === 0) {
+      const recentLocalOnly = (local || []).filter((market) => {
+        if (!market?.mintAddress) return false;
+        const created = Number(market.createdAt || market.updatedAt || 0);
+        return created > 0 && now - created < 10 * 60 * 1000;
+      });
       const kept = stampMarkets(recentLocalOnly);
       localStorage.setItem(MARKETS_KEY, JSON.stringify(kept));
       registryLiveAt = Date.now();
@@ -2102,15 +2110,34 @@ async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = 
       return kept;
     }
 
-    const merged = stampMarkets(mergeMarketLists(remote, recentLocalOnly));
+    // Merge remote with FULL local list so bonding-curve private keys / vault
+    // accounts are never dropped when the remote board has a thinner record.
+    // Then drop stale local-only ghosts (not on public board, older than 10m).
+    const mergedAll = stampMarkets(mergeMarketLists(remote, local || []));
+    const merged = mergedAll.filter((market) => {
+      if (!market?.mintAddress) return false;
+      if (remoteMints.has(market.mintAddress)) return true;
+      const created = Number(market.createdAt || market.updatedAt || 0);
+      return created > 0 && now - created < 10 * 60 * 1000;
+    });
     const before = marketsSignature(local);
     const after = marketsSignature(merged);
     localStorage.setItem(MARKETS_KEY, JSON.stringify(merged));
     registryLiveAt = Date.now();
     lastPublicBoard = { ok: true, count: remote.length, error: "" };
 
-    // Do NOT background-republish stale local-only markets (that re-infected the board
-    // after clean-slate). Explicit create/retry still calls pushMarketsToPublic.
+    // If local still has a curve private key the public board lost, re-publish so
+    // friends can trade (never re-upload wiped local-only ghosts).
+    const remoteByMint = new Map((remote || []).map((m) => [m.mintAddress, m]));
+    const needsCurveHeal = (local || []).some((l) => {
+      if (!l?.mintAddress || !l?.curve?.privateKeyHex) return false;
+      if (!remoteByMint.has(l.mintAddress)) return false;
+      const r = remoteByMint.get(l.mintAddress);
+      return !String(r?.curve?.privateKeyHex || "").trim();
+    });
+    if (needsCurveHeal) {
+      pushMarketsToPublic(merged, { attempts: 3 }).catch(() => {});
+    }
     void publish;
 
     // Keep open trade modal + chart live when remote activity lands.
@@ -3656,7 +3683,8 @@ async function refreshTradeBalances() {
 }
 
 async function openTrade(index, side) {
-  activeTrade = readMarkets()[index];
+  const listed = readMarkets()[index];
+  activeTrade = resolveTradeMarket(listed) || listed;
   activeSide = side;
   if (!activeTrade) return;
   tradeModal.hidden = false;
@@ -4024,10 +4052,18 @@ async function executeTrade() {
     return;
   }
 
+  // Re-resolve from storage so we keep curve privateKeyHex after a thin sync.
+  if (activeTrade?.mintAddress) {
+    activeTrade = resolveTradeMarket(activeTrade) || activeTrade;
+  }
+
   const value = document.querySelector("[data-trade-amount]").value;
   let amount;
   try {
-    amount = parseUnits(value, activeSide === "buy" ? NATIVE_THRU_DECIMALS : activeTrade.decimals);
+    amount = parseUnits(
+      value,
+      activeSide === "buy" ? NATIVE_THRU_DECIMALS : tradeTokenDecimals(activeTrade),
+    );
     if (amount <= 0n) throw new Error("Enter an amount greater than zero.");
   } catch (reason) {
     status.textContent = reason.message;
@@ -4046,9 +4082,20 @@ async function executeTrade() {
     }
 
     if (!activeTrade?.liquidity) {
-      status.textContent = activeTrade?.graduated
-        ? (activeTrade.liquidityPendingReason || "Graduated. Trading continues when the pool is available.")
-        : "Trade not submitted: no bonding curve or AMM pool is available for this mint.";
+      const hasCurveShell = Boolean(activeTrade?.curve);
+      const hasKey = Boolean(String(activeTrade?.curve?.privateKeyHex || "").trim());
+      const hasVault = Boolean(String(activeTrade?.curve?.tokenAccount || "").trim());
+      if (activeTrade?.graduated) {
+        status.textContent = activeTrade.liquidityPendingReason
+          || "Graduated. Trading continues when the pool is available.";
+      } else if (hasCurveShell && (!hasKey || !hasVault)) {
+        status.textContent =
+          "Bonding curve data is incomplete for this mint (missing vault key on the public board). "
+          + "Hard-refresh, or ask the creator to open the app so the full curve record re-publishes.";
+      } else {
+        status.textContent =
+          "Trade not submitted: no bonding curve or AMM pool is available for this mint.";
+      }
       return;
     }
 
