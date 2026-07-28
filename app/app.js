@@ -95,6 +95,11 @@ const MARKETS_KEY = "genesis-markets";
 // Public shared registry (direct — no Vercel serverless, avoids Node version issues).
 const MARKET_REGISTRY_URL =
   "https://jsonblob.com/api/jsonBlob/019fa3f5-4529-7bc8-b2ab-7ff7b640fc70";
+// Bump this to wipe local caches when the public board is reset for launch.
+const BOARD_EPOCH = "public-v1";
+const TOKEN_IMAGE_MAX_DIM = 256;
+const TOKEN_IMAGE_MAX_CHARS = 120_000;
+let pendingTokenImage = null;
 
 function compactAddress(address) {
   return address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "Connected";
@@ -279,6 +284,7 @@ async function refreshWalletTokenHoldings() {
       if (raw <= 0n) return;
       const decimals = Number(market.decimals ?? 6);
       rows.push({
+        market,
         name: market.name || market.ticker,
         ticker: market.ticker,
         mint: market.mintAddress,
@@ -299,9 +305,12 @@ async function refreshWalletTokenHoldings() {
 
   host.innerHTML = rows.map((row) => `
     <article class="wallet-token-row">
-      <div>
-        <strong>${row.ticker}</strong>
-        <small>${row.name}</small>
+      <div class="wallet-token-meta">
+        ${marketImageHtml(row.market || row, "wallet-token-avatar")}
+        <div>
+          <strong>${row.ticker}</strong>
+          <small>${row.name}</small>
+        </div>
       </div>
       <div class="wallet-token-amount">
         <strong>${row.amount}</strong>
@@ -1121,6 +1130,7 @@ function mergeTwoMarkets(a, b) {
     updatedAt: Math.max(marketTimestamp(a), marketTimestamp(b)),
     chart,
     lastPrice,
+    image: newer.image || older.image || "",
     curve: mergeCurveRecords(a.curve, b.curve),
     graduated: Boolean(a.graduated || b.graduated),
     liquidity: a.liquidity || b.liquidity || false,
@@ -1132,6 +1142,93 @@ function mergeTwoMarkets(a, b) {
       sellThru: sellThru.toString(),
     },
   };
+}
+
+function ensureBoardEpoch() {
+  if (localStorage.getItem("genesis-board-epoch") === BOARD_EPOCH) return;
+  localStorage.setItem(MARKETS_KEY, "[]");
+  localStorage.setItem("genesis-board-epoch", BOARD_EPOCH);
+}
+
+function marketImageHtml(market, className = "token-avatar") {
+  const src = typeof market?.image === "string" ? market.image.trim() : "";
+  if (src && (src.startsWith("data:image/") || /^https?:\/\//i.test(src))) {
+    return `<img class="${className}" src="${src.replace(/"/g, "&quot;")}" alt="" />`;
+  }
+  const letter = (market?.ticker || market?.name || "?").slice(0, 1).toUpperCase();
+  return `<span class="${className} token-avatar-fallback">${letter}</span>`;
+}
+
+function compressTokenImage(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith("image/")) {
+      reject(new Error("Choose a PNG, JPEG, WebP, or GIF image."));
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      reject(new Error("Image must be under 8 MB before compress."));
+      return;
+    }
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, TOKEN_IMAGE_MAX_DIM / Math.max(img.width || 1, img.height || 1));
+        const width = Math.max(1, Math.round((img.width || 1) * scale));
+        const height = Math.max(1, Math.round((img.height || 1) * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Canvas unavailable.");
+        ctx.drawImage(img, 0, 0, width, height);
+        URL.revokeObjectURL(objectUrl);
+        let quality = 0.84;
+        let dataUrl = canvas.toDataURL("image/jpeg", quality);
+        while (dataUrl.length > TOKEN_IMAGE_MAX_CHARS && quality > 0.35) {
+          quality -= 0.12;
+          dataUrl = canvas.toDataURL("image/jpeg", quality);
+        }
+        if (dataUrl.length > TOKEN_IMAGE_MAX_CHARS) {
+          reject(new Error("Image is still too large after compression. Try a simpler image."));
+          return;
+        }
+        resolve(dataUrl);
+      } catch (reason) {
+        URL.revokeObjectURL(objectUrl);
+        reject(reason instanceof Error ? reason : new Error("Could not process image."));
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("Could not read that image file."));
+    };
+    img.src = objectUrl;
+  });
+}
+
+function clearTokenImagePicker() {
+  pendingTokenImage = null;
+  const input = document.querySelector("[data-token-image]");
+  const preview = document.querySelector("[data-token-image-preview]");
+  const img = document.querySelector("[data-token-image-preview-img]");
+  if (input) input.value = "";
+  if (img) img.removeAttribute("src");
+  if (preview) preview.hidden = true;
+}
+
+function setTokenImagePreview(dataUrl) {
+  pendingTokenImage = dataUrl || null;
+  const preview = document.querySelector("[data-token-image-preview]");
+  const img = document.querySelector("[data-token-image-preview-img]");
+  if (!preview || !img) return;
+  if (!dataUrl) {
+    preview.hidden = true;
+    img.removeAttribute("src");
+    return;
+  }
+  img.src = dataUrl;
+  preview.hidden = false;
 }
 
 function mergeMarketLists(...lists) {
@@ -1149,6 +1246,7 @@ function mergeMarketLists(...lists) {
 }
 
 function saveMarkets(markets, { publish = true } = {}) {
+  ensureBoardEpoch();
   const stamped = markets.slice(0, 100).map((market) => ({
     ...market,
     updatedAt: market.updatedAt || market.createdAt || Date.now(),
@@ -1161,24 +1259,37 @@ function saveMarkets(markets, { publish = true } = {}) {
   return stamped;
 }
 
-async function fetchPublicMarkets() {
+async function fetchPublicRegistry() {
   try {
     const response = await fetch(MARKET_REGISTRY_URL, {
       headers: { Accept: "application/json" },
       cache: "no-store",
     });
-    if (!response.ok) return [];
+    if (!response.ok) return { markets: [], boardEpoch: "", updatedAt: 0 };
     const data = await response.json();
-    return Array.isArray(data.markets) ? data.markets : Array.isArray(data) ? data : [];
+    const markets = Array.isArray(data.markets)
+      ? data.markets
+      : Array.isArray(data) ? data : [];
+    return {
+      markets,
+      boardEpoch: data.boardEpoch || "",
+      updatedAt: Number(data.updatedAt || 0),
+    };
   } catch {
-    return [];
+    return { markets: [], boardEpoch: "", updatedAt: 0 };
   }
+}
+
+async function fetchPublicMarkets() {
+  const data = await fetchPublicRegistry();
+  return data.markets;
 }
 
 async function publishPublicMarkets(markets) {
   const payload = {
     markets: markets.slice(0, 100),
     updatedAt: Date.now(),
+    boardEpoch: BOARD_EPOCH,
   };
   const response = await fetch(MARKET_REGISTRY_URL, {
     method: "PUT",
@@ -1193,7 +1304,7 @@ async function publishPublicMarkets(markets) {
 
 function marketsSignature(markets) {
   return (markets || [])
-    .map((m) => `${m.mintAddress}:${marketTimestamp(m)}:${(m.chart || []).length}`)
+    .map((m) => `${m.mintAddress}:${marketTimestamp(m)}:${(m.chart || []).length}:${m.image ? 1 : 0}`)
     .join("|");
 }
 
@@ -1201,8 +1312,22 @@ async function syncPublicMarkets() {
   if (registrySyncing) return readMarkets();
   registrySyncing = true;
   try {
+    ensureBoardEpoch();
     const local = readMarkets();
-    const remote = await fetchPublicMarkets();
+    const remotePayload = await fetchPublicRegistry();
+    // Remote still on pre-wipe epoch: do not re-upload local ghosts; push empty epoch board.
+    if (remotePayload.boardEpoch && remotePayload.boardEpoch !== BOARD_EPOCH) {
+      localStorage.setItem(MARKETS_KEY, "[]");
+      try { await publishPublicMarkets([]); } catch { /* ignore */ }
+      registryLiveAt = Date.now();
+      return [];
+    }
+    // Remote wiped (empty + our epoch) → trust remote over stale local only when local empty
+    // or when remote carries the public epoch stamp.
+    let remote = remotePayload.markets;
+    if (remotePayload.boardEpoch === BOARD_EPOCH && remote.length === 0 && local.length) {
+      // Local has new launches after wipe — keep them. Old ghosts already cleared by ensureBoardEpoch.
+    }
     const merged = mergeMarketLists(remote, local);
     const before = marketsSignature(local);
     const after = marketsSignature(merged);
@@ -1211,6 +1336,8 @@ async function syncPublicMarkets() {
     // Push only when we have local-only data or richer merge than remote alone.
     const remoteSig = marketsSignature(mergeMarketLists(remote));
     if (merged.length && after !== remoteSig) {
+      try { await publishPublicMarkets(merged); } catch { /* ignore */ }
+    } else if (!remotePayload.boardEpoch || remotePayload.boardEpoch !== BOARD_EPOCH) {
       try { await publishPublicMarkets(merged); } catch { /* ignore */ }
     } else if (merged.length && !remote.length) {
       try { await publishPublicMarkets(merged); } catch { /* ignore */ }
@@ -1695,6 +1822,7 @@ async function createToken() {
   const description = document.querySelector("[data-token-description]").value.trim();
   const decimals = Number(document.querySelector("[data-token-decimals]").value);
   const supplyText = document.querySelector("[data-token-supply]").value.trim();
+  const image = pendingTokenImage || "";
   createStatus.textContent = "Validating market details…";
 
   if (!name || !ticker) {
@@ -1794,6 +1922,7 @@ async function createToken() {
       name,
       ticker,
       description,
+      image,
       decimals,
       supply: supply.toString(),
       mintAddress: mint.address,
@@ -1817,6 +1946,7 @@ async function createToken() {
     markets.unshift(market);
     saveMarkets(markets);
     renderMarkets();
+    clearTokenImagePicker();
     createStatus.textContent =
       `${ticker} is live on the public bonding curve. Anyone on Genesis can buy/sell. ` +
       `Graduation at ${formatUnits(GRADUATION_REAL_THRU, NATIVE_THRU_DECIMALS, 9)} THRU raised. Mint: ${mint.address}`;
@@ -1830,6 +1960,7 @@ async function createToken() {
 
 function readMarkets() {
   try {
+    ensureBoardEpoch();
     return JSON.parse(localStorage.getItem(MARKETS_KEY) || "[]");
   } catch {
     return [];
@@ -1856,7 +1987,7 @@ function renderMarketCard(market, index) {
   return `
     <article class="market-row">
       <button type="button" class="market-identity" data-open-market="${index}" title="Open chart and stats">
-        <span>${market.ticker.slice(0, 1)}</span>
+        ${marketImageHtml(market)}
         <div>
           <strong>${market.name}</strong>
           <small>${market.ticker} · ${priceLabel}</small>
@@ -2296,6 +2427,30 @@ document.querySelector("[data-create-form]")?.addEventListener("submit", (event)
   event.preventDefault();
   createToken();
 });
+document.querySelector("[data-token-image]")?.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) {
+    clearTokenImagePicker();
+    return;
+  }
+  const status = document.querySelector("[data-create-status]");
+  try {
+    if (status) status.textContent = "Compressing token image…";
+    const dataUrl = await compressTokenImage(file);
+    setTokenImagePreview(dataUrl);
+    if (status) status.textContent = "Image ready. Connect wallet and launch when set.";
+  } catch (reason) {
+    clearTokenImagePicker();
+    if (status) {
+      status.textContent = reason instanceof Error ? reason.message : "Could not use that image.";
+    }
+  }
+});
+document.querySelector("[data-token-image-clear]")?.addEventListener("click", () => {
+  clearTokenImagePicker();
+  const status = document.querySelector("[data-create-status]");
+  if (status) status.textContent = "Image removed.";
+});
 
 const tradeModal = document.querySelector("[data-trade-modal]");
 const liquidityModal = document.querySelector("[data-liquidity-modal]");
@@ -2372,6 +2527,17 @@ async function openTrade(index, side) {
   tradeModal.hidden = false;
   document.body.classList.add("modal-open");
   document.querySelector("[data-trade-title]").textContent = `${side === "buy" ? "Buy" : "Sell"} ${activeTrade.ticker}`;
+  const tradeImg = document.querySelector("[data-trade-image]");
+  if (tradeImg) {
+    const src = typeof activeTrade.image === "string" ? activeTrade.image.trim() : "";
+    if (src && (src.startsWith("data:image/") || /^https?:\/\//i.test(src))) {
+      tradeImg.src = src;
+      tradeImg.hidden = false;
+    } else {
+      tradeImg.removeAttribute("src");
+      tradeImg.hidden = true;
+    }
+  }
   document.querySelector("[data-trade-submit]").textContent = side === "buy" ? "Buy with THRU" : `Sell ${activeTrade.ticker}`;
   document.querySelector("[data-trade-input-label]").textContent = side === "buy" ? "You receive" : "You receive";
   const progress = activeTrade.curve ? curveProgress(activeTrade) : null;

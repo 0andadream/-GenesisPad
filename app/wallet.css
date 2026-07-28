@@ -329,6 +329,101 @@
   border-bottom: 1px solid var(--line);
 }
 
+.wallet-token-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.wallet-token-avatar,
+.token-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  background: var(--ink);
+  color: var(--light);
+  flex: 0 0 auto;
+}
+
+.token-avatar-fallback,
+span.token-avatar,
+span.wallet-token-avatar {
+  display: grid;
+  place-items: center;
+  font: 700 14px var(--serif);
+  text-transform: uppercase;
+}
+
+.wallet-token-avatar.token-avatar-fallback,
+.token-avatar.token-avatar-fallback {
+  width: 36px;
+  height: 36px;
+}
+
+.market-identity .token-avatar,
+.market-identity .token-avatar-fallback {
+  width: 40px;
+  height: 40px;
+}
+
+.market-identity > span.token-avatar-fallback {
+  border-radius: 50%;
+}
+
+.trade-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 24px;
+}
+
+.trade-title-row h2 {
+  margin: 0;
+}
+
+.trade-token-image {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.token-image-field input[type="file"] {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px dashed var(--line);
+  background: var(--light);
+  width: 100%;
+  font-size: 12px;
+}
+
+.token-image-preview {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 10px 0 4px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--light);
+}
+
+.token-image-preview img {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--line);
+}
+
+.token-image-preview .plain-button {
+  cursor: pointer;
+}
+
 .wallet-token-row:last-child {
   border-bottom: 0;
 }
@@ -893,7 +988,8 @@
 .market-mini-stats .stat-buy { color: #1a6b3c; }
 .market-mini-stats .stat-sell { color: #8a2b2b; }
 
-.market-identity > span {
+.market-identity > span,
+.market-identity > img.token-avatar {
   display: grid;
   place-items: center;
   width: 42px;
@@ -901,6 +997,8 @@
   border: 1px solid var(--ink);
   font: 18px var(--serif);
   flex: 0 0 auto;
+  border-radius: 50%;
+  object-fit: cover;
 }
 
 @media (max-width: 760px) {

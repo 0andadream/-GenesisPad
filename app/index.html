@@ -139,6 +139,14 @@
           <label>Decimals<input data-token-decimals type="number" value="6" min="0" max="9" /></label>
           <label>Initial supply<input data-token-supply type="number" min="0" step="1" value="1000000" /></label>
         </div>
+        <label class="token-image-field">Token image
+          <input data-token-image type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+        </label>
+        <div class="token-image-preview" data-token-image-preview hidden>
+          <img data-token-image-preview-img alt="Token preview" />
+          <button type="button" class="plain-button" data-token-image-clear>Remove image</button>
+        </div>
+        <small>Optional. Square works best; we compress to ~256px for the public registry.</small>
         <small>80% of supply starts on a bonding curve. Trade with THRU until graduation, then the AMM can be seeded from the curve vault.</small>
         <small>Curve trade fee: 1%. After graduation, AMM swap fee is 0.21% creator / 0.09% Genesis.</small>
         <label>Description<textarea data-token-description placeholder="Describe the token and its purpose"></textarea></label>
@@ -152,7 +160,10 @@
       <section class="trade-panel" role="dialog" aria-modal="true" aria-labelledby="trade-title">
         <button class="wallet-close" type="button" data-trade-close aria-label="Close">×</button>
         <p class="eyebrow">Genesis market</p>
-        <h2 id="trade-title" data-trade-title>Trade token</h2>
+        <div class="trade-title-row">
+          <img class="trade-token-image" data-trade-image alt="" hidden />
+          <h2 id="trade-title" data-trade-title>Trade token</h2>
+        </div>
         <div class="token-chart" data-token-chart>
           <div class="token-chart-meta">
             <span data-chart-price>—</span>
