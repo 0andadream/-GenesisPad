@@ -263,24 +263,18 @@
             <div class="balance-row"><span>Native THRU</span><strong data-balance>—</strong></div>
             <div class="balance-row balance-row-secondary"><span>Wrapped wTHRU</span><strong data-wthru-balance>—</strong></div>
           </div>
-          <p class="balance-hint">Pool deposits use wTHRU. Faucet pays native THRU — wrap below if Launch moved funds into wTHRU.</p>
+          <p class="balance-hint">
+            Faucet pays native THRU. Convert THRU ↔ wTHRU on the
+            <a href="#wrap" data-wallet-close>Wrap</a> page (needed for AMM pools).
+          </p>
           <button class="ink-button wallet-primary" type="button" data-faucet>Claim faucet THRU</button>
           <p class="faucet-status" data-faucet-status aria-live="polite">Free Alphanet tokens have no monetary value. Claims are signed locally and submitted directly to Thru.</p>
-          <section class="wallet-transfer wallet-swap" data-wrap-panel>
-            <p class="eyebrow">Wrap THRU ↔ wTHRU</p>
-            <p class="balance-hint" style="margin-top:0">Same official wrap as the <a href="#wrap">Wrap</a> section. 1:1 base units.</p>
-            <div class="wrap-switch" role="tablist" aria-label="Wrap direction">
-              <button class="selected" type="button" data-wrap-side="wrap">Wrap</button>
-              <button type="button" data-wrap-side="unwrap">Unwrap</button>
+          <section class="wallet-holdings">
+            <p class="eyebrow">Your tokens</p>
+            <p class="balance-hint" style="margin-top:0">Balances for Genesis markets you hold (from the public registry).</p>
+            <div class="wallet-token-list" data-wallet-tokens>
+              <div class="wallet-token-empty">Connect and trade to see token balances here.</div>
             </div>
-            <label><span data-wrap-amount-label>Amount in THRU</span>
-              <div class="wrap-amount-row">
-                <input data-wrap-amount type="number" min="0" step="0.000000001" placeholder="0.00001" />
-                <button type="button" class="wrap-max" data-wrap-max>Max</button>
-              </div>
-            </label>
-            <button class="plain-button" type="button" data-wrap-submit>Wrap THRU → wTHRU</button>
-            <p data-wrap-status aria-live="polite">Wrap before AMM pool deposits; unwrap for native fees and curve buys.</p>
           </section>
           <section class="wallet-transfer">
             <p class="eyebrow">Send THRU</p>

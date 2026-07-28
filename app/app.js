@@ -248,6 +248,69 @@ async function readWthruBalance() {
   }
 }
 
+async function refreshWalletTokenHoldings() {
+  const host = document.querySelector("[data-wallet-tokens]");
+  if (!host) return;
+  if (!connectedAccount) {
+    host.innerHTML = `<div class="wallet-token-empty">Connect a wallet to see token balances.</div>`;
+    return;
+  }
+
+  host.innerHTML = `<div class="wallet-token-empty">Loading token balances…</div>`;
+  const markets = readMarkets().filter((m) => m?.mintAddress && m?.ticker);
+  if (!markets.length) {
+    host.innerHTML = `<div class="wallet-token-empty">No markets in the registry yet.</div>`;
+    return;
+  }
+
+  const rows = [];
+  // Cap scans so a large registry doesn't stall the wallet panel.
+  const scan = markets.slice(0, 40);
+  await Promise.all(scan.map(async (market) => {
+    try {
+      const tokenAccount = deriveTokenAccountAddress(
+        client,
+        connectedAccount.address,
+        market.mintAddress,
+        TOKEN_PROGRAM,
+      );
+      if (!(await getAccountSnapshot(tokenAccount.address)).exists) return;
+      const raw = await readTokenAmount(tokenAccount.address);
+      if (raw <= 0n) return;
+      const decimals = Number(market.decimals ?? 6);
+      rows.push({
+        name: market.name || market.ticker,
+        ticker: market.ticker,
+        mint: market.mintAddress,
+        amount: formatUnits(raw, decimals),
+        raw,
+      });
+    } catch {
+      /* skip unreadable mints */
+    }
+  }));
+
+  rows.sort((a, b) => (a.raw === b.raw ? 0 : a.raw > b.raw ? -1 : 1));
+
+  if (!rows.length) {
+    host.innerHTML = `<div class="wallet-token-empty">No Genesis tokens held yet. Buy on a curve to see balances here.</div>`;
+    return;
+  }
+
+  host.innerHTML = rows.map((row) => `
+    <article class="wallet-token-row">
+      <div>
+        <strong>${row.ticker}</strong>
+        <small>${row.name}</small>
+      </div>
+      <div class="wallet-token-amount">
+        <strong>${row.amount}</strong>
+        <small title="${row.mint}">${compactAddress(row.mint)}</small>
+      </div>
+    </article>
+  `).join("");
+}
+
 async function refreshBalance() {
   if (!connectedAccount) return;
   const balance = document.querySelector("[data-balance]");
@@ -273,6 +336,8 @@ async function refreshBalance() {
     if (wthruBalance) wthruBalance.textContent = "Unavailable";
     wrapWthruEls.forEach((el) => { el.textContent = "Unavailable"; });
   }
+  // Token holdings (async; don't block THRU/wTHRU display).
+  refreshWalletTokenHoldings().catch(() => { /* ignore */ });
 }
 
 async function currentSlot() {
@@ -2217,6 +2282,10 @@ document.querySelector("[data-disconnect]")?.addEventListener("click", () => {
   if (wthruBalance) wthruBalance.textContent = "—";
   document.querySelectorAll("[data-wrap-thru-balance]").forEach((el) => { el.textContent = "—"; });
   document.querySelectorAll("[data-wrap-wthru-balance]").forEach((el) => { el.textContent = "—"; });
+  const tokenHost = document.querySelector("[data-wallet-tokens]");
+  if (tokenHost) {
+    tokenHost.innerHTML = `<div class="wallet-token-empty">Connect a wallet to see token balances.</div>`;
+  }
   showWalletView(null);
 });
 document.addEventListener("keydown", (event) => {

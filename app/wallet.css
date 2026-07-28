@@ -296,10 +296,67 @@
 }
 
 .wallet-transfer,
-.wallet-receive {
+.wallet-receive,
+.wallet-holdings {
   margin-top: 24px;
   padding: 20px;
   border: 1px solid var(--line);
+}
+
+.wallet-token-list {
+  display: grid;
+  gap: 0;
+  margin-top: 12px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: var(--light, #fafafa);
+}
+
+.wallet-token-empty {
+  padding: 14px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.wallet-token-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.wallet-token-row:last-child {
+  border-bottom: 0;
+}
+
+.wallet-token-row strong {
+  display: block;
+  font: 15px/1.2 var(--serif);
+  color: var(--ink);
+}
+
+.wallet-token-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.wallet-token-amount {
+  text-align: right;
+}
+
+.wallet-token-amount strong {
+  font: 13px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.wallet-token-amount small {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
 }
 
 .wrap-switch {
