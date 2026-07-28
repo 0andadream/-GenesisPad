@@ -24,6 +24,8 @@ let registryLiveAt = 0;
 let registrySyncing = false;
 /** Wrap page: "wrap" | "unwrap" — hoisted so balance refresh always sees it. */
 let wrapSide = "wrap";
+/** Assets available to send from the wallet (native, wTHRU, held mints). */
+let walletSendAssets = [];
 
 document.querySelectorAll("[role='tablist'] button").forEach((button) => {
   button.addEventListener("click", () => {
@@ -262,23 +264,10 @@ async function readWthruBalance() {
   }
 }
 
-async function refreshWalletTokenHoldings() {
-  const host = document.querySelector("[data-wallet-tokens]");
-  if (!host) return;
-  if (!connectedAccount) {
-    host.innerHTML = `<div class="wallet-token-empty">Connect a wallet to see token balances.</div>`;
-    return;
-  }
-
-  host.innerHTML = `<div class="wallet-token-empty">Loading token balances…</div>`;
+async function loadHeldMarketTokens() {
+  if (!connectedAccount) return [];
   const markets = readMarkets().filter((m) => m?.mintAddress && m?.ticker);
-  if (!markets.length) {
-    host.innerHTML = `<div class="wallet-token-empty">No markets in the registry yet.</div>`;
-    return;
-  }
-
   const rows = [];
-  // Cap scans so a large registry doesn't stall the wallet panel.
   const scan = markets.slice(0, 40);
   await Promise.all(scan.map(async (market) => {
     try {
@@ -297,6 +286,7 @@ async function refreshWalletTokenHoldings() {
         name: market.name || market.ticker,
         ticker: market.ticker,
         mint: market.mintAddress,
+        decimals,
         amount: formatUnits(raw, decimals),
         raw,
       });
@@ -304,15 +294,190 @@ async function refreshWalletTokenHoldings() {
       /* skip unreadable mints */
     }
   }));
-
   rows.sort((a, b) => (a.raw === b.raw ? 0 : a.raw > b.raw ? -1 : 1));
+  return rows;
+}
 
-  if (!rows.length) {
+async function rebuildWalletSendAssets() {
+  const assets = [
+    {
+      id: "thru",
+      kind: "native",
+      ticker: "THRU",
+      name: "Native THRU",
+      decimals: NATIVE_THRU_DECIMALS,
+      mint: null,
+    },
+    {
+      id: "wthru",
+      kind: "token",
+      ticker: "wTHRU",
+      name: "Wrapped THRU",
+      decimals: NATIVE_THRU_DECIMALS,
+      mint: WTHRU_MINT,
+    },
+  ];
+  if (connectedAccount) {
+    const held = await loadHeldMarketTokens();
+    for (const row of held) {
+      assets.push({
+        id: `mint:${row.mint}`,
+        kind: "token",
+        ticker: row.ticker,
+        name: row.name,
+        decimals: row.decimals,
+        mint: row.mint,
+        market: row.market,
+        raw: row.raw,
+      });
+    }
+  }
+  walletSendAssets = assets;
+  return assets;
+}
+
+function getSelectedSendAsset() {
+  const select = document.querySelector("[data-send-asset]");
+  const id = select?.value || "thru";
+  return walletSendAssets.find((a) => a.id === id) || walletSendAssets[0] || {
+    id: "thru",
+    kind: "native",
+    ticker: "THRU",
+    name: "Native THRU",
+    decimals: NATIVE_THRU_DECIMALS,
+    mint: null,
+  };
+}
+
+function populateSendAssetSelect(assets = walletSendAssets) {
+  const select = document.querySelector("[data-send-asset]");
+  if (!select) return;
+  const previous = select.value || "thru";
+  select.innerHTML = assets.map((asset) => {
+    const label = asset.kind === "native"
+      ? `${asset.ticker} (native)`
+      : asset.id === "wthru"
+        ? "wTHRU"
+        : `${asset.ticker} · ${asset.name}`;
+    return `<option value="${asset.id}">${label}</option>`;
+  }).join("");
+  if (assets.some((a) => a.id === previous)) select.value = previous;
+  else select.value = "thru";
+}
+
+async function readSendAssetBalance(asset) {
+  if (!connectedAccount || !asset) return 0n;
+  if (asset.kind === "native") {
+    const snapshot = await getAccountSnapshot();
+    return snapshot.balance || 0n;
+  }
+  if (asset.id === "wthru" || asset.mint === WTHRU_MINT) {
+    return readWthruBalance();
+  }
+  if (asset.raw != null) return asset.raw;
+  if (!asset.mint) return 0n;
+  try {
+    const tokenAccount = deriveTokenAccountAddress(
+      client,
+      connectedAccount.address,
+      asset.mint,
+      TOKEN_PROGRAM,
+    );
+    if (!(await getAccountSnapshot(tokenAccount.address)).exists) return 0n;
+    return await readTokenAmount(tokenAccount.address);
+  } catch {
+    return 0n;
+  }
+}
+
+async function refreshSendAvailable() {
+  const availableEl = document.querySelector("[data-send-available]");
+  const labelEl = document.querySelector("[data-send-balance-label]");
+  const amountLabel = document.querySelector("[data-send-amount-label]");
+  if (!availableEl) return;
+  const asset = getSelectedSendAsset();
+  if (labelEl) labelEl.textContent = `Available ${asset.ticker}`;
+  if (amountLabel) amountLabel.textContent = `Amount in ${asset.ticker}`;
+  if (!connectedAccount) {
+    availableEl.textContent = "Connect wallet";
+    return;
+  }
+  availableEl.textContent = "Loading…";
+  try {
+    const raw = await readSendAssetBalance(asset);
+    availableEl.textContent = `${formatUnits(raw, asset.decimals)} ${asset.ticker}`;
+  } catch {
+    availableEl.textContent = "Unavailable";
+  }
+}
+
+function renderReceiveAssets(heldRows = []) {
+  const host = document.querySelector("[data-receive-assets]");
+  const receiveAddress = document.querySelector("[data-receive-address]");
+  if (receiveAddress) {
+    receiveAddress.textContent = connectedAccount?.address || "—";
+  }
+  if (!host) return;
+  if (!connectedAccount) {
+    host.innerHTML = `<div class="wallet-token-empty">Connect wallet to see receivable assets.</div>`;
+    return;
+  }
+  const items = [
+    { ticker: "THRU", name: "Native THRU", note: "Sent as native balance" },
+    { ticker: "wTHRU", name: "Wrapped THRU", note: "Token mint on Thru" },
+    ...heldRows.map((row) => ({
+      ticker: row.ticker,
+      name: row.name,
+      note: compactAddress(row.mint),
+    })),
+  ];
+  // Dedupe by ticker for display (wTHRU + held markets)
+  const seen = new Set();
+  const unique = items.filter((item) => {
+    const key = item.ticker;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  host.innerHTML = unique.map((item) => `
+    <article class="receive-asset-row">
+      <div>
+        <strong>${item.ticker}</strong>
+        <small>${item.name}</small>
+      </div>
+      <small>${item.note}</small>
+    </article>
+  `).join("");
+}
+
+async function refreshWalletTokenHoldings() {
+  const host = document.querySelector("[data-wallet-tokens]");
+  if (!connectedAccount) {
+    walletSendAssets = [];
+    populateSendAssetSelect([
+      { id: "thru", kind: "native", ticker: "THRU", name: "Native THRU", decimals: NATIVE_THRU_DECIMALS, mint: null },
+      { id: "wthru", kind: "token", ticker: "wTHRU", name: "Wrapped THRU", decimals: NATIVE_THRU_DECIMALS, mint: WTHRU_MINT },
+    ]);
+    if (host) host.innerHTML = `<div class="wallet-token-empty">Connect a wallet to see token balances.</div>`;
+    renderReceiveAssets([]);
+    refreshSendAvailable().catch(() => {});
+    return;
+  }
+
+  if (host) host.innerHTML = `<div class="wallet-token-empty">Loading token balances…</div>`;
+  const held = await loadHeldMarketTokens();
+  await rebuildWalletSendAssets();
+  populateSendAssetSelect(walletSendAssets);
+  renderReceiveAssets(held);
+  refreshSendAvailable().catch(() => {});
+
+  if (!host) return;
+  if (!held.length) {
     host.innerHTML = `<div class="wallet-token-empty">No Genesis tokens held yet. Buy on a curve to see balances here.</div>`;
     return;
   }
 
-  host.innerHTML = rows.map((row) => `
+  host.innerHTML = held.map((row) => `
     <article class="wallet-token-row">
       <div class="wallet-token-meta">
         ${marketImageHtml(row.market || row, "wallet-token-avatar")}
@@ -2347,45 +2512,116 @@ async function swapThruWthru(event) {
   }
 }
 
-async function sendThru() {
+async function fillSendMax() {
+  if (!connectedAccount) return openWallet();
+  const input = document.querySelector("[data-send-amount]");
+  if (!input) return;
+  try {
+    const asset = getSelectedSendAsset();
+    const raw = await readSendAssetBalance(asset);
+    if (asset.kind === "native") {
+      const spendable = raw > NATIVE_TRANSFER_FEE ? raw - NATIVE_TRANSFER_FEE : 0n;
+      input.value = formatUnits(spendable, asset.decimals, 9);
+    } else {
+      input.value = formatUnits(raw, asset.decimals);
+    }
+  } catch {
+    const status = document.querySelector("[data-send-status]");
+    if (status) status.textContent = "Could not load balance for Max.";
+  }
+}
+
+async function sendAsset() {
   if (!connectedAccount) return openWallet();
   const button = document.querySelector("[data-send]");
   const status = document.querySelector("[data-send-status]");
-  const recipientText = document.querySelector("[data-send-address]").value.trim();
-  const amountText = document.querySelector("[data-send-amount]").value.trim();
+  const recipientText = document.querySelector("[data-send-address]")?.value.trim() || "";
+  const amountText = document.querySelector("[data-send-amount]")?.value.trim() || "";
+  const asset = getSelectedSendAsset();
   let recipient;
   let amount;
   try {
     recipient = Pubkey.from(recipientText);
-    amount = parseUnits(amountText, NATIVE_THRU_DECIMALS);
+    amount = parseUnits(amountText, asset.decimals);
     if (amount <= 0n) throw new Error("Enter an amount greater than zero.");
-    if (recipient.toThruFmt() === connectedAccount.address) throw new Error("Enter a different recipient address.");
+    if (recipient.toThruFmt() === connectedAccount.address) {
+      throw new Error("Enter a different recipient address.");
+    }
   } catch (reason) {
-    status.textContent = reason instanceof Error ? reason.message : "Enter a valid Thru address and amount.";
+    if (status) {
+      status.textContent = reason instanceof Error
+        ? reason.message
+        : "Enter a valid Thru address and amount.";
+    }
     return;
   }
 
-  button.disabled = true;
+  if (button) button.disabled = true;
   try {
-    const snapshot = await getAccountSnapshot();
-    if (snapshot.balance < amount + NATIVE_TRANSFER_FEE) {
-      throw new Error(
-        `Insufficient balance. Need ${formatUnits(amount + NATIVE_TRANSFER_FEE, NATIVE_THRU_DECIMALS, 9)} THRU ` +
-        `(incl. fee); available: ${formatUnits(snapshot.balance, NATIVE_THRU_DECIMALS, 9)} THRU.`,
-      );
+    await ensureAccountExists((message) => { if (status) status.textContent = message; });
+    const nativeSnap = await getAccountSnapshot();
+
+    if (asset.kind === "native") {
+      if (nativeSnap.balance < amount + NATIVE_TRANSFER_FEE) {
+        throw new Error(
+          `Insufficient THRU. Need ${formatUnits(amount + NATIVE_TRANSFER_FEE, NATIVE_THRU_DECIMALS, 9)} THRU ` +
+          `(incl. fee); available: ${formatUnits(nativeSnap.balance, NATIVE_THRU_DECIMALS, 9)} THRU.`,
+        );
+      }
+      if (status) {
+        status.textContent =
+          `Sending ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU…`;
+      }
+      await submitProgramInstruction(EOA_PROGRAM, {
+        accounts: { readWrite: [recipient] },
+        instructionData: nativeTransferInstruction(amount),
+        fee: NATIVE_TRANSFER_FEE,
+      });
+      if (status) {
+        status.textContent =
+          `Sent ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU to ${compactAddress(recipient.toThruFmt())}.`;
+      }
+    } else {
+      // Token / wTHRU path — still need a little native THRU for the tx fee.
+      if (nativeSnap.balance < NATIVE_TRANSFER_FEE) {
+        throw new Error(
+          "Need a little native THRU for the network fee. Claim faucet THRU first.",
+        );
+      }
+      const balance = await readSendAssetBalance(asset);
+      if (balance < amount) {
+        throw new Error(
+          `Insufficient ${asset.ticker}. Available: ${formatUnits(balance, asset.decimals)} ${asset.ticker}.`,
+        );
+      }
+      if (status) {
+        status.textContent =
+          `Preparing ${asset.ticker} accounts…`;
+      }
+      const source = asset.id === "wthru" || asset.mint === WTHRU_MINT
+        ? await getWthruTokenAccount(false)
+        : await ensureTokenAccount(connectedAccount.address, asset.mint);
+      if (!(await getAccountSnapshot(source.address)).exists) {
+        throw new Error(`No ${asset.ticker} account to send from.`);
+      }
+      const destination = await ensureTokenAccount(recipient.toThruFmt(), asset.mint);
+      if (status) {
+        status.textContent =
+          `Sending ${formatUnits(amount, asset.decimals)} ${asset.ticker}…`;
+      }
+      await submitTokenTransfer(source, destination, amount);
+      if (status) {
+        status.textContent =
+          `Sent ${formatUnits(amount, asset.decimals)} ${asset.ticker} to ${compactAddress(recipient.toThruFmt())}.`;
+      }
     }
-    status.textContent = `Sending ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU…`;
-    await submitProgramInstruction(EOA_PROGRAM, {
-      accounts: { readWrite: [recipient] },
-      instructionData: nativeTransferInstruction(amount),
-      fee: NATIVE_TRANSFER_FEE,
-    });
-    status.textContent = `Sent ${formatUnits(amount, NATIVE_THRU_DECIMALS, 9)} THRU to ${compactAddress(recipient.toThruFmt())}.`;
     await refreshBalance();
   } catch (reason) {
-    status.textContent = reason instanceof Error ? reason.message : "Transfer failed on Thru.";
+    if (status) {
+      status.textContent = reason instanceof Error ? reason.message : "Transfer failed on Thru.";
+    }
   } finally {
-    button.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -2441,7 +2677,13 @@ document.querySelectorAll("[data-wrap-submit]").forEach((button) => {
 document.querySelectorAll("[data-wrap-max]").forEach((button) => {
   button.addEventListener("click", (event) => fillWrapMax(event));
 });
-document.querySelector("[data-send]")?.addEventListener("click", sendThru);
+document.querySelector("[data-send]")?.addEventListener("click", sendAsset);
+document.querySelector("[data-send-max]")?.addEventListener("click", () => {
+  fillSendMax().catch(() => {});
+});
+document.querySelector("[data-send-asset]")?.addEventListener("change", () => {
+  refreshSendAvailable().catch(() => {});
+});
 document.querySelector("[data-disconnect]")?.addEventListener("click", () => {
   if (connectedAccount) connectedAccount.privateKey.fill(0);
   connectedAccount = null;

@@ -877,7 +877,8 @@ span.wallet-token-avatar {
   text-transform: uppercase;
 }
 
-.wallet-transfer input {
+.wallet-transfer input,
+.wallet-transfer select {
   width: 100%;
   padding: 12px;
   border: 1px solid var(--line);
@@ -885,6 +886,100 @@ span.wallet-token-avatar {
   background: var(--light);
   color: var(--ink);
   font: 13px monospace;
+}
+
+.wallet-transfer select {
+  font: 12px var(--sans);
+  cursor: pointer;
+}
+
+.send-balance-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px 10px;
+  align-items: center;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--light);
+}
+
+.send-balance-row [data-send-balance-label] {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.send-balance-row [data-send-available] {
+  min-width: 0;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-align: right;
+}
+
+.receive-address-box {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--light);
+}
+
+.receive-address-box span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.receive-address-box strong {
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.receive-address-box .plain-button {
+  width: 100%;
+  cursor: pointer;
+}
+
+.receive-asset-list {
+  display: grid;
+  gap: 0;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  background: var(--light);
+  max-height: 180px;
+  overflow: auto;
+}
+
+.receive-asset-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.receive-asset-row:last-child {
+  border-bottom: 0;
+}
+
+.receive-asset-row strong {
+  display: block;
+  font: 14px/1.2 var(--serif);
+}
+
+.receive-asset-row small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .wallet-transfer .plain-button {

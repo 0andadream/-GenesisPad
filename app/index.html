@@ -319,15 +319,36 @@
             </div>
           </section>
           <section class="wallet-transfer">
-            <p class="eyebrow">Send THRU</p>
+            <p class="eyebrow">Send</p>
+            <label>Asset
+              <select data-send-asset>
+                <option value="thru">THRU (native)</option>
+                <option value="wthru">wTHRU</option>
+              </select>
+            </label>
+            <div class="send-balance-row">
+              <span data-send-balance-label>Available</span>
+              <strong data-send-available>—</strong>
+              <button type="button" class="wrap-max" data-send-max>Max</button>
+            </div>
             <label>Recipient address<input data-send-address type="text" autocomplete="off" spellcheck="false" placeholder="ta…" /></label>
-            <label>Amount in THRU<input data-send-amount type="number" min="0" step="0.000000001" placeholder="0.00001" /></label>
+            <label><span data-send-amount-label>Amount</span>
+              <input data-send-amount type="number" min="0" step="any" placeholder="0.00" />
+            </label>
             <button class="plain-button" type="button" data-send>Send</button>
-            <p data-send-status aria-live="polite">Transfers are signed locally. One raw unit is reserved for the network fee.</p>
+            <p data-send-status aria-live="polite">Send native THRU, wTHRU, or a launched token you hold. Token sends create the recipient token account if needed. Network fee is paid in native THRU.</p>
           </section>
           <section class="wallet-receive">
-            <p class="eyebrow">Receive THRU</p>
-            <p>Share the account address shown above. Use “Copy address” to copy it without exposing your private key.</p>
+            <p class="eyebrow">Receive</p>
+            <p>One address receives everything. Share it for native THRU, wTHRU, and launched tokens.</p>
+            <div class="receive-address-box">
+              <span>Your address</span>
+              <strong data-receive-address>—</strong>
+              <button type="button" class="plain-button" data-copy-address>Copy address</button>
+            </div>
+            <div class="receive-asset-list" data-receive-assets>
+              <div class="wallet-token-empty">Connect wallet to see receivable assets.</div>
+            </div>
           </section>
           <button class="wallet-disconnect" type="button" data-disconnect>Disconnect this tab</button>
         </div>
