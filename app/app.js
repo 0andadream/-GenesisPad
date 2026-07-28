@@ -1373,29 +1373,38 @@ function mergeChartPoints(a, b) {
 function mergeCurveRecords(a, b) {
   if (!a) return b || null;
   if (!b) return a;
-  // Prefer richer curve (has key) and higher vault depth.
-  const pick = (a.privateKeyHex ? a : null) || (b.privateKeyHex ? b : null) || a;
-  const other = pick === a ? b : a;
+  // Prefer the more-traded snapshot as a coherent set. virtualThru + virtualToken
+  // must stay paired or price/chart stay flat while the other wallet moves.
   try {
     const realThruA = BigInt(a.realThru || "0");
     const realThruB = BigInt(b.realThru || "0");
-    const realTokenA = BigInt(a.realToken || "0");
-    const realTokenB = BigInt(b.realToken || "0");
     const virtThruA = BigInt(a.virtualThru || "0");
     const virtThruB = BigInt(b.virtualThru || "0");
+    const preferA = realThruA > realThruB
+      || (realThruA === realThruB && virtThruA >= virtThruB);
+    const advanced = preferA ? a : b;
+    const base = preferA ? b : a;
     return {
-      ...other,
-      ...pick,
-      realThru: (realThruA >= realThruB ? a.realThru : b.realThru) ?? pick.realThru,
-      realToken: (realTokenA >= realTokenB ? a.realToken : b.realToken) ?? pick.realToken,
-      virtualThru: (virtThruA >= virtThruB ? a.virtualThru : b.virtualThru) ?? pick.virtualThru,
-      virtualToken: pick.virtualToken ?? other.virtualToken,
+      ...base,
+      ...advanced,
+      realThru: advanced.realThru,
+      realToken: advanced.realToken,
+      virtualThru: advanced.virtualThru,
+      virtualToken: advanced.virtualToken,
       privateKeyHex: a.privateKeyHex || b.privateKeyHex,
       address: a.address || b.address,
       tokenAccount: a.tokenAccount || b.tokenAccount,
+      graduationTargetThru: advanced.graduationTargetThru || base.graduationTargetThru,
+      tradeFeeBps: advanced.tradeFeeBps ?? base.tradeFeeBps,
     };
   } catch {
-    return { ...other, ...pick, privateKeyHex: a.privateKeyHex || b.privateKeyHex };
+    return {
+      ...a,
+      ...b,
+      privateKeyHex: a.privateKeyHex || b.privateKeyHex,
+      tokenAccount: a.tokenAccount || b.tokenAccount,
+      address: a.address || b.address,
+    };
   }
 }
 
@@ -1403,10 +1412,13 @@ function mergeTwoMarkets(a, b) {
   const newer = marketTimestamp(a) >= marketTimestamp(b) ? a : b;
   const older = newer === a ? b : a;
   const chart = mergeChartPoints(a.chart, b.chart);
+  // lastPrice from newest real trade, not seed/hold flat ticks.
   let lastPrice = newer.lastPrice || older.lastPrice;
-  if (chart.length) {
-    const last = chart[chart.length - 1];
-    if (last?.price) lastPrice = String(last.price);
+  const tradePts = chart.filter((p) => p && (p.side === "buy" || p.side === "sell"));
+  if (tradePts.length && tradePts[tradePts.length - 1]?.price) {
+    lastPrice = String(tradePts[tradePts.length - 1].price);
+  } else if (chart.length && chart[chart.length - 1]?.price) {
+    lastPrice = String(chart[chart.length - 1].price);
   }
   // Recompute trade stats from merged chart.
   let buys = 0;
@@ -2076,8 +2088,40 @@ async function pushMarketsToPublic(localMarkets, { requireMint = null, attempts 
 
 function marketsSignature(markets) {
   return (markets || [])
-    .map((m) => `${m.mintAddress}:${marketTimestamp(m)}:${(m.chart || []).length}:${m.image ? 1 : 0}`)
+    .map((m) => {
+      const chart = Array.isArray(m.chart) ? m.chart : [];
+      const trades = chart.filter((p) => p && (p.side === "buy" || p.side === "sell"));
+      const lastTrade = trades.length ? trades[trades.length - 1] : null;
+      return [
+        m.mintAddress,
+        marketTimestamp(m),
+        chart.length,
+        trades.length,
+        m.lastPrice || "",
+        m.curve?.realThru || "",
+        m.curve?.virtualThru || "",
+        m.curve?.virtualToken || "",
+        lastTrade ? `${lastTrade.t}:${lastTrade.side}:${lastTrade.thru}` : "",
+        m.image ? 1 : 0,
+      ].join(":");
+    })
     .join("|");
+}
+
+/** Push trade prints + curve state so friends see candles, tape, and mark-to-market. */
+async function publishTradeActivity(market, statusEl = null) {
+  if (!market?.mintAddress) return;
+  const note = statusEl ? String(statusEl.textContent || "") : "";
+  try {
+    if (statusEl) statusEl.textContent = `${note} Publishing trade…`.trim();
+    await pushMarketsToPublic(readMarkets(), {
+      requireMint: market.mintAddress,
+      attempts: 5,
+    });
+  } catch {
+    // Soft retry — board may still catch the next poll.
+    pushMarketsToPublic(readMarkets(), { attempts: 3 }).catch(() => {});
+  }
 }
 
 /**
@@ -2169,13 +2213,20 @@ async function syncPublicMarkets({ mode = "full", publish = mode === "full" } = 
     }
     void publish;
 
-    // Keep open trade modal + chart live when remote activity lands.
-    if (before !== after && activeTrade?.mintAddress) {
+    // Keep open trade modal + chart/tape live when remote activity lands
+    // (friend buys must move your candle and appear in Trades).
+    if (activeTrade?.mintAddress) {
       const fresh = merged.find((m) => m.mintAddress === activeTrade.mintAddress);
       if (fresh) {
-        activeTrade = fresh;
-        renderTokenChart(activeTrade);
-        renderTradeTape(activeTrade);
+        const prevSig = `${(activeTrade.chart || []).length}:${activeTrade.lastPrice}:${activeTrade.curve?.virtualThru}:${activeTrade.curve?.realThru}`;
+        const nextSig = `${(fresh.chart || []).length}:${fresh.lastPrice}:${fresh.curve?.virtualThru}:${fresh.curve?.realThru}`;
+        activeTrade = resolveTradeMarket(fresh) || fresh;
+        if (before !== after || prevSig !== nextSig) {
+          renderTokenChart(activeTrade);
+          renderTradeTape(activeTrade);
+          // Refresh quote if amount field has a value.
+          try { updateTradeQuote(); } catch { /* ignore */ }
+        }
       }
     }
     return readMarkets();
@@ -3718,6 +3769,14 @@ async function openTrade(index, side) {
   if (!activeTrade) return;
   tradeModal.hidden = false;
   document.body.classList.add("modal-open");
+  // Pull latest peer trades/curve before first paint of chart + tape.
+  try {
+    await syncPublicMarkets({ mode: "full", publish: false });
+    const fresh = resolveTradeMarket(
+      readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress),
+    );
+    if (fresh) activeTrade = fresh;
+  } catch { /* offline: use local */ }
 
   const name = activeTrade.name || activeTrade.ticker || "Token";
   const ticker = activeTrade.ticker || "TOKEN";
@@ -4028,6 +4087,8 @@ async function executeCurveTrade(amount, status) {
     renderTokenChart(activeTrade);
     renderTradeTape(activeTrade);
     renderMarkets();
+    // Public board must get this print so the other wallet's chart/tape/price move.
+    await publishTradeActivity(activeTrade, status);
     await refreshTradeBalances();
     await refreshBalance();
     return;
@@ -4068,6 +4129,7 @@ async function executeCurveTrade(amount, status) {
   renderTokenChart(activeTrade);
   renderTradeTape(activeTrade);
   renderMarkets();
+  await publishTradeActivity(activeTrade, status);
   await refreshTradeBalances();
   await refreshBalance();
 }
@@ -4081,9 +4143,14 @@ async function executeTrade() {
     return;
   }
 
-  // Re-resolve from storage so we keep curve privateKeyHex after a thin sync.
+  // Pull peer trades first so quotes use the latest curve (friend's buy marks you up).
+  try {
+    await syncPublicMarkets({ mode: "full", publish: false });
+  } catch { /* ignore */ }
   if (activeTrade?.mintAddress) {
-    activeTrade = resolveTradeMarket(activeTrade) || activeTrade;
+    activeTrade = resolveTradeMarket(
+      readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress) || activeTrade,
+    ) || activeTrade;
   }
 
   const value = document.querySelector("[data-trade-amount]").value;
@@ -4248,17 +4315,24 @@ async function bootMarkets() {
     } catch { /* ignore */ }
   }, 2000);
 
-  // Adaptive poll: stay hot while the board is changing, back off when quiet.
+  // Adaptive poll: stay hot while the board is changing or a trade modal is open
+  // (so friend buys show up on chart/tape quickly).
   let pollMs = REGISTRY_POLL_FAST_MS;
   const schedulePoll = () => {
     window.setTimeout(async () => {
       try {
+        const tradeOpen = activeTrade
+          && document.querySelector("[data-trade-modal]")?.hidden === false;
         const before = marketsSignature(readMarkets());
         await syncPublicMarkets({ mode: "full", publish: true });
         const after = marketsSignature(readMarkets());
         if (before !== after) {
           renderMarkets();
           pollMs = REGISTRY_POLL_FAST_MS;
+        } else if (tradeOpen) {
+          // Stay hot while watching a market so peer trades land fast.
+          pollMs = REGISTRY_POLL_FAST_MS;
+          updateRegistryLiveBadge();
         } else {
           updateRegistryLiveBadge();
           pollMs = Math.min(REGISTRY_POLL_SLOW_MS, pollMs + 1500);
@@ -4273,15 +4347,17 @@ async function bootMarkets() {
 
   // Live badge clock.
   setInterval(updateRegistryLiveBadge, 1000);
-  // Keep open candle chart ticking (current interval bar advances with wall clock).
+  // Keep open chart/tape fresh while trading (pull storage + re-render).
   setInterval(() => {
     if (activeTrade && document.querySelector("[data-trade-modal]")?.hidden === false) {
-      const fresh = readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress);
+      const fresh = resolveTradeMarket(
+        readMarkets().find((m) => m.mintAddress === activeTrade.mintAddress),
+      );
       if (fresh) activeTrade = fresh;
       renderTokenChart(activeTrade);
       renderTradeTape(activeTrade);
     }
-  }, 15_000);
+  }, 3_000);
 }
 
 bootMarkets();

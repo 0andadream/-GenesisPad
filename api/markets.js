@@ -78,55 +78,70 @@ function isProbeMint(mid) {
   );
 }
 
+function mergeChartPoints(a, b) {
+  const map = new Map();
+  for (const p of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
+    if (!p) continue;
+    const key = `${Number(p.t) || 0}|${p.side || ""}|${p.price || ""}|${p.thru || ""}|${p.tokens || ""}`;
+    if (!map.has(key)) map.set(key, p);
+  }
+  return [...map.values()]
+    .sort((x, y) => (Number(x.t) || 0) - (Number(y.t) || 0))
+    .slice(-120);
+}
+
+/**
+ * Prefer the more-traded curve snapshot as a coherent set (virtualThru +
+ * virtualToken must stay paired). Never drop privateKeyHex / tokenAccount.
+ */
+function mergeCurveRecords(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  let realThruA = 0n;
+  let realThruB = 0n;
+  let virtThruA = 0n;
+  let virtThruB = 0n;
+  try { realThruA = BigInt(a.realThru || "0"); } catch { /* ignore */ }
+  try { realThruB = BigInt(b.realThru || "0"); } catch { /* ignore */ }
+  try { virtThruA = BigInt(a.virtualThru || "0"); } catch { /* ignore */ }
+  try { virtThruB = BigInt(b.virtualThru || "0"); } catch { /* ignore */ }
+  // Most advanced state = deepest vault, then highest virtual THRU (more buys).
+  const preferA = realThruA > realThruB
+    || (realThruA === realThruB && virtThruA >= virtThruB);
+  const advanced = preferA ? a : b;
+  const base = preferA ? b : a;
+  return {
+    ...base,
+    ...advanced,
+    privateKeyHex: a.privateKeyHex || b.privateKeyHex,
+    tokenAccount: a.tokenAccount || b.tokenAccount,
+    address: a.address || b.address,
+    realThru: advanced.realThru,
+    realToken: advanced.realToken,
+    virtualThru: advanced.virtualThru,
+    virtualToken: advanced.virtualToken,
+    graduationTargetThru: advanced.graduationTargetThru || base.graduationTargetThru,
+    tradeFeeBps: advanced.tradeFeeBps ?? base.tradeFeeBps,
+  };
+}
+
 /**
  * Deep-merge two market records for the same mint.
- * Critical: never drop bonding-curve privateKeyHex / tokenAccount when a
- * newer partial update (chart-only) overwrites a complete launch record —
- * without the key, buys/sells fail with "no bonding curve".
+ * Critical: merge charts (all trades) and coherent curve state so friends see
+ * each other's buys/sells and price moves.
  */
 function mergeTwoMarkets(prev, next) {
   if (!prev) return next;
   if (!next) return prev;
   const newer = score(next) >= score(prev) ? next : prev;
   const older = newer === next ? prev : next;
-  const curveA = prev.curve || null;
-  const curveB = next.curve || null;
-  let curve = null;
-  if (curveA || curveB) {
-    const pick = (curveA?.privateKeyHex ? curveA : null)
-      || (curveB?.privateKeyHex ? curveB : null)
-      || curveA
-      || curveB;
-    const other = pick === curveA ? curveB : curveA;
-    curve = {
-      ...(other || {}),
-      ...(pick || {}),
-      privateKeyHex: curveA?.privateKeyHex || curveB?.privateKeyHex || pick?.privateKeyHex,
-      tokenAccount: curveA?.tokenAccount || curveB?.tokenAccount || pick?.tokenAccount,
-      address: curveA?.address || curveB?.address || pick?.address,
-      virtualThru: pick?.virtualThru ?? other?.virtualThru,
-      virtualToken: pick?.virtualToken ?? other?.virtualToken,
-      realThru: (() => {
-        try {
-          const a = BigInt(curveA?.realThru || "0");
-          const b = BigInt(curveB?.realThru || "0");
-          return (a >= b ? curveA?.realThru : curveB?.realThru) ?? pick?.realThru;
-        } catch {
-          return pick?.realThru ?? other?.realThru;
-        }
-      })(),
-      realToken: (() => {
-        try {
-          const a = BigInt(curveA?.realToken || "0");
-          const b = BigInt(curveB?.realToken || "0");
-          return (a >= b ? curveA?.realToken : curveB?.realToken) ?? pick?.realToken;
-        } catch {
-          return pick?.realToken ?? other?.realToken;
-        }
-      })(),
-      graduationTargetThru: pick?.graduationTargetThru || other?.graduationTargetThru,
-      tradeFeeBps: pick?.tradeFeeBps ?? other?.tradeFeeBps,
-    };
+  const chart = mergeChartPoints(prev.chart, next.chart);
+  let lastPrice = newer.lastPrice || older.lastPrice;
+  const tradePts = chart.filter((p) => p && (p.side === "buy" || p.side === "sell"));
+  const lastTrade = tradePts.length ? tradePts[tradePts.length - 1] : null;
+  if (lastTrade?.price) lastPrice = String(lastTrade.price);
+  else if (chart.length && chart[chart.length - 1]?.price) {
+    lastPrice = String(chart[chart.length - 1].price);
   }
   return {
     ...older,
@@ -134,12 +149,11 @@ function mergeTwoMarkets(prev, next) {
     createdAt: older.createdAt || newer.createdAt,
     updatedAt: Math.max(score(prev), score(next)),
     image: newer.image || older.image || "",
-    curve,
+    curve: mergeCurveRecords(prev.curve, next.curve),
     graduated: Boolean(prev.graduated || next.graduated),
     liquidity: prev.liquidity || next.liquidity || false,
-    chart: Array.isArray(newer.chart) && newer.chart.length
-      ? newer.chart
-      : (Array.isArray(older.chart) ? older.chart : []),
+    chart,
+    lastPrice,
   };
 }
 
